@@ -1,0 +1,7 @@
+/* Fixture: every line below must be flagged. Used by `design-lint --self-test`. */
+.a { color: #ff0000; }
+.b { background: rgba(0, 0, 0, .5); }
+.c { border-color: white; }
+.d { font-family: Arial, sans-serif; }
+.e { font-size: 13px; }
+.f { color: var(--color-text-nonexistent); }

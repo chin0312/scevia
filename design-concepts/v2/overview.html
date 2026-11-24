@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Scevia — Overview (v2 concept)</title>
+<link rel="stylesheet" href="assets/components.css">
+<style>
+  .hero-card .card-b { padding-top: var(--space-4); }
+  .hero-top { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--space-4); }
+  .hero-sub { display: flex; align-items: center; gap: var(--space-3); margin-top: var(--space-3); font-size: var(--font-size-sm); color: var(--color-text-secondary); }
+  .changes li { list-style: none; display: grid; grid-template-columns: 28px 1fr; gap: var(--space-3); padding: var(--space-4) 0; border-top: 1px solid var(--color-border-subtle); font-size: var(--font-size-sm); color: var(--color-text-secondary); }
+  .changes li:first-child { border-top: 0; padding-top: 0; }
+  .changes b { color: var(--color-text-primary); font-weight: var(--font-weight-medium); }
+  .changes .ic { width: 28px; height: 28px; border-radius: var(--radius-md); display: grid; place-items: center; }
+  .changes .ic svg { width: 15px; height: 15px; }
+  .changes a { display: inline-block; margin-top: var(--space-1); margin-right: var(--space-3); color: var(--color-text-primary); font-weight: var(--font-weight-medium); font-size: var(--font-size-xs); }
+  .alloc > div { min-width: 0; }
+  .alloc { display: grid; grid-template-columns: 132px 1fr; gap: var(--space-5); align-items: center; }
+  .donut-wrap { position: relative; }
+  .donut-wrap .c { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; }
+  .donut-wrap .c b { display: block; font-size: var(--font-size-lg); font-weight: var(--font-weight-semibold); }
+  .al-row { display: grid; grid-template-columns: 10px 1fr auto 40px; gap: var(--space-3); align-items: center; padding: var(--space-2) 0; font-size: var(--font-size-sm); }
+  .al-row i { width: 10px; height: 10px; border-radius: 3px; }
+  .tl-row { display: grid; grid-template-columns: 52px 1fr auto; gap: var(--space-3); padding: var(--space-3) 0; border-top: 1px solid var(--color-border-subtle); align-items: center; }
+  .tl-row:first-child { border-top: 0; padding-top: 0; }
+  .date { text-align: center; border-radius: var(--radius-md); background: var(--color-bg-raised); padding: var(--space-1) 0; }
+  .date b { display: block; font-size: var(--font-size-lg); font-weight: var(--font-weight-semibold); line-height: var(--line-height-tight); }
+  .date span { font-size: var(--font-size-caption); color: var(--color-text-tertiary); text-transform: uppercase; letter-spacing: var(--tracking-caps); }
+  .tl-row .t { font-size: var(--font-size-sm); }
+  .tl-row .t small { display: block; color: var(--color-text-tertiary); font-size: var(--font-size-xs); margin-top: 2px; }
+  .cov { display: grid; grid-template-columns: auto 1fr auto; gap: var(--space-3); align-items: center; padding: var(--space-3) 0; border-top: 1px solid var(--color-border-subtle); font-size: var(--font-size-sm); }
+  .ring-wrap { display: flex; gap: var(--space-4); align-items: center; margin-bottom: var(--space-3); }
+  .ring-wrap b { font-size: var(--font-size-2xl); font-weight: var(--font-weight-semibold); display: block; }
+</style></head>
+<body>
+<div id="topbar"></div>
+<div class="shell">
+  <aside class="rail">
+    <div><h6 class="caps">Overview</h6>
+      <ol>
+        <li><a href="#summary" class="on" data-i="home">Summary</a></li>
+        <li><a href="#holdings" data-i="list">Holdings <span class="count">10</span></a></li>
+        <li><a href="#allocation" data-i="pie">Allocation</a></li>
+        <li><a href="#upcoming" data-i="cal">Upcoming <span class="count">4</span></a></li>
+        <li><a href="#coverage" data-i="db">Data coverage <span class="flag">2</span></a></li>
+      </ol></div>
+    <div class="rail-card">
+      <b>Connected sources</b>
+      <div class="row"><span class="plat pm">P</span>Polymarket<span class="mono">0x7a…1c</span></div>
+      <div class="row"><span class="plat ks">K</span>Kalshi<span>CSV · 2d</span></div>
+      <a class="row t3" href="#">+ Add source</a>
+    </div>
+  </aside>
+
+  <main>
+    <section class="page-head anchor" id="summary">
+      <div><div class="caps">Connected portfolio · Polymarket + Kalshi</div><h1>Good evening, Alex</h1></div>
+      <div class="actions">
+        <div class="pills"><span class="pill on">All <span class="n">10</span></span><span class="pill">Polymarket <span class="n">6</span></span><span class="pill">Kalshi <span class="n">4</span></span></div>
+        <button class="btn" data-i="download">Export</button>
+      </div>
+    </section>
+
+    <div class="grid g-21">
+      <div class="card hero-card">
+        <div class="card-h">
+          <div class="tabs"><a class="on">Value</a><a>Net P&amp;L</a><a>Return %</a></div>
+          <div class="seg"><button>1W</button><button>1M</button><button>3M</button><button class="on">6M</button><button>YTD</button><button>All</button></div>
+        </div>
+        <div class="card-b">
+          <div class="hero-top">
+            <div>
+              <div class="caps" style="display:flex;gap:var(--space-1);align-items:center">Total value <span class="itip">i</span></div>
+              <div class="hero-fig" style="margin-top:var(--space-2)" id="hero"></div>
+              <div class="hero-sub"><span class="delta gain">▲ +$6,262.40</span><span>net P&amp;L after fees · +21.8% on net deposits</span></div>
+            </div>
+            <div class="legend" style="margin-top:var(--space-6)"><span><i class="ln" style="background:var(--color-gain-fg)"></i>Portfolio value</span><span><i class="dash"></i>Net deposits</span></div>
+          </div>
+          <div class="chart" id="valueChart" style="margin-top:var(--space-4)"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><div><h3>Summary</h3><p>Since your last visit · Nov 19</p></div></div>
+        <div class="card-b" style="display:flex;flex-direction:column;gap:var(--space-5)">
+          <p class="summary" style="font-size:var(--font-size-md)">You’re up <b class="gain">+$418</b> this week, mostly from the <a href="#">shutdown</a> and <a href="#">Fed</a> positions. <b>78%</b> of your value is committed to open contracts, and <b>3 events</b> resolve before Dec 16.</p>
+          <ul class="changes">
+            <li><span class="ic" style="background:var(--color-gain-bg);color:var(--color-gain-fg)">▲</span><div><b>Shutdown YES</b> moved 0.41 → 0.47 (+$420). It’s now your 3rd-largest position.<br><a href="#">View</a><a href="scenario-lab.html">Simulate a trim →</a></div></li>
+            <li><span class="ic" style="background:var(--color-warn-bg);color:var(--color-warn-fg)">!</span><div><b>$7,971 resolves in 22 days</b>, 29% of committed capital.<br><a href="risk.html">Open in Risk →</a></div></li>
+            <li><span class="ic" style="background:var(--color-accent-bg);color:var(--color-accent-fg)">⇄</span><div>Same Fed outcome on <b>two platforms</b>. If NO, you lose <b class="loss">−$4,266</b> combined.<br><a href="risk.html">See event →</a></div></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="tiles">
+      <div class="tile"><div class="l">Realized P&amp;L <span class="itip">i</span></div><div class="v gain">+$4,870.40</div><div class="f">after $412.60 fees</div></div>
+      <div class="tile"><div class="l">Unrealized P&amp;L <span class="itip">i</span></div><div class="v gain">+$1,392.00</div><div class="f">10 open · at mark price</div></div>
+      <div class="tile"><div class="l">Capital committed <span class="itip">i</span></div><div class="v">$27,266</div><div class="f">78% of total value</div></div>
+      <div class="tile"><div class="l">Cash available <span class="itip">i</span></div><div class="v">$6,345.20</div><div class="f">Poly $4,102 · Kalshi $2,243</div></div>
+      <div class="tile"><div class="l">Win rate, resolved <span class="itip">i</span></div><div class="v">58%</div><div class="f">37 of 64 · avg win $312</div></div>
+    </div>
+
+    <div class="card anchor" id="holdings" style="margin-top:var(--space-4)">
+      <div class="card-h" style="padding-bottom:var(--space-4);align-items:center">
+        <div class="tabs"><a class="on">Open positions · 10</a><a>Resolved · 64</a><a>Activity</a></div>
+        <div class="actions"><div class="pills"><span class="pill on">All categories</span><span class="pill">Economics</span><span class="pill">Climate</span><span class="pill">Crypto</span><span class="pill">Politics</span><span class="pill">Sports</span></div></div>
+      </div>
+      <table class="dt"><thead><tr><th>Market</th><th>Side</th><th class="r">Shares</th><th class="r">Avg → Mark</th><th class="r">Value</th><th class="r">Unrealized</th><th>If it resolves against / for you</th><th>Resolves</th><th></th></tr></thead><tbody id="hold"></tbody></table>
+      <div class="foot"><span>Mark = last traded price on the source platform. Values exclude estimated exit fees.</span><span>Sorted by value</span></div>
+    </div>
+
+    <div class="grid g-3" style="margin-top:var(--space-4)">
+      <div class="card anchor" id="allocation">
+        <div class="card-h"><div><h3>Allocation</h3><p>Market value of open positions</p></div><div class="seg"><button class="on">Category</button><button>Platform</button></div></div>
+        <div class="card-b alloc"><div class="donut-wrap"><div id="donut"></div><div class="c"><div><b>$28,658</b><span class="t3" style="font-size:var(--font-size-xs)">10 positions</span></div></div></div><div id="allocList"></div></div>
+      </div>
+      <div class="card anchor" id="upcoming">
+        <div class="card-h"><div><h3>Upcoming resolutions</h3><p>Next 40 days · capital at stake</p></div><a class="btn btn-sm btn-ghost" href="risk.html">Calendar</a></div>
+        <div class="card-b">
+          <div class="tl-row"><div class="date"><b>2</b><span>Dec</span></div><div class="t">ETH ETFs net inflows &gt; $1B<small>Kalshi · YES · in 8 days</small></div><span>$1,575</span></div>
+          <div class="tl-row"><div class="date"><b>10</b><span>Dec</span></div><div class="t">Nov CPI YoY above 3.0%<small>Kalshi · NO · in 16 days</small></div><span>$2,130</span></div>
+          <div class="tl-row"><div class="date"><b>16</b><span>Dec</span></div><div class="t">Dec FOMC decision <span class="chip accent">2 contracts</span><small>Kalshi + Polymarket · YES · in 22 days</small></div><span>$4,266</span></div>
+          <div class="tl-row"><div class="date"><b>31</b><span>Dec</span></div><div class="t">Bitcoin above $150k<small>Polymarket · YES · in 37 days</small></div><span>$2,720</span></div>
+        </div>
+      </div>
+      <div class="card anchor" id="coverage">
+        <div class="card-h"><div><h3>Data coverage</h3><p>What these numbers are based on</p></div></div>
+        <div class="card-b">
+          <div class="ring-wrap"><svg width="56" height="56" viewBox="0 0 36 36"><circle cx="18" cy="18" r="15" fill="none" style="stroke:var(--color-bg-raised)" stroke-width="4"/><circle cx="18" cy="18" r="15" fill="none" style="stroke:var(--color-gain-fg)" stroke-width="4" stroke-dasharray="92.4 94.3" transform="rotate(-90 18 18)" stroke-linecap="round"/></svg><div><b>98%</b><span class="t3" style="font-size:var(--font-size-xs)">of fills fully reconciled</span></div></div>
+          <div class="cov"><span class="plat pm">P</span><span>412 fills · 41 settlements</span><span class="t3">Live · 4m</span></div>
+          <div class="cov"><span class="plat ks">K</span><span>188 fills · 23 settlements</span><span class="t3">CSV · 2d</span></div>
+          <div class="callout warn" style="margin-top:var(--space-3)" data-i="alert"><span>2 Kalshi settlements are missing fee detail. Net P&amp;L may be off by up to $6. <a href="#">Review</a></span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer-note"><span>Scevia is read-only. It never places trades or holds funds. Figures are for analysis, not investment advice.</span><span>Sample portfolio · fictional data</span></div>
+  </main>
+</div>
+<script src="assets/app.js"></script>
+<script src="assets/data.js"></script>
+<script>
+shell('Overview'); spy();
+document.getElementById('hero').innerHTML = heroFig(35003.20);
+
+const r = rng(11), N = 27, dep = [], val = []; let pnl = 2347.65;
+for (let i = 0; i < N; i++) { const d = i < 9 ? 20000 : i < 18 ? 25000 : 28740.80; pnl += (r() - 0.40) * 900 + (i === 12 ? 620 : 0) - (i === 20 ? 540 : 0); dep.push(d); val.push(d + pnl); }
+const adj = (35003.20 - val[N - 1]) / 8; for (let i = N - 8; i < N; i++) val[i] += adj * (i - (N - 9));
+lineChart(document.getElementById('valueChart'), {
+  w: 820, h: 250, min: 18000, max: 36500, yTicks: [20000, 25000, 30000, 35000], yFmt: kfmt,
+  series: [{ data: dep, color: 'var(--color-text-tertiary)', dash: '4 4', width: 1.4, step: true }, { data: val, color: 'var(--color-gain-fg)', area: .22, width: 2.2 }],
+  xLabels: [[0, 'May 24'], [4, 'Jun'], [9, 'Jul'], [13, 'Aug'], [17, 'Sep'], [22, 'Oct'], [26, 'Nov 24']],
+  events: [5, 8, 12, 16, 20, 23], markers: [{ i: 16, s: 1 }],
+});
+const vx = 48 + 16 / 26 * (820 - 60);
+document.getElementById('valueChart').insertAdjacentHTML('beforeend', `<div class="tip" style="left:${vx / 820 * 100}%;top:var(--space-2);transform:translateX(-50%)"><div class="t3">Week of Sep 7</div><b>${fmt(val[16],2)}</b><div class="t3" style="margin-top:2px">2 positions resolved this week</div></div>`);
+
+const sorted = [...POS].sort((a, b) => b.val - a.val);
+document.getElementById('hold').innerHTML = sorted.map((p, k) => {
+  const w = (v) => Math.min(Math.abs(v) / 8000 * 100, 100);
+  return `<tr class="${k === 2 ? 'hover' : ''}"><td><div class="mk">${platBadge(p.p)}<div><b>${p.m}</b><small>${p.cat} · ${p.ev}</small></div></div></td>
+  <td><span class="chip ${p.side === 'YES' ? 'yes' : 'no'}">${p.side}</span></td>
+  <td class="r">${p.sh.toLocaleString()}</td><td class="r"><span class="t3">${p.avg.toFixed(2)}</span> → ${p.mark.toFixed(2)}</td>
+  <td class="r">${fmt(p.val)}</td><td class="r ${p.upl >= 0 ? 'gain' : 'loss'}">${sfmt(p.upl)}</td>
+  <td><div style="display:flex;align-items:center;gap:var(--space-2)"><span class="loss" style="width:52px;text-align:right;font-size:var(--font-size-xs)">${kfmt(-p.cost)}</span><div class="payoff"><div class="n"><i style="width:${w(p.cost)}%"></i></div><div class="z"></div><div class="p"><i style="width:${w(p.ifWin)}%"></i></div></div><span class="gain" style="font-size:var(--font-size-xs)">+${kfmt(p.ifWin).slice(1)}</span></div></td>
+  <td class="t2">${p.res}</td><td class="r"><span class="row-act"><a class="btn btn-sm" href="scenario-lab.html">${icon('flask')}Simulate</a></span></td></tr>`;
+}).join('');
+
+const cats = {}; POS.forEach((p) => (cats[p.cat] = (cats[p.cat] || 0) + p.val));
+const parts = Object.entries(cats).sort((a, b) => b[1] - a[1]).map(([k, v]) => ({ k, v, c: CAT_COLORS[k] }));
+donut(document.getElementById('donut'), parts, 132, 14);
+document.getElementById('allocList').innerHTML = parts.map((p) => `<div class="al-row"><i style="background:${p.c}"></i><span>${p.k}</span><span>${fmt(p.v)}</span><span class="t3 r">${(p.v / 28658 * 100).toFixed(0)}%</span></div>`).join('')
+  + `<div class="callout info" style="margin-top:var(--space-3)">${icon('info')}<span>Climate is one position: <b>29%</b> of value rides on a single NOAA report.</span></div>`;
+</script>
+</body></html>

@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Scevia — Analytics (v2 concept)</title>
+<link rel="stylesheet" href="assets/components.css">
+<style>
+  .hl { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); }
+  .hl-group { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+  .hl-group h5 { grid-column: 1 / -1; }
+  .hl-tile { border-radius: var(--radius-lg); padding: var(--space-4) var(--space-5); border: 1px solid var(--color-border-subtle); }
+  .hl-tile.good { background: var(--color-gain-bg); }
+  .hl-tile.bad { background: var(--color-loss-bg); }
+  .hl-tile.neutral { background: var(--color-bg-raised); }
+  .hl-tile .l { font-size: var(--font-size-xs); color: var(--color-text-secondary); }
+  .hl-tile .v { font-size: var(--font-size-3xl); font-weight: var(--font-weight-semibold); letter-spacing: var(--tracking-tight); margin-top: var(--space-1); }
+  .hl-tile .f { font-size: var(--font-size-xs); color: var(--color-text-secondary); margin-top: 2px; }
+  .attr { display: grid; grid-template-columns: 90px 1fr 1fr 80px 36px; align-items: center; padding: var(--space-2) 0; font-size: var(--font-size-sm); border-bottom: 1px solid var(--color-border-subtle); }
+  .attr:last-child { border-bottom: 0; }
+  .attr .ng { display: flex; justify-content: flex-end; border-right: 1px solid var(--color-border-strong); height: 20px; align-items: center; }
+  .attr .ps { display: flex; height: 20px; align-items: center; }
+  .attr i { display: block; height: 12px; }
+  .attr .ng i { background: var(--color-loss-fg); border-radius: var(--radius-sm) 0 0 var(--radius-sm); opacity: .75; }
+  .attr .ps i { background: var(--color-gain-fg); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+  .bucket { display: grid; grid-template-columns: 96px 1fr 50px 80px; gap: var(--space-4); align-items: center; padding: var(--space-3) 0; border-bottom: 1px solid var(--color-border-subtle); font-size: var(--font-size-sm); }
+  .bucket:last-child { border-bottom: 0; }
+  .cal { position: relative; height: 22px; border-radius: var(--radius-sm); background: var(--color-bg-raised); }
+  .cal .a { position: absolute; inset: 0 auto 0 0; border-radius: var(--radius-sm); background: var(--color-data-1); opacity: .45; }
+  .cal .m { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--color-text-primary); }
+  .cal > span { position: absolute; left: var(--space-2); top: 2px; font-size: var(--font-size-xs); }
+  table.cmp td, table.cmp th { padding-top: var(--space-2); padding-bottom: var(--space-2); }
+</style></head>
+<body>
+<div id="topbar"></div>
+<div class="shell">
+  <aside class="rail">
+    <div><h6 class="caps">Analytics</h6>
+      <ol>
+        <li><a href="#summary" class="on" data-i="home">Summary</a></li>
+        <li><a href="#highlights" data-i="grid">Highlights</a></li>
+        <li><a href="#pnl" data-i="trend">P&amp;L over time</a></li>
+        <li><a href="#attribution" data-i="bars">Attribution</a></li>
+        <li><a href="#patterns" data-i="spark">Patterns <span class="count">3</span></a></li>
+        <li><a href="#entry" data-i="target">Entry price</a></li>
+        <li><a href="#metrics" data-i="table">Metrics table</a></li>
+      </ol></div>
+    <div><h6 class="caps">Saved views</h6>
+      <ol><li><a href="#" data-i="layers">Monthly review</a></li><li><a href="#" data-i="layers">Sports only</a></li></ol></div>
+    <div class="rail-card"><b>Definitions</b>Net P&amp;L = realized + unrealized − fees. Deposits and withdrawals never count as performance.</div>
+  </aside>
+
+  <main>
+    <section class="page-head anchor" id="summary">
+      <div><div class="caps">Performance · Jun 1 – Nov 24, 2026</div><h1>Where your results come from</h1></div>
+      <div class="actions"><div class="seg"><button>1M</button><button>3M</button><button class="on">6M</button><button>YTD</button><button>All</button></div><button class="btn" data-i="compare">vs. prior 6M</button><button class="btn" data-i="download">Export</button></div>
+    </section>
+
+    <p class="summary">Over the last 6 months you made <b class="gain">+$3,914.75</b> after fees, <b>$1,206 more</b> than the prior 6 months. <a href="#attribution">Economics</a> produced over half of it. Your weak spot is <a href="#patterns">longshot contracts under $0.25</a>, which lost <b class="loss">−$1,182</b> across 23 trades. Your worst stretch was August, after the <a href="#">Fed hold</a>.</p>
+
+    <section class="card anchor" id="highlights">
+      <div class="card-h"><div><h3>Highlights</h3><p>Compared with the prior 6 months</p></div></div>
+      <div class="card-b hl">
+        <div class="hl-group"><h5 class="caps">Return</h5>
+          <div class="hl-tile good"><div class="l">Net P&amp;L</div><div class="v gain">+$3,915</div><div class="f">▲ $1,206 vs prior</div></div>
+          <div class="hl-tile good"><div class="l">Return on capital deployed</div><div class="v gain">+14.4%</div><div class="f">▲ 3.1 pts vs prior</div></div>
+        </div>
+        <div class="hl-group"><h5 class="caps">Risk &amp; consistency</h5>
+          <div class="hl-tile bad"><div class="l">Largest drawdown</div><div class="v loss">−$1,402</div><div class="f">Aug 4 – Aug 19 · recovered in 24 days</div></div>
+          <div class="hl-tile neutral"><div class="l">Win rate <span class="t3">· n = 41</span></div><div class="v">61%</div><div class="f">profit factor 1.42</div></div>
+        </div>
+      </div>
+    </section>
+
+    <div class="grid g-21">
+      <section class="card anchor" id="pnl">
+        <div class="card-h"><div><h3>Cumulative net P&amp;L</h3><p>Line: cumulative including unrealized · Bars: realized each month</p></div><div class="tabs"><a class="on">Net</a><a>Realized</a><a>By platform</a></div></div>
+        <div class="card-b"><div class="chart" id="pnlChart"></div>
+          <div class="legend" style="margin-top:var(--space-3)"><span><i class="ln" style="background:var(--color-text-primary)"></i>Cumulative net P&amp;L</span><span><i style="background:var(--color-gain-fg)"></i>Realized gain month</span><span><i style="background:var(--color-loss-fg)"></i>Realized loss month</span><span><i class="dash"></i>Prior 6M</span></div></div>
+      </section>
+      <section class="card anchor" id="attribution">
+        <div class="card-h"><div><h3>Attribution</h3><p>Net P&amp;L by category, after fees</p></div><div class="seg"><button class="on">Category</button><button>Platform</button></div></div>
+        <div class="card-b"><div id="attr"></div>
+          <div class="callout info" style="margin-top:var(--space-4)" data-i="info"><span><b>Economics</b> made 53% of gains from 34% of trades. <a href="#">Break down by event</a></span></div></div>
+      </section>
+    </div>
+
+    <section class="anchor" id="patterns" style="margin-top:var(--space-4)">
+      <div class="grid g-3">
+        <div class="card insight"><span class="chip no" style="align-self:flex-start">Losses</span><h4>Longshots under $0.25 cost you <span class="loss">−$1,182</span></h4><p>You won 3 of 23 (13%). Their entry prices implied about 14%. Most of these were Sports.</p><div class="meta"><span>n = 23 · moderate confidence</span><a href="#">See trades →</a></div></div>
+        <div class="card insight"><span class="chip info" style="align-self:flex-start">Exits</span><h4>Early exits left <span class="gain">+$640</span> on the table</h4><p>9 of 14 positions you sold early later settled in your favour. This is hindsight: you also avoided risk.</p><div class="meta"><span>n = 14 · hindsight view</span><a href="#">Review exits →</a></div></div>
+        <div class="card insight"><span class="chip yes" style="align-self:flex-start">Strength</span><h4>Economics is your most consistent category</h4><p>71% win rate, and no single trade is more than 18% of the category’s P&amp;L. The result isn’t one lucky outcome.</p><div class="meta"><span>n = 14 · small sample</span><a href="#">Open category →</a></div></div>
+      </div>
+    </section>
+
+    <div class="grid g-2" style="margin-top:var(--space-4)">
+      <section class="card anchor" id="entry">
+        <div class="card-h"><div><h3>Entry price vs. outcome</h3><p>How often you won vs. what the price implied</p></div></div>
+        <div class="card-b"><div class="bucket t3" style="font-size:var(--font-size-xs);padding-top:0"><span>Entry price</span><span>Your win rate · ▏implied</span><span class="r">Trades</span><span class="r">Net P&amp;L</span></div><div id="buckets"></div>
+          <div class="callout warn" style="margin-top:var(--space-3)" data-i="alert"><span>Every bucket has fewer than 30 trades, so these gaps may be noise. Treat this as something to watch, not a verdict.</span></div></div>
+      </section>
+      <section class="card anchor" id="metrics" style="overflow:hidden">
+        <div class="card-h" style="padding-bottom:var(--space-3)"><div><h3>Metrics</h3><p>This period vs. prior period</p></div><a class="btn btn-sm btn-ghost" data-i="download">CSV</a></div>
+        <table class="dt cmp"><thead><tr><th>Metric</th><th class="r">Jun–Nov 2026</th><th class="r">Dec 25–May 26</th><th class="r">Change</th></tr></thead><tbody id="cmp"></tbody></table>
+      </section>
+    </div>
+
+    <div class="footer-note"><span>Analytics describe past results. They don’t predict future ones and aren’t investment advice.</span><span>Sample portfolio · fictional data</span></div>
+  </main>
+</div>
+<script src="assets/app.js"></script>
+<script>
+shell('Analytics'); spy();
+// P&L chart: bars + cumulative line + prior
+const r = rng(7), N = 26, cum = [], prior = []; let c = 0, pc = 0;
+for (let i = 0; i < N; i++) { c += (r() - 0.38) * 320 + (i === 6 ? 520 : 0) - (i === 10 ? 900 : 0); pc += (r() - 0.43) * 260; cum.push(c); prior.push(pc); }
+const adj = (3914.75 - cum[N - 1]) / (N - 1); for (let i = 0; i < N; i++) cum[i] += adj * i;
+(() => {
+  const W = 760, H = 330, P = { l: 48, r: 12, t: 16, b: 26 }, min = -1000, max = 4500;
+  const y = (v) => P.t + (1 - (v - min) / (max - min)) * (H - P.t - P.b), x = (i) => P.l + (i / (N - 1)) * (W - P.l - P.r);
+  const months = [410, 1180, -320, 860, 540, 432.35], ml = ['Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov'], bw = (W - P.l - P.r) / 6;
+  let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="overflow:visible"><g class="axis">`;
+  [-1000, 0, 1000, 2000, 3000, 4000].forEach((t) => s += `<line class="${t ? 'grid-l' : 'zero'}" x1="${P.l}" x2="${W - P.r}" y1="${y(t)}" y2="${y(t)}" ${t ? 'stroke-dasharray="2 4"' : ''}/><text x="${P.l - 10}" y="${y(t) + 4}" text-anchor="end">${t ? kfmt(t) : '$0'}</text>`);
+  months.forEach((m, i) => { const bx = P.l + i * bw + bw * .25, w = bw * .5, col = m >= 0 ? 'var(--color-gain-fg)' : 'var(--color-loss-fg)';
+    s += `<rect x="${bx}" y="${Math.min(y(m), y(0))}" width="${w}" height="${Math.abs(y(m) - y(0))}" rx="4" style="fill:${col}" opacity=".28"/>`;
+    s += `<text class="lbl" x="${bx + w / 2}" y="${m >= 0 ? y(m) - 6 : y(m) + 14}" text-anchor="middle" style="fill:${col}">${sfmt(m)}</text><text x="${bx + w / 2}" y="${H - 6}" text-anchor="middle">${ml[i]}</text>`; });
+  s += '</g>';
+  const path = (d) => d.map((v, i) => (i ? 'L' : 'M') + x(i).toFixed(1) + ',' + y(v).toFixed(1)).join('');
+  s += `<path d="${path(prior)}" fill="none" style="stroke:var(--color-text-tertiary)" stroke-dasharray="4 4" stroke-width="1.3"/>`;
+  s += `<path d="${path(cum)}" fill="none" style="stroke:var(--color-text-primary)" stroke-width="2.2" stroke-linejoin="round"/>`;
+  s += `<circle cx="${x(N - 1)}" cy="${y(3914.75)}" r="5" style="fill:var(--color-bg-surface);stroke:var(--color-text-primary)" stroke-width="2.5"/>`;
+  s += `<text class="lbl" x="${x(N - 1) - 10}" y="${y(3914.75) - 12}" text-anchor="end" style="fill:var(--color-gain-fg)">+$3,914.75</text>`;
+  s += `<circle cx="${x(10)}" cy="${y(cum[10])}" r="4" style="fill:var(--color-loss-fg)"/><line x1="${x(10)}" x2="${x(10)}" y1="${y(cum[10]) + 6}" y2="${y(-760)}" style="stroke:var(--color-loss-fg)" stroke-dasharray="2 3" opacity=".6"/><text class="lbl-sm" x="${x(10) + 8}" y="${y(-860)}">Aug 12 · Fed hold, −$900</text>`;
+  document.getElementById('pnlChart').innerHTML = s + '</svg>';
+})();
+const attr = [['Economics', 2214.30, 14], ['Climate', 1402.10, 4], ['Politics', 976.85, 6], ['Crypto', -142.60, 8], ['Sports', -304.50, 9], ['Fees', -231.40, '—']];
+document.getElementById('attr').innerHTML = attr.map(([k, v, n]) => `<div class="attr"><span class="${k === 'Fees' ? 't3' : ''}">${k}</span><div class="ng">${v < 0 ? `<i style="width:${-v / 2300 * 100}%"></i>` : ''}</div><div class="ps">${v > 0 ? `<i style="width:${v / 2300 * 100}%"></i>` : ''}</div><span class="r ${v >= 0 ? 'gain' : 'loss'}">${sfmt(v)}</span><span class="r t3">${n}</span></div>`).join('')
+  + `<div class="attr" style="font-weight:var(--font-weight-semibold)"><span>Net</span><span></span><span></span><span class="r gain">+$3,915</span><span class="r t3">41</span></div>`;
+const B = [['$0.00–0.20', 13, 14, 23, -1182], ['$0.20–0.40', 38, 31, 13, 846], ['$0.40–0.60', 58, 51, 19, 1210], ['$0.60–0.80', 77, 70, 22, 1604], ['$0.80–1.00', 91, 88, 11, 512]];
+document.getElementById('buckets').innerHTML = B.map(([l, w, im, n, p]) => `<div class="bucket"><span class="mono">${l}</span><div class="cal"><div class="a" style="width:${w}%"></div><div class="m" style="left:${im}%"></div><span>${w}% <span class="t3">vs ${im}%</span></span></div><span class="r">${n}</span><span class="r ${p >= 0 ? 'gain' : 'loss'}">${sfmt(p)}</span></div>`).join('');
+const M = [['Net P&L after fees', '+$3,915', '+$2,709', '+$1,206', 1], ['Realized P&L', '+$3,102', '+$2,240', '+$862', 1], ['Fees paid', '$231', '$264', '−$33', 1], ['Resolved trades', '41', '37', '+4', 0], ['Win rate', '61%', '57%', '+4 pts', 1], ['Average win / loss', '$318 / $224', '$296 / $251', '', 0], ['Largest drawdown', '−$1,402', '−$1,980', '+$578', 1], ['Best month', 'Jul +$1,180', 'Mar +$904', '', 0], ['Worst month', 'Aug −$320', 'Jan −$611', '', 0]];
+document.getElementById('cmp').innerHTML = M.map(([k, a, b, d, g]) => `<tr><td>${k}</td><td class="r">${a}</td><td class="r t3">${b}</td><td class="r">${d ? `<span class="delta ${g ? 'gain' : 'flat'}">${d}</span>` : '<span class="t3">—</span>'}</td></tr>`).join('');
+</script>
+</body></html>
