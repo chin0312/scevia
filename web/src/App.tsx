@@ -10,7 +10,7 @@ const ScenarioLab = lazy(() => import('./pages/ScenarioLab'))
 /* Remount a page when its route changes (not on ?query changes). */
 function Page({ el: El }: { el: React.ComponentType }) {
   const { pathname } = useLocation()
-  return <Suspense fallback={<div className="page-loading" />}><El key={pathname} /></Suspense>
+  return <Suspense fallback={<div className="page-loading" aria-busy="true" aria-label="Loading"><div className="skeleton" style={{ height: 240 }} /><div className="skeleton" style={{ height: 480 }} /></div>}><El key={pathname} /></Suspense>
 }
 
 export default function App() {

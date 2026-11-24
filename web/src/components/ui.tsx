@@ -1,7 +1,7 @@
 /* Small presentational primitives. Each maps 1:1 to an entry in design-system/components.md. */
 import type { ReactNode } from 'react'
-import type { Platform, Side } from '../data/portfolio'
-import { PLATFORM_NAME } from '../data/portfolio'
+import type { Platform, Side } from '../data/sample'
+import { PLATFORM_NAME } from '../data/sample'
 import { splitMoney } from '../lib/format'
 import { Icon, type IconName } from './Icon'
 import { InfoTip } from './overlays'
@@ -32,22 +32,29 @@ export function Seg<T extends string>({ options, value, onChange, label }: { opt
   )
 }
 
-/* Tabs inside a card */
-export function Tabs<T extends string>({ options, value, onChange, render }: { options: readonly T[]; value: T; onChange: (v: T) => void; render?: (o: T) => ReactNode }) {
+/* Tabs inside a card (buttons, arrow keys move between tabs) */
+export function Tabs<T extends string>({ options, value, onChange, render, label = 'Views' }: { options: readonly T[]; value: T; onChange: (v: T) => void; render?: (o: T) => ReactNode; label?: string }) {
+  const onKey = (e: React.KeyboardEvent, i: number) => {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return
+    e.preventDefault()
+    const n = options[(i + (e.key === 'ArrowRight' ? 1 : -1) + options.length) % options.length]
+    onChange(n)
+    ;((e.currentTarget.parentElement?.children[options.indexOf(n)]) as HTMLElement | undefined)?.focus()
+  }
   return (
-    <div className="tabs" role="tablist">
-      {options.map((o) => (
-        <a key={o} role="tab" tabIndex={0} aria-selected={o === value} className={cx(o === value && 'on')}
-          onClick={() => onChange(o)} onKeyDown={(e) => e.key === 'Enter' && onChange(o)}>{render ? render(o) : o}</a>
+    <div className="tabs" role="tablist" aria-label={label}>
+      {options.map((o, i) => (
+        <button type="button" key={o} role="tab" aria-selected={o === value} tabIndex={o === value ? 0 : -1} className={cx(o === value && 'on')}
+          onClick={() => onChange(o)} onKeyDown={(e) => onKey(e, i)}>{render ? render(o) : o}</button>
       ))}
     </div>
   )
 }
 
 /* Filter pills (multi or single) */
-export function Pills<T extends string>({ options, value, onChange, counts }: { options: readonly T[]; value: T; onChange: (v: T) => void; counts?: Partial<Record<T, number>> }) {
+export function Pills<T extends string>({ options, value, onChange, counts, label = 'Filter' }: { options: readonly T[]; value: T; onChange: (v: T) => void; counts?: Partial<Record<T, number>>; label?: string }) {
   return (
-    <div className="pills" role="radiogroup">
+    <div className="pills" role="radiogroup" aria-label={label}>
       {options.map((o) => (
         <button key={o} type="button" role="radio" aria-checked={o === value} className={cx('pill', o === value && 'on')} onClick={() => onChange(o)}>
           {o}{counts?.[o] != null && <span className="n">{counts[o]}</span>}

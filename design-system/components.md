@@ -41,19 +41,24 @@ Required states for every interactive component: **default, hover, focus-visible
 - **InsightCard** `.insight`: pattern headline + plain explanation + sample size + one link. Must show `n =`. Don't use it when n < 5.
 
 ## Interactive layer (`web/src/components/`, styles in `web/src/styles/app.css`)
-- **Menu** `Menu` (`.menu`): dropdown anchored to a trigger. Outside click and Esc close it. Use for help, notifications, settings, account, and "Add position". Don't use for navigation between pages.
-- **Modal** `Modal`: a focused decision with Cancel + one primary action (guardrail, classify relationship). Don't use for long lists (use Drawer).
-- **Drawer** `Drawer`: right-side detail list (the trades behind an insight, settlements missing fees). Esc and scrim click close it.
-- **CommandPalette** (⌘K): jump to areas, positions (open in Scenario Lab), and events (open in Risk). Arrow keys + Enter.
+- **Menu** `Menu` (`.menu`): dropdown anchored to a trigger. Trigger gets `aria-expanded`; items must be `role="menuitem"`; arrow keys move, Esc closes and refocuses the trigger. Use for help, notifications, settings, account, "Add position". Don't use for page navigation.
+- **Modal** `Modal`: a focused decision with Cancel + one primary action (guardrail, classify relationship, delete scenario). Traps Tab, focuses the first field (or `data-autofocus`), returns focus on close. Don't use for long lists (use Drawer).
+- **Drawer** `Drawer`: right-side detail list (fills, trades behind an insight, fee estimates). Same focus rules as Modal; Esc and scrim click close it.
+- **CommandPalette** (⌘K): jump to areas, positions (open in Scenario Lab) and events (open in Risk). Arrow keys + Enter.
+- **Tabs** `Tabs`: real buttons with `role="tab"`; ←/→ move between tabs.
 - **Switch** `.switch` (role=switch): a binary assumption (fees on/off). Don't use for view changes (use Segmented).
 - **Select** `.select`: native select for long option lists (outcome-matrix events).
-- **InfoTip** now opens a "How calculated" popover on hover and on focus.
-- **PositionDrawer** `PositionDrawer`: position drill-down showing cost/value/unrealized, payoff if for/against, the fills that make up the average cost, the source and its staleness, and actions (Simulate, See event risk). Opens from any position row (click or Enter).
-- **ConnectSources** `useConnect()`: onboarding flow (sample mode / Polymarket public wallet / Kalshi CSV → coverage check). Read-only wording is required. Never ask for trading keys.
-- **Staleness** `.stale`: warn-coloured source age when data is older than 24h. Always pair it with a re-import/sync action nearby.
+- **InfoTip**: "How calculated" popover on hover and focus; Esc closes. Text must match the definitions in `web/src/lib/finance.ts`.
+- **InfoModal** (Help menu): the shared definitions list and the prototype's data & privacy statement. Keep both literally true for the current build.
+- **PositionDrawer** `PositionDrawer`: position drill-down showing cost/value/unrealized, payoff if for/against, the fills behind the average cost, source freshness, and actions (Simulate, See event risk). Opens from any position row (click or Enter).
+- **ConnectSources** `useConnect()`: the data-source flow, run as a labelled **demo**. Never request a real wallet address or file, never claim a connection, sync or verification happened.
+- **DemoTag** `.demo-tag`: marks anything simulated (connect flow, sample coverage results).
+- **Staleness** `.stale`: warn-coloured source age when data is older than 24h. Pair it with an explanation of what “stale” means for the numbers.
+- **AdjustmentRow** (Scenario Lab): slider + target-shares field + hypothetical-price field with inline validation (`role="alert"`), and a plain-language line saying what the trade does to cash. Invalid rows are excluded from results and block Save.
 
 ## Feedback
-- **EmptyState** `.empty`: one sentence + one action (e.g. "Connect a wallet").
+- **EmptyState** `.empty`: one sentence + one action (e.g. "Clear filters").
+- **Unavailable** `.unavailable`: say plainly when a metric can't be computed (too few trades, no prior period) instead of showing a guess.
 - **Skeleton** `.skeleton`: matches final layout dimensions. Show it if loading takes > 300 ms.
 - **Toast** `.toast`: confirmations ("Scenario saved"). Auto-dismisses after 4 s. Never used for errors that need action.
 

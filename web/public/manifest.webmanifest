@@ -1,7 +1,7 @@
 {
   "name": "Scevia",
   "short_name": "Scevia",
-  "description": "Prediction market portfolio intelligence",
+  "description": "Prediction Market Portfolio Intelligence (prototype on sample data)",
   "start_url": "/overview",
   "display": "standalone",
   "background_color": "#08090A",

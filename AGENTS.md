@@ -11,7 +11,12 @@ Frontend prototype: `web/` (Vite + React + TS, mock data, no backend). Run `npm 
 5. Never present an outcome probability as Scevia's forecast. Never add trade-execution controls.
 6. To change a value, edit `tokens.json`, then run `node design-system/tokens/build.mjs`.
 
+## Numbers
+- Every figure comes from `web/src/lib/finance.ts` over the sample ledger in `web/src/data/sample.ts`. Never hard-code a metric, summary sentence or insight in a page.
+- If a metric can't be computed honestly (small sample, no prior period), show it as unavailable.
+
 ## Before finishing UI work
+- In `web/`: `npm run check` (lint, design checks, unit tests, build) and `npm run test:e2e` must pass.
 - `node design-system/lint/design-lint.mjs <changed paths>` must report 0 errors.
 - `node design-system/lint/design-lint.mjs --contrast` must pass if tokens changed.
 - Render the page in a browser and look at it. Don't trust code alone.

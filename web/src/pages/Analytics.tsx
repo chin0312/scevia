@@ -1,109 +1,74 @@
 import { useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
-import { Drawer, useToast } from '../components/overlays'
+import { Drawer } from '../components/overlays'
 import { SectionRail, useHashScroll, type RailSection } from '../components/shell'
-import { Button, Callout, Card, CardHeader, Chip, Delta, Legend, PageHead, PlatformBadge, Seg, SideChip, Tabs, cx } from '../components/ui'
-import { PLATFORM_NAME, RESOLVED, type Category, type Platform } from '../data/portfolio'
-import { fmt, kfmt, rng, sfmt } from '../lib/format'
+import { Button, Callout, Card, CardHeader, Chip, Delta, Legend, PageHead, Pills, PlatformBadge, Seg, SideChip, Tabs, cx } from '../components/ui'
+import { PLATFORM_NAME, type Platform } from '../data/sample'
+import { PERIODS, attribution, entryBuckets, fmtDate, insights, periodRange, periodStats, series, tradeNet, type Period, type PeriodStats, type PlatformFilter } from '../lib/finance'
+import { fmt, kfmt, pct, sfmt } from '../lib/format'
+import type { ClosedTrade } from '../data/sample'
 
 const RAIL: RailSection[] = [
   { id: 'summary', label: 'Summary', icon: 'home' },
   { id: 'highlights', label: 'Highlights', icon: 'grid' },
   { id: 'pnl', label: 'P&L over time', icon: 'trend' },
   { id: 'attribution', label: 'Attribution', icon: 'bars' },
-  { id: 'patterns', label: 'Patterns', icon: 'spark', count: 3 },
+  { id: 'patterns', label: 'Patterns', icon: 'spark' },
   { id: 'entry', label: 'Entry price', icon: 'target' },
   { id: 'metrics', label: 'Metrics table', icon: 'table' },
 ]
-const PERIODS = ['1M', '3M', '6M', 'YTD', 'All'] as const
-type Period = (typeof PERIODS)[number]
-const MONTHS = [{ m: 'Jun', v: 410 }, { m: 'Jul', v: 1180 }, { m: 'Aug', v: -320 }, { m: 'Sep', v: 860 }, { m: 'Oct', v: 540 }, { m: 'Nov', v: 432.35 }]
-const PERIOD_MONTHS: Record<Period, number> = { '1M': 1, '3M': 3, '6M': 6, YTD: 6, All: 6 }
-const ATTR = {
-  Category: [['Economics', 2214.3, 14], ['Climate', 1402.1, 4], ['Politics', 976.85, 6], ['Crypto', -142.6, 8], ['Sports', -304.5, 9], ['Fees', -231.4, null]],
-  Platform: [['Polymarket', 1820.4, 24], ['Kalshi', 2325.75, 17], ['Fees', -231.4, null]],
-} as const
-const BUCKETS = [['$0.00–0.20', 13, 14, 23, -1182], ['$0.20–0.40', 38, 31, 13, 846], ['$0.40–0.60', 58, 51, 19, 1210], ['$0.60–0.80', 77, 70, 22, 1604], ['$0.80–1.00', 91, 88, 11, 512]] as const
-const METRICS = [['Net P&L after fees', '+$3,915', '+$2,709', '+$1,206', true], ['Realized P&L', '+$3,102', '+$2,240', '+$862', true], ['Fees paid', '$231', '$264', '−$33', true], ['Resolved trades', '41', '37', '+4', false], ['Win rate', '61%', '57%', '+4 pts', true], ['Average win / loss', '$318 / $224', '$296 / $251', '', false], ['Largest drawdown', '−$1,402', '−$1,980', '+$578', true], ['Best month', 'Jul +$1,180', 'Mar +$904', '', false], ['Worst month', 'Aug −$320', 'Jan −$611', '', false]] as const
+const PLATFORM_FILTER = ['All', 'Polymarket', 'Kalshi'] as const
+type PlatformLabel = (typeof PLATFORM_FILTER)[number]
+const toFilter = (l: PlatformLabel): PlatformFilter => (l === 'Polymarket' ? 'pm' : l === 'Kalshi' ? 'ks' : 'all')
+const monthLabel = (m: string) => fmtDate(`${m}-01`, { month: 'short' })
 
-type Pattern = 'longshots' | 'exits' | 'economics'
-const PATTERN_TRADES: Record<Pattern, { title: string; rows: { p: Platform; m: string; side: 'YES' | 'NO'; entry: number; pnl: number; note: string }[] }> = {
-  longshots: { title: 'Longshot trades under $0.25', rows: [
-    { p: 'pm', m: 'Lakers win season opener vs. Warriors', side: 'YES', entry: 0.22, pnl: -550, note: 'Lost · Oct 28' },
-    { p: 'pm', m: 'ETH above $5k on Oct 31', side: 'YES', entry: 0.19, pnl: -570, note: 'Lost · Oct 31' },
-    { p: 'pm', m: 'Dodgers sweep NLCS', side: 'YES', entry: 0.14, pnl: 1290, note: 'Won · Oct 19' },
-    { p: 'ks', m: 'Hurricane makes US landfall in Oct', side: 'YES', entry: 0.18, pnl: -360, note: 'Lost · Oct 31' },
-    { p: 'pm', m: 'Chiefs lose Week 6', side: 'YES', entry: 0.23, pnl: -460, note: 'Lost · Oct 13' } ] },
-  exits: { title: 'Positions sold before resolution', rows: [
-    { p: 'ks', m: 'Oct jobs report above 150k', side: 'NO', entry: 0.55, pnl: 253.2, note: 'Sold 0.68 · settled NO (+$900 if held)' },
-    { p: 'pm', m: 'Senate confirms Fed nominee by Oct', side: 'YES', entry: 0.48, pnl: 140, note: 'Sold 0.55 · settled YES (+$520 if held)' },
-    { p: 'pm', m: 'September CPI below 3%', side: 'YES', entry: 0.61, pnl: 96, note: 'Sold 0.69 · settled NO (avoided −$610)' } ] },
-  economics: { title: 'Economics trades', rows: RESOLVED.filter((t) => t.category === 'Economics').map((t) => ({ p: t.platform, m: t.market, side: t.side, entry: t.entry, pnl: t.pnl, note: `${t.outcome} · ${t.closed}` })) },
-}
-
-/* Every closed trade in the sample period (for attribution drill-down). */
-const ALL_TRADES: { p: Platform; m: string; cat: Category; side: 'YES' | 'NO'; entry: number; pnl: number; note: string }[] = [
-  ...RESOLVED.map((t) => ({ p: t.platform, m: t.market, cat: t.category, side: t.side, entry: t.entry, pnl: t.pnl, note: `${t.outcome} · ${t.closed}` })),
-  { p: 'pm', m: 'Dodgers sweep NLCS', cat: 'Sports', side: 'YES', entry: 0.14, pnl: 1290, note: 'Won · Oct 19' },
-  { p: 'pm', m: 'Chiefs lose Week 6', cat: 'Sports', side: 'YES', entry: 0.23, pnl: -460, note: 'Lost · Oct 13' },
-  { p: 'ks', m: 'Hurricane makes US landfall in Oct', cat: 'Climate', side: 'YES', entry: 0.18, pnl: -360, note: 'Lost · Oct 31' },
-  { p: 'pm', m: 'BTC above $120k on Sep 30', cat: 'Crypto', side: 'YES', entry: 0.41, pnl: 427.4, note: 'Won · Sep 30' },
-  { p: 'ks', m: 'Fed holds at Sep 2026 FOMC', cat: 'Economics', side: 'NO', entry: 0.58, pnl: -612, note: 'Lost · Sep 17' },
-  { p: 'pm', m: 'House passes CR before Oct 1', cat: 'Politics', side: 'NO', entry: 0.66, pnl: -503.15, note: 'Lost · Sep 29' },
-]
-
-function PnlChart({ months, tab, showPrior }: { months: { m: string; v: number }[]; tab: 'Net' | 'Realized' | 'By platform'; showPrior: boolean }) {
-  const W = 760, H = 330, P = { l: 48, r: 12, t: 16, b: 26 }
-  const wk = months.length * 4 + 1
-  const data = useMemo(() => {
-    const r = rng(7 + months.length), cum: number[] = [], prior: number[] = [], pm: number[] = []
-    let c = 0, pc = 0, p = 0
-    const target = months.reduce((a, x) => a + x.v, 0) * 1.26
-    for (let i = 0; i < wk; i++) { c += (r() - 0.38) * 320; pc += (r() - 0.43) * 260; p += (r() - 0.4) * 160; cum.push(c); prior.push(pc); pm.push(p) }
-    const adj = (target - cum[wk - 1]) / (wk - 1)
-    const pmAdj = (target * 0.44 - pm[wk - 1]) / (wk - 1)
-    return { cum: cum.map((v, i) => v + adj * i), prior, pm: pm.map((v, i) => v + pmAdj * i) }
-  }, [months, wk])
-  const ks = data.cum.map((v, i) => v - data.pm[i])
-  const realizedCum = months.reduce<number[]>((a, m) => [...a, (a.at(-1) ?? 0) + m.v], [])
-  const all = [...data.cum, ...data.prior, 0, ...months.map((m) => m.v), ...realizedCum]
-  const min = Math.floor(Math.min(...all) / 1000) * 1000, max = Math.ceil(Math.max(...all) / 1000) * 1000 + 500
-  const y = (v: number) => P.t + (1 - (v - min) / (max - min)) * (H - P.t - P.b)
-  const x = (i: number) => P.l + (i / (wk - 1)) * (W - P.l - P.r)
-  const bw = (W - P.l - P.r) / months.length
-  const path = (d: number[]) => d.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join('')
+function PnlChart({ f, start, end, prior, stats, tab }: { f: PlatformFilter; start: string; end: string; prior: { start: string; end: string } | null; stats: PeriodStats; tab: 'Net' | 'Realized' | 'By platform' }) {
+  const W = 760, H = 330, P = { l: 52, r: 12, t: 16, b: 26 }
+  const base = (pts: { netPnl: number }[]) => pts.map((p) => p.netPnl - pts[0].netPnl)
+  const cur = useMemo(() => base(series(f, start, end)), [f, start, end])
+  const pri = useMemo(() => (prior ? base(series(f, prior.start, prior.end)) : null), [f, prior])
+  const byPlat = useMemo(() => (['pm', 'ks'] as Platform[]).map((p) => base(series(p, start, end))), [start, end])
+  const realizedCum = stats.months.reduce<number[]>((a, m) => [...a, (a.at(-1) ?? 0) + m.realized], [])
+  const lines = tab === 'Net' ? [cur, ...(pri ? [pri] : [])] : tab === 'By platform' ? byPlat : [realizedCum]
+  const all = [0, ...lines.flat(), ...(tab === 'By platform' ? [] : stats.months.map((m) => m.realized))]
+  const step = Math.max(500, Math.ceil((Math.max(...all) - Math.min(...all)) / 5 / 500) * 500)
+  const min = Math.floor(Math.min(...all) / step) * step, max = Math.ceil(Math.max(...all) / step) * step
+  const y = (v: number) => P.t + (1 - (v - min) / (max - min || 1)) * (H - P.t - P.b)
+  const xOf = (i: number, n: number) => P.l + (i / Math.max(1, n - 1)) * (W - P.l - P.r)
+  const months = stats.months, bw = (W - P.l - P.r) / Math.max(1, months.length)
+  const path = (d: number[]) => d.map((v, i) => `${i ? 'L' : 'M'}${xOf(i, d.length).toFixed(1)},${y(v).toFixed(1)}`).join('')
   const [hover, setHover] = useState<number | null>(null)
   const ref = useRef<SVGSVGElement>(null)
   const ticks: number[] = []
-  for (let t = min; t <= max; t += 1000) ticks.push(t)
+  for (let t = min; t <= max; t += step) ticks.push(t)
+  const end1 = cur.at(-1) ?? 0
   return (
     <div className="chart">
-      <svg ref={ref} viewBox={`0 0 ${W} ${H}`} width="100%" style={{ overflow: 'visible' }} onPointerLeave={() => setHover(null)}>
+      <svg ref={ref} role="img" aria-label={`Cumulative ${tab === 'Realized' ? 'realized' : 'net'} P&L ${fmtDate(start)} to ${fmtDate(end)}: ${sfmt(tab === 'Realized' ? realizedCum.at(-1) ?? 0 : end1)}`} viewBox={`0 0 ${W} ${H}`} width="100%" style={{ overflow: 'visible' }} onPointerLeave={() => setHover(null)}>
         <g className="axis">
           {ticks.map((t) => <g key={t}><line className={t ? 'grid-l' : 'zero'} x1={P.l} x2={W - P.r} y1={y(t)} y2={y(t)} strokeDasharray={t ? '2 4' : undefined} /><text x={P.l - 10} y={y(t) + 4} textAnchor="end">{t ? kfmt(t) : '$0'}</text></g>)}
-          {months.map((m, i) => <text key={m.m} x={P.l + i * bw + bw / 2} y={H - 6} textAnchor="middle">{m.m}</text>)}
+          {months.map((m, i) => <text key={m.month} x={P.l + i * bw + bw / 2} y={H - 6} textAnchor="middle">{monthLabel(m.month)}</text>)}
         </g>
         {tab !== 'By platform' && months.map((m, i) => {
-          const bx = P.l + i * bw + bw * 0.25, w = bw * 0.5, col = m.v >= 0 ? 'var(--color-gain-fg)' : 'var(--color-loss-fg)'
+          const bx = P.l + i * bw + bw * 0.25, w = bw * 0.5, col = m.realized >= 0 ? 'var(--color-gain-fg)' : 'var(--color-loss-fg)'
           return (
-            <g key={m.m} className="hoverable" onPointerEnter={() => setHover(i)}>
+            <g key={m.month} className="hoverable" onPointerEnter={() => setHover(i)}>
               <rect x={P.l + i * bw} y={P.t} width={bw} height={H - P.t - P.b} className="hit" />
-              <rect x={bx} y={Math.min(y(m.v), y(0))} width={w} height={Math.abs(y(m.v) - y(0))} rx={4} style={{ fill: col }} opacity={hover === i ? 0.5 : 0.28} />
-              <text className="lbl" x={bx + w / 2} y={m.v >= 0 ? y(m.v) - 6 : y(m.v) + 14} textAnchor="middle" style={{ fill: col }}>{sfmt(m.v)}</text>
+              <rect x={bx} y={Math.min(y(m.realized), y(0))} width={w} height={Math.max(1, Math.abs(y(m.realized) - y(0)))} rx={4} style={{ fill: col }} opacity={hover === i ? 0.5 : 0.28} />
+              {months.length <= 12 && <text className="lbl" x={bx + w / 2} y={m.realized >= 0 ? y(m.realized) - 6 : y(m.realized) + 14} textAnchor="middle" style={{ fill: col }}>{sfmt(m.realized)}</text>}
             </g>
           )
         })}
-        {showPrior && tab === 'Net' && <path d={path(data.prior)} fill="none" style={{ stroke: 'var(--color-text-tertiary)' }} strokeDasharray="4 4" strokeWidth={1.3} />}
-        {tab === 'Net' && <path d={path(data.cum)} fill="none" style={{ stroke: 'var(--color-text-primary)' }} strokeWidth={2.2} strokeLinejoin="round" />}
+        {tab === 'Net' && pri && <path d={path(pri)} fill="none" style={{ stroke: 'var(--color-text-tertiary)' }} strokeDasharray="4 4" strokeWidth={1.3} />}
+        {tab === 'Net' && <path d={path(cur)} fill="none" style={{ stroke: 'var(--color-text-primary)' }} strokeWidth={2.2} strokeLinejoin="round" />}
         {tab === 'Realized' && <path d={realizedCum.map((v, i) => `${i ? 'L' : 'M'}${P.l + i * bw + bw / 2},${y(v)}`).join('')} fill="none" style={{ stroke: 'var(--color-text-primary)' }} strokeWidth={2.2} />}
         {tab === 'By platform' && <>
-          <path d={path(data.pm)} fill="none" style={{ stroke: 'var(--color-platform-polymarket)' }} strokeWidth={2.2} />
-          <path d={path(ks)} fill="none" style={{ stroke: 'var(--color-platform-kalshi)' }} strokeWidth={2.2} />
+          <path d={path(byPlat[0])} fill="none" style={{ stroke: 'var(--color-platform-polymarket)' }} strokeWidth={2.2} />
+          <path d={path(byPlat[1])} fill="none" style={{ stroke: 'var(--color-platform-kalshi)' }} strokeWidth={2.2} />
         </>}
       </svg>
-      {hover != null && tab !== 'By platform' && (
+      {hover != null && tab !== 'By platform' && months[hover] && (
         <div className="tip" style={{ left: `${((P.l + hover * bw + bw / 2) / W) * 100}%`, top: 0, transform: 'translateX(-50%)' }}>
-          <div className="t3">{months[hover].m} 2026</div><b className={months[hover].v >= 0 ? 'gain' : 'loss'}>{sfmt(months[hover].v, 2)}</b> realized
+          <div className="t3">{fmtDate(`${months[hover].month}-01`, { month: 'long', year: 'numeric' })}</div><b className={months[hover].realized >= 0 ? 'gain' : 'loss'}>{sfmt(months[hover].realized, 2)}</b> realized
         </div>
       )}
     </div>
@@ -112,53 +77,83 @@ function PnlChart({ months, tab, showPrior }: { months: { m: string; v: number }
 
 export default function Analytics() {
   useHashScroll()
-  const toast = useToast()
+  const [plat, setPlat] = useState<PlatformLabel>('All')
   const [period, setPeriod] = useState<Period>('6M')
-  const [compare, setCompare] = useState(true)
+  const [compareOn, setCompareOn] = useState(true)
   const [tab, setTab] = useState<'Net' | 'Realized' | 'By platform'>('Net')
   const [attrBy, setAttrBy] = useState<'Category' | 'Platform'>('Category')
-  const [pattern, setPattern] = useState<Pattern | null>(null)
-  const [group, setGroup] = useState<string | null>(null)
+  const [drawer, setDrawer] = useState<{ title: string; sub: string; trades: ClosedTrade[] } | null>(null)
   const [hotBucket, setHotBucket] = useState<number | null>(null)
-  const months = MONTHS.slice(-PERIOD_MONTHS[period])
-  const realized = months.reduce((a, m) => a + m.v, 0)
-  const net = period === '6M' || period === 'YTD' || period === 'All' ? 3914.75 : realized * 1.26
-  const label = period === '1M' ? 'Nov 2026' : period === '3M' ? 'Sep 1 – Nov 24, 2026' : 'Jun 1 – Nov 24, 2026'
+
+  const f = toFilter(plat)
+  const range = periodRange(period)
+  const stats = useMemo(() => periodStats(f, periodRange(period)), [f, period])
+  const prior = useMemo(() => { const p = periodRange(period).prior; return p ? periodStats(f, p) : null }, [f, period])
+  const compare = compareOn && prior !== null
+  const attr = attribution(stats.trades, attrBy === 'Category' ? 'category' : 'platform').map((a) => ({ ...a, label: attrBy === 'Platform' ? PLATFORM_NAME[a.key as Platform] : a.key }))
+  const ins = useMemo(() => insights(stats.trades), [stats])
+  const buckets = useMemo(() => entryBuckets(stats.trades), [stats])
+  const openChange = stats.netPnl - stats.realized
+  const top = attr[0], worst = [...attr].sort((a, b) => a.net - b.net)[0]
+  const gains = attr.filter((a) => a.net > 0).reduce((s, a) => s + a.net, 0)
+  const worstMonth = [...stats.months].sort((a, b) => a.realized - b.realized)[0]
+  const attrMax = Math.max(1, ...attr.map((a) => Math.abs(a.net)))
+  const scope = f === 'all' ? 'all platforms' : plat
+  const fmtOpt = (v: number | null, f: (x: number) => string) => (v == null ? '—' : f(v))
+
+  const metrics: [string, (s: PeriodStats) => string, ((a: PeriodStats, b: PeriodStats) => { text: string; good: boolean } | null) | null][] = [
+    ['Net P&L (after fees)', (s) => sfmt(s.netPnl), (a, b) => ({ text: sfmt(a.netPnl - b.netPnl), good: a.netPnl >= b.netPnl })],
+    ['Realized P&L (closed trades)', (s) => sfmt(s.realized), (a, b) => ({ text: sfmt(a.realized - b.realized), good: a.realized >= b.realized })],
+    ['Fees paid', (s) => fmt(s.fees, 2), (a, b) => ({ text: sfmt(a.fees - b.fees, 2), good: a.fees <= b.fees })],
+    ['Closed trades', (s) => String(s.trades.length), null],
+    ['Win rate (resolved)', (s) => (s.winRate == null ? '—' : `${pct(s.winRate * 100, 0)} · n=${s.resolved}`), (a, b) => (a.winRate == null || b.winRate == null ? null : { text: `${((a.winRate - b.winRate) * 100).toFixed(0)} pts`, good: a.winRate >= b.winRate })],
+    ['Average win / loss', (s) => `${fmtOpt(s.avgWin, (v) => fmt(v))} / ${fmtOpt(s.avgLoss, (v) => fmt(v))}`, null],
+    ['Profit factor', (s) => fmtOpt(s.profitFactor, (v) => v.toFixed(2)), null],
+    ['Largest drawdown', (s) => (s.drawdown ? sfmt(-s.drawdown.amount) : 'none'), (a, b) => ({ text: sfmt((b.drawdown?.amount ?? 0) - (a.drawdown?.amount ?? 0)), good: (a.drawdown?.amount ?? 0) <= (b.drawdown?.amount ?? 0) })],
+    ['Best month (realized)', (s) => { const m = [...s.months].sort((x, y) => y.realized - x.realized)[0]; return m ? `${monthLabel(m.month)} ${sfmt(m.realized)}` : '—' }, null],
+    ['Worst month (realized)', (s) => { const m = [...s.months].sort((x, y) => x.realized - y.realized)[0]; return m ? `${monthLabel(m.month)} ${sfmt(m.realized)}` : '—' }, null],
+  ]
+  const openTrades = (title: string, trades: ClosedTrade[]) => setDrawer({ title, sub: `${range.label} · ${scope} · worst first`, trades: [...trades].sort((a, b) => tradeNet(a) - tradeNet(b)) })
 
   return (
     <div className="shell">
       <SectionRail title="Analytics" sections={RAIL}>
-        <div className="rail-card"><b>Definitions</b>Net P&amp;L = realized + unrealized − fees. Deposits and withdrawals never count as performance.</div>
+        <div className="rail-card"><b>Definitions</b>Net P&amp;L = realized + change in open positions − fees on new fills. Deposits and withdrawals never count as performance.</div>
       </SectionRail>
       <main>
-        <PageHead caption={`Performance · ${label}`} title="Where your results come from"
+        <PageHead caption={`Performance · ${range.label} · ${scope}`} title="Where your results come from"
           actions={<>
+            <Pills label="Platform" options={PLATFORM_FILTER} value={plat} onChange={setPlat} />
             <Seg label="Period" options={PERIODS} value={period} onChange={setPeriod} />
-            <Button icon="compare" variant={compare ? undefined : 'ghost'} onClick={() => setCompare((c) => !c)}>{compare ? 'Comparing to prior' : 'Compare to prior'}</Button>
-            <Button icon="download" onClick={() => toast('Export prepared (prototype: no file generated)', 'info')}>Export</Button>
+            <Button icon="compare" variant={compare ? undefined : 'ghost'} disabled={!prior} title={prior ? undefined : 'The sample history doesn’t cover a full prior period'} onClick={() => setCompareOn((c) => !c)}>{!prior ? 'No prior period' : compare ? 'Comparing to prior' : 'Compare to prior'}</Button>
           </>} />
 
-        <p className="summary">Over this period you made <b className="gain">{sfmt(net, 2)}</b> after fees{compare && <>, <b>$1,206 more</b> than the prior period</>}. <a href="#attribution">Economics</a> produced over half of it. Your weak spot is <a href="#patterns" onClick={() => setPattern('longshots')}>longshot contracts under $0.25</a>, which lost <b className="loss">−$1,182</b> across 23 trades. Your worst stretch was August, after the <Link to="/risk?event=fed#payoffs">Fed hold</Link>.</p>
+        <p className="summary">
+          Over this period you made <b className={stats.netPnl >= 0 ? 'gain' : 'loss'}>{sfmt(stats.netPnl, 2)}</b> net{compare && prior ? <>, <b>{sfmt(stats.netPnl - prior.netPnl)}</b> vs. the prior period</> : ''}: <b>{sfmt(stats.realized)}</b> realized on {stats.trades.length} closed trades and <b>{sfmt(openChange)}</b> from open positions and fees.
+          {top && top.net > 0 && <> <a href="#attribution">{top.label}</a> made {gains > 0 ? pct((top.net / gains) * 100, 0) : '—'} of realized gains.</>}
+          {worst && worst.net < 0 && <> The weakest group was <a href="#attribution">{worst.label}</a> ({sfmt(worst.net)}).</>}
+          {worstMonth && worstMonth.realized < 0 && <> Worst month: {monthLabel(worstMonth.month)} ({sfmt(worstMonth.realized)}).</>}
+        </p>
 
         <Card id="highlights">
-          <CardHeader title="Highlights" sub={compare ? 'Compared with the prior period' : 'This period'} />
+          <CardHeader title="Highlights" sub={compare ? 'Compared with the prior period of the same length' : prior ? 'This period' : 'This period · no prior period in the sample history'} />
           <div className="card-b hl">
             <div className="hl-group"><h5 className="caps">Return</h5>
-              <div className="hl-tile good"><div className="l">Net P&amp;L</div><div className="v gain">{sfmt(net)}</div><div className="f">{compare ? '▲ $1,206 vs prior' : 'after fees'}</div></div>
-              <div className="hl-tile good"><div className="l">Return on capital deployed</div><div className="v gain">+14.4%</div><div className="f">{compare ? '▲ 3.1 pts vs prior' : 'net P&L ÷ avg committed'}</div></div>
+              <div className={cx('hl-tile', stats.netPnl >= 0 ? 'good' : 'bad')}><div className="l">Net P&amp;L</div><div className={cx('v', stats.netPnl >= 0 ? 'gain' : 'loss')}>{sfmt(stats.netPnl)}</div><div className="f">{compare && prior ? `${stats.netPnl >= prior.netPnl ? '▲' : '▼'} ${sfmt(stats.netPnl - prior.netPnl)} vs prior` : 'after fees, deposits excluded'}</div></div>
+              <div className={cx('hl-tile', stats.realized >= 0 ? 'good' : 'bad')}><div className="l">Realized (closed trades)</div><div className={cx('v', stats.realized >= 0 ? 'gain' : 'loss')}>{sfmt(stats.realized)}</div><div className="f">{stats.trades.length} trades · fees {fmt(stats.fees)}</div></div>
             </div>
             <div className="hl-group"><h5 className="caps">Risk &amp; consistency</h5>
-              <div className="hl-tile bad"><div className="l">Largest drawdown</div><div className="v loss">−$1,402</div><div className="f">Aug 4 – Aug 19 · recovered in 24 days</div></div>
-              <div className="hl-tile neutral"><div className="l">Win rate <span className="t3">· n = 41</span></div><div className="v">61%</div><div className="f">profit factor 1.42</div></div>
+              <div className={cx('hl-tile', stats.drawdown ? 'bad' : 'neutral')}><div className="l">Largest drawdown</div><div className={cx('v', stats.drawdown && 'loss')}>{stats.drawdown ? sfmt(-stats.drawdown.amount) : 'None'}</div><div className="f">{stats.drawdown ? `${fmtDate(stats.drawdown.from)} – ${fmtDate(stats.drawdown.to)} · ${stats.drawdown.recoveredOn ? `recovered ${fmtDate(stats.drawdown.recoveredOn)}` : 'not yet recovered'}` : 'weekly net P&L never fell from a peak'}</div></div>
+              <div className="hl-tile neutral"><div className="l">Win rate <span className="t3">· n = {stats.resolved}</span></div><div className="v">{stats.winRate == null ? '—' : pct(stats.winRate * 100, 0)}</div><div className="f">{stats.resolved < 30 ? 'small sample · treat as indicative' : `profit factor ${fmtOpt(stats.profitFactor, (v) => v.toFixed(2))}`}</div></div>
             </div>
           </div>
         </Card>
 
         <div className="grid g-21">
           <Card id="pnl">
-            <CardHeader title="Cumulative net P&L" sub="Line: cumulative · Bars: realized each month (hover for detail)" right={<Tabs options={['Net', 'Realized', 'By platform'] as const} value={tab} onChange={setTab} />} />
+            <CardHeader title="Cumulative P&L" sub="Line: cumulative from the start of the period · Bars: realized each month (hover)" right={<Tabs label="Chart view" options={['Net', 'Realized', 'By platform'] as const} value={tab} onChange={setTab} />} />
             <div className="card-b">
-              <PnlChart months={months} tab={tab} showPrior={compare} />
+              <PnlChart f={f} start={range.start} end={range.end} prior={compare ? range.prior : null} stats={stats} tab={tab} />
               <div style={{ marginTop: 'var(--space-3)' }}>
                 <Legend items={tab === 'By platform'
                   ? [{ label: 'Polymarket', color: 'var(--color-platform-polymarket)', kind: 'ln' }, { label: 'Kalshi', color: 'var(--color-platform-kalshi)', kind: 'ln' }]
@@ -167,87 +162,94 @@ export default function Analytics() {
             </div>
           </Card>
           <Card id="attribution">
-            <CardHeader title="Attribution" sub="Net P&L by group, after fees · click a row for its trades" right={<Seg label="Group by" options={['Category', 'Platform'] as const} value={attrBy} onChange={setAttrBy} />} />
+            <CardHeader title="Attribution" sub="Realized P&L of closed trades, after their fees · click a row for its trades" right={<Seg label="Group by" options={['Category', 'Platform'] as const} value={attrBy} onChange={setAttrBy} />} />
             <div className="card-b">
-              {ATTR[attrBy].map(([k, v, n]) => (
-                <div className={cx('attr', k !== 'Fees' && 'hoverable')} key={k} role={k !== 'Fees' ? 'button' : undefined} tabIndex={k !== 'Fees' ? 0 : undefined}
-                  title={k !== 'Fees' ? `See ${k} trades` : undefined}
-                  onClick={() => k !== 'Fees' && setGroup(k)} onKeyDown={(e) => e.key === 'Enter' && k !== 'Fees' && setGroup(k)}>
-                  <span className={k === 'Fees' ? 't3' : ''}>{k}</span>
-                  <div className="ng">{v < 0 && <i style={{ width: `${(-v / 2400) * 100}%` }} />}</div>
-                  <div className="ps">{v > 0 && <i style={{ width: `${(v / 2400) * 100}%` }} />}</div>
-                  <span className={cx('r', v >= 0 ? 'gain' : 'loss')}>{sfmt(v)}</span><span className="r t3">{n ?? '—'}</span>
+              {attr.length === 0 && <div className="empty"><p>No trades closed in this period.</p></div>}
+              {attr.map((a) => (
+                <div className="attr hoverable" key={a.key} role="button" tabIndex={0} title={`See ${a.label} trades`}
+                  onClick={() => openTrades(`${a.label} · closed trades`, stats.trades.filter((t) => (attrBy === 'Category' ? t.category : t.platform) === a.key))}
+                  onKeyDown={(e) => e.key === 'Enter' && openTrades(`${a.label} · closed trades`, stats.trades.filter((t) => (attrBy === 'Category' ? t.category : t.platform) === a.key))}>
+                  <span>{a.label}</span>
+                  <div className="ng">{a.net < 0 && <i style={{ width: `${(-a.net / attrMax) * 100}%` }} />}</div>
+                  <div className="ps">{a.net > 0 && <i style={{ width: `${(a.net / attrMax) * 100}%` }} />}</div>
+                  <span className={cx('r', a.net >= 0 ? 'gain' : 'loss')}>{sfmt(a.net)}</span><span className="r t3">{a.n}</span>
                 </div>
               ))}
-              <div className="attr" style={{ fontWeight: 'var(--font-weight-semibold)' }}><span>Net</span><span /><span /><span className="r gain">+$3,915</span><span className="r t3">41</span></div>
-              <div style={{ marginTop: 'var(--space-4)' }}><Callout>{attrBy === 'Category' ? <><b>Economics</b> made 53% of gains from 34% of trades. <a onClick={() => setPattern('economics')} href="#attribution">See Economics trades</a></> : <>Kalshi earned more from fewer trades, mostly Economics and Climate contracts.</>}</Callout></div>
+              <div className="attr" style={{ fontWeight: 'var(--font-weight-semibold)' }}><span>Realized</span><span /><span /><span className={cx('r', stats.realized >= 0 ? 'gain' : 'loss')}>{sfmt(stats.realized)}</span><span className="r t3">{stats.trades.length}</span></div>
+              <div className="attr t2"><span>Open positions & fees</span><span /><span /><span className={cx('r', openChange >= 0 ? 'gain' : 'loss')}>{sfmt(openChange)}</span><span className="r t3">—</span></div>
+              <div className="attr" style={{ fontWeight: 'var(--font-weight-semibold)' }}><span>Net P&amp;L</span><span /><span /><span className={cx('r', stats.netPnl >= 0 ? 'gain' : 'loss')}>{sfmt(stats.netPnl)}</span><span className="r t3" /></div>
             </div>
           </Card>
         </div>
 
         <section id="patterns" className="anchor grid g-3">
-          <div className="card insight"><Chip tone="no">Losses</Chip><h4>Longshots under $0.25 cost you <span className="loss">−$1,182</span></h4><p>You won 3 of 23 (13%). Their entry prices implied about 14%. Most of these were Sports.</p><div className="meta"><span>n = 23 · moderate confidence</span><button type="button" className="link" onClick={() => setPattern('longshots')}>See trades →</button></div></div>
-          <div className="card insight"><Chip tone="info">Exits</Chip><h4>Early exits left <span className="gain">+$640</span> on the table</h4><p>9 of 14 positions you sold early later settled in your favour. This is hindsight: you also avoided risk.</p><div className="meta"><span>n = 14 · hindsight view</span><button type="button" className="link" onClick={() => setPattern('exits')}>Review exits →</button></div></div>
-          <div className="card insight"><Chip tone="yes">Strength</Chip><h4>Economics is your most consistent category</h4><p>71% win rate, and no single trade is more than 18% of the category’s P&amp;L. The result isn’t one lucky outcome.</p><div className="meta"><span>n = 14 · small sample</span><button type="button" className="link" onClick={() => setPattern('economics')}>Open category →</button></div></div>
+          <div className="card insight"><Chip tone={ins.longshots && ins.longshots.net < 0 ? 'no' : 'info'}>Longshots</Chip>
+            {ins.longshots ? (<>
+              <h4>Resolved contracts bought under $0.25: <span className={ins.longshots.net >= 0 ? 'gain' : 'loss'}>{sfmt(ins.longshots.net)}</span></h4>
+              <p>You won {ins.longshots.wins} of {ins.longshots.n} ({pct((ins.longshots.wins / ins.longshots.n) * 100, 0)}). Their entry prices implied about {pct(ins.longshots.implied * 100, 0)}.{ins.longshots.worstCategory && ` The weakest category here was ${ins.longshots.worstCategory}.`}</p>
+              <div className="meta"><span>n = {ins.longshots.n} · {ins.longshots.n < 30 ? 'small sample' : 'moderate sample'}</span><button type="button" className="link" onClick={() => openTrades('Longshot trades (entry < $0.25)', ins.longshots!.trades)}>See trades →</button></div>
+            </>) : <p className="unavailable">Fewer than 5 resolved longshot trades in this period, so there’s nothing reliable to say.</p>}
+          </div>
+          <div className="card insight"><Chip tone="info">Early exits</Chip>
+            {ins.earlyExits ? (<>
+              <h4>{ins.earlyExits.missed} of {ins.earlyExits.n} early exits later paid out</h4>
+              <p>Holding those to resolution would have added about <b className="gain">{fmt(ins.earlyExits.leftOnTable)}</b>. The other exits avoided about <b>{fmt(ins.earlyExits.avoided)}</b> of value that went to $0. This is hindsight, not a strategy verdict.</p>
+              <div className="meta"><span>n = {ins.earlyExits.n} · hindsight view</span><button type="button" className="link" onClick={() => openTrades('Positions sold before resolution', ins.earlyExits!.trades)}>Review exits →</button></div>
+            </>) : <p className="unavailable">Fewer than 5 early exits in this period.</p>}
+          </div>
+          <div className="card insight"><Chip tone="yes">Strongest category</Chip>
+            {ins.strongest ? (<>
+              <h4>{ins.strongest.c} made the most: <span className="gain">{sfmt(ins.strongest.net)}</span></h4>
+              <p>{ins.strongest.n} closed trades; {pct(ins.strongest.winRate * 100, 0)} of the {ins.strongest.resolved} that resolved went your way. The single best trade is {pct(Math.min(1, ins.strongest.topShare) * 100, 0)} of the category’s result{ins.strongest.topShare > 0.5 ? ', so one outcome drives most of it' : ''}.</p>
+              <div className="meta"><span>n = {ins.strongest.n} · {ins.strongest.n < 30 ? 'small sample' : 'moderate sample'}</span><button type="button" className="link" onClick={() => openTrades(`${ins.strongest!.c} trades`, ins.strongest!.trades)}>Open category →</button></div>
+            </>) : <p className="unavailable">No category has 5+ resolved trades with a positive result in this period.</p>}
+          </div>
         </section>
 
         <div className="grid g-2">
           <Card id="entry">
-            <CardHeader title="Entry price vs. outcome" sub="How often you won vs. what the price implied · hover a row" />
+            <CardHeader title="Entry price vs. outcome" sub="How often resolved trades won vs. what the average entry price implied" />
             <div className="card-b">
               <div className="bucket t3" style={{ fontSize: 'var(--font-size-xs)', paddingTop: 0 }}><span>Entry price</span><span>Your win rate · ▏implied</span><span className="r">Trades</span><span className="r">Net P&amp;L</span></div>
-              {BUCKETS.map(([l, w, im, n, p], i) => (
-                <div key={l} className="bucket hoverable" style={{ opacity: hotBucket != null && hotBucket !== i ? 0.45 : 1 }} onMouseEnter={() => setHotBucket(i)} onMouseLeave={() => setHotBucket(null)}>
-                  <span className="mono">{l}</span>
-                  <div className="cal"><div className="a" style={{ width: `${w}%` }} /><div className="m" style={{ left: `${im}%` }} /><span>{w}% <span className="t3">vs {im}%</span></span></div>
-                  <span className="r">{n}</span><span className={cx('r', p >= 0 ? 'gain' : 'loss')}>{sfmt(p)}</span>
+              {buckets.map((b, i) => (
+                <div key={b.label} className="bucket hoverable" style={{ opacity: hotBucket != null && hotBucket !== i ? 0.45 : 1 }} onMouseEnter={() => setHotBucket(i)} onMouseLeave={() => setHotBucket(null)}>
+                  <span className="mono">{b.label}</span>
+                  {b.n ? <div className="cal"><div className="a" style={{ width: `${(b.winRate ?? 0) * 100}%` }} /><div className="m" style={{ left: `${(b.implied ?? 0) * 100}%` }} /><span>{pct((b.winRate ?? 0) * 100, 0)} <span className="t3">vs {pct((b.implied ?? 0) * 100, 0)}</span></span></div> : <span className="unavailable">no resolved trades</span>}
+                  <span className="r">{b.n}</span><span className={cx('r', b.net >= 0 ? 'gain' : 'loss')}>{b.n ? sfmt(b.net) : '—'}</span>
                 </div>
               ))}
               <div style={{ marginTop: 'var(--space-3)' }}>
-                {hotBucket != null
-                  ? <Callout>{BUCKETS[hotBucket][1] >= BUCKETS[hotBucket][2] ? 'You won slightly more often than' : 'You won less often than'} the price implied in this bucket ({BUCKETS[hotBucket][1]}% vs {BUCKETS[hotBucket][2]}%, n = {BUCKETS[hotBucket][3]}).</Callout>
-                  : <Callout tone="warn">Every bucket has fewer than 30 trades, so these gaps may be noise. Treat this as something to watch, not a verdict.</Callout>}
+                {hotBucket != null && buckets[hotBucket].n
+                  ? <Callout>In this bucket you won {pct((buckets[hotBucket].winRate ?? 0) * 100, 0)} of {buckets[hotBucket].n} resolved trades; the average entry price implied {pct((buckets[hotBucket].implied ?? 0) * 100, 0)}.</Callout>
+                  : <Callout tone="warn">Buckets with fewer than 30 trades can differ from the implied rate by chance. Treat gaps as something to watch, not a verdict.</Callout>}
               </div>
             </div>
           </Card>
           <Card id="metrics" flush>
-            <CardHeader pad title="Metrics" sub={compare ? 'This period vs. prior period' : 'This period'} right={<Button size="sm" variant="ghost" icon="download" onClick={() => toast('CSV prepared (prototype)', 'info')}>CSV</Button>} />
-            <table className="dt cmp">
-              <thead><tr><th>Metric</th><th className="r">This period</th>{compare && <><th className="r">Prior period</th><th className="r">Change</th></>}</tr></thead>
-              <tbody>{METRICS.map(([k, a, b, d, good]) => (
-                <tr key={k}><td>{k}</td><td className="r">{a}</td>{compare && <><td className="r t3">{b}</td><td className="r">{d ? <Delta tone={good ? 'gain' : 'flat'}>{d}</Delta> : <span className="t3">—</span>}</td></>}</tr>
-              ))}</tbody>
-            </table>
+            <CardHeader pad title="Metrics" sub={compare ? 'This period vs. the prior period of the same length' : prior ? 'This period' : 'This period · the sample history doesn’t cover a prior period'} />
+            <div className="dt-wrap"><table className="dt cmp">
+              <thead><tr><th scope="col">Metric</th><th scope="col" className="r">This period</th>{compare && <><th scope="col" className="r">Prior period</th><th scope="col" className="r">Change</th></>}</tr></thead>
+              <tbody>{metrics.map(([k, val, diff]) => {
+                const d = compare && prior && diff ? diff(stats, prior) : null
+                return <tr key={k}><td>{k}</td><td className="r">{val(stats)}</td>{compare && prior && <><td className="r t3">{val(prior)}</td><td className="r">{d ? <Delta tone={d.good ? 'gain' : 'loss'}>{d.text}</Delta> : <span className="t3">—</span>}</td></>}</tr>
+              })}</tbody>
+            </table></div>
           </Card>
         </div>
 
-        <div className="footer-note"><span>Analytics describe past results. They don’t predict future ones and aren’t investment advice.</span><span>Sample portfolio · fictional data</span></div>
+        <div className="footer-note"><span>Analytics describe past results on fictional sample data. They don’t predict future ones and aren’t investment advice.</span><span>Sample portfolio · fictional data</span></div>
       </main>
 
-      {group && (() => {
-        const list = ALL_TRADES.filter((t) => (attrBy === 'Category' ? t.cat === group : PLATFORM_NAME[t.p] === group)).sort((a, b) => a.pnl - b.pnl)
-        return (
-          <Drawer title={`${group} · closed trades`} sub={`${label} · sorted worst first`} onClose={() => setGroup(null)}>
-            {list.length === 0 && <div className="empty"><p>No closed trades in this group for the sample period.</p></div>}
-            {list.map((r) => (
-              <div className="list-row" key={r.m}><PlatformBadge p={r.p} />
-                <div><b style={{ fontWeight: 'var(--font-weight-medium)' }}>{r.m}</b><div className="t3" style={{ fontSize: 'var(--font-size-xs)' }}><SideChip side={r.side} /> entry {r.entry.toFixed(2)} · {r.note}</div></div>
-                <span className={cx('r', r.pnl >= 0 ? 'gain' : 'loss')}>{sfmt(r.pnl, 2)}</span>
-              </div>
-            ))}
-            <p className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>A sample of the trades in this group. In the real product this lists every fill with its source.</p>
-          </Drawer>
-        )
-      })()}
-      {pattern && (
-        <Drawer title={PATTERN_TRADES[pattern].title} sub="Sample trades behind this insight" onClose={() => setPattern(null)}>
-          {PATTERN_TRADES[pattern].rows.map((r) => (
-            <div className="list-row" key={r.m}><PlatformBadge p={r.p} />
-              <div><b style={{ fontWeight: 'var(--font-weight-medium)' }}>{r.m}</b><div className="t3" style={{ fontSize: 'var(--font-size-xs)' }}><SideChip side={r.side} /> entry {r.entry.toFixed(2)} · {r.note}</div></div>
-              <span className={cx('r', r.pnl >= 0 ? 'gain' : 'loss')}>{sfmt(r.pnl, 2)}</span>
+      {drawer && (
+        <Drawer title={drawer.title} sub={drawer.sub} onClose={() => setDrawer(null)}>
+          {drawer.trades.length === 0 && <div className="empty"><p>No trades in this group for the selected period.</p></div>}
+          {drawer.trades.map((r) => (
+            <div className="list-row" key={r.id}><PlatformBadge p={r.platform} />
+              <div><b style={{ fontWeight: 'var(--font-weight-medium)' }}>{r.market}</b><div className="t3" style={{ fontSize: 'var(--font-size-xs)' }}><SideChip side={r.side} /> entry {r.entry.toFixed(2)} → {r.exit.toFixed(2)} · {r.outcome} · {fmtDate(r.closed, { month: 'short', day: 'numeric', year: 'numeric' })}{r.fees ? ` · fees ${fmt(r.fees, 2)}${r.feeKnown ? '' : ' est.'}` : ''}</div></div>
+              <span className={cx('r', tradeNet(r) >= 0 ? 'gain' : 'loss')}>{sfmt(tradeNet(r), 2)}</span>
             </div>
           ))}
-          <p className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>Showing {PATTERN_TRADES[pattern].rows.length} of the trades in this group. Totals: {fmt(PATTERN_TRADES[pattern].rows.reduce((a, r) => a + Math.abs(r.pnl), 0))} gross.</p>
+          {drawer.trades.length > 0 && <p className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>{drawer.trades.length} trades · total {sfmt(drawer.trades.reduce((a, t) => a + tradeNet(t), 0), 2)} after fees.</p>}
         </Drawer>
       )}
     </div>
