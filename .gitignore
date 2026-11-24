@@ -1,0 +1,22 @@
+# Dependencies & builds
+node_modules/
+dist/
+*.tsbuildinfo
+
+# OS / editor
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# Local env & secrets
+.env
+.env.*
+*.local
+
+# Claude Code: keep shared launch config, ignore personal settings
+.claude/*
+!.claude/launch.json
+
+# Internal product/strategy docs: keep local, never publish
+Scevia_Product_Concept_Due_Diligence_Plan_*.md
