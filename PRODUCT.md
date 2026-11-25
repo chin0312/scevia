@@ -131,11 +131,24 @@ A portfolio is **user-controlled** and can combine several accounts and acquisit
 - Connection status is not accounting completeness: an account shows whether its opening balance and history are declared.
 - Users manage their records: include, exclude, restore, correct imported or manual rows, resolve potential duplicates, accept distinct identical trades, and add manual records. Bulk actions show their scope (selected, page, all matching), preview their effect and are reversible. Excluding never deletes source data.
 - A CSV import names its account and whether it supplements that account's history or stands alone. Overlaps are offered for review, never merged automatically; unmatched rows can be accepted in one decision.
-- In this build these flows run in a clearly labelled **sample records workspace** (`/accounts`) that never changes portfolio figures. Real imports and decisions need the backend accounting API.
+- In this build these flows run in the Portfolio workspace (`/portfolio/transactions`, `/portfolio/imports`) on a clearly labelled **record-management sample** that never changes portfolio figures. Real imports and decisions need the backend accounting API.
 
-## Settings
+## The workspace around the four modules
 
-Settings are the user's preferences, not a list of shortcuts: default platform scope and period, Scenario Lab sizing, which alerts appear, the single-event guardrail (one value shared with Risk), and the data kept in this browser. Each takes effect immediately. Data sources and accounts belong to the portfolio menu next to the data chip.
+Six utilities, one job each (no item appears in two of them):
+
+| Utility | Answers | Contains |
+|---|---|---|
+| Search (⌘K / Ctrl K) | Where is it? | Pages, portfolio sections, accounts, positions, events, records, scenarios, help topics and real actions (import, add record, review, create a scenario). Not market search (Add markets in Scenario Lab) and not record filtering (Transactions). |
+| Portfolio | What am I analyzing, and what is it made of? | The active portfolio (one in this build: no fake switcher), its accounts and freshness, and the Portfolio workspace: Accounts · Sources · Transactions · Imports & reconciliation · Data coverage. |
+| Help | How does Scevia work? | Getting started, user guide, methodology & glossary (what is calculated now vs. with connected accounts), keyboard shortcuts, feedback (GitHub Issues), about. |
+| Notifications | What happened? | Upcoming resolutions (per event), concentration, position value moves, settlements, data quality, stale sources, imports. Stable ids, per-item read state, All / Unread and category filters. Shown while Scevia is open; no email or push. |
+| Settings | How should the workspace behave? | General (default scope), Analytics (default period and grouping), Risk (guardrail), Scenario Lab (how targets are shown), Notifications. Each section restores its own defaults; *Reset all* asks first and never touches scenarios or records. |
+| Account | Who am I, and what data is kept? | Guest state (sign-in not available yet) and Data & privacy: what this tab keeps, cleared by group (preferences, scenarios, sample records, notification state) or all at once, each confirmed. |
+
+**Personal account vs. financial account.** Your Scevia account is your identity and data control. A financial account is a wallet or venue login inside a portfolio. They never share a menu.
+
+**Settings change real behavior only.** Analytical filters on a page (scope, period, grouping) are views and never change the portfolio. Global defaults never rewrite a saved scenario's assumptions.
 
 ## Interaction principles
 

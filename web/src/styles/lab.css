@@ -326,3 +326,6 @@ a.menu-i { text-decoration: none; }
   .help-term { grid-template-columns: minmax(0, 1fr); gap: var(--space-1); }
   .src-row { padding: var(--space-3) var(--space-4); }
 }
+.notif-item .menu-i small { white-space: normal; }
+.rec-table td.rec-st { white-space: normal; min-width: 150px; }
+.rec-table td.rec-st .row { flex-wrap: wrap; row-gap: var(--space-1); }

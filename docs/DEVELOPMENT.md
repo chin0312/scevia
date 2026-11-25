@@ -8,7 +8,7 @@ _Last updated: 2026-11-25_
 
 - **Frontend:** all four modules are built (Overview, Analytics, Risk, Scenario Lab). It is a dark-only design system enforced by lint.
 - **Data:** a deterministic **sample portfolio** (`web/src/data/sample.ts`) used as both fixture and exploration mode. There is no backend, no auth and no account connections.
-- **Records workspace:** `/accounts` is an isolated sample of account and record management (imports, filters, bulk decisions); it never changes portfolio figures.
+- **Portfolio workspace:** `/portfolio/:section` organizes accounts, sources, transactions, imports & reconciliation and data coverage. Its records are an isolated sample of record management; they never change portfolio figures.
 - **Calculations:** one pure module (`web/src/lib/finance.ts`) with 50+ unit tests. Scenario bookkeeping is in `web/src/lib/scenarios.ts`.
 - **Persistence:** scenarios (with their fee treatment and constraints) and the guardrail are kept in `sessionStorage` (one browser tab) through `lib/storage.ts`.
   - Only `scevia-`-prefixed keys are used and cleared.
@@ -27,7 +27,7 @@ _Last updated: 2026-11-25_
 ## Known limitations
 
 - **Data:**
-  - sample data only; the Data sources panel shows account connections as unavailable (buttons are disabled, not simulated);
+  - sample data only; Portfolio › Sources shows connections as unavailable (buttons are disabled, not simulated);
   - intermediate historical marks are synthetic paths between real anchors (first fill → previous visit → today);
   - drawdown and the value chart use weekly snapshots;
   - closed-trade fees are recognised at close; trades can't be partially closed in the history model (a closed trade is one round trip).
@@ -146,20 +146,30 @@ The backend replay (Phase 3, PR #5) is the authority for actual portfolio result
 
 It must not build a second actual ledger. Phase 4 integration maps replay results (holdings, cash by account and asset, realized/unrealized with availability, discrepancies, coverage) onto the presentation model; unknown values stay unavailable, and a known subset is never shown as a verified total. Differences that remain are listed in `docs/METHODOLOGY.md › Account figures`.
 
-## User-controlled records (sample workspace)
+## Portfolio workspace and record management (sample)
 
-`/accounts` (`pages/Records.tsx`, `lib/records.ts`, `data/sampleRecords.ts`) prototypes account and record management against an **isolated sample workspace**. Nothing there changes portfolio figures; nothing is uploaded; only bundled sample CSV files can be "imported".
+`/portfolio/:section` (`pages/Portfolio.tsx`) is the one place for portfolio management; `/accounts` redirects there and the old Data sources modal is gone (`useConnect()` now navigates). Accounts, sources and coverage describe the sample portfolio; transactions and imports run on an isolated record-management sample (`data/sampleRecords.ts`, `lib/records.ts`, `lib/useWorkspace.ts`, key `scevia-records-v2`, validated per record).
 
-| Backend contract (ACCOUNTING.md) | Sample workspace |
+| Backend contract (ACCOUNTING.md, Phase 3) | Sample workspace |
 |---|---|
-| `POST /accounting/accounts` (independent account) | "New imported account" in the import flow |
-| `POST /imports/preview` + `confirm` (`acceptUnlinked`) | Import flow: file → account → relationship (supplement / independent) → preview (overlaps, unreported fees) → confirm (include unmatched rows or keep them for review) → result |
-| `GET /accounting/records` filters | Search, account, venue, source, type, inclusion (incl. corrected), date range, potential duplicates |
-| `POST /accounting/adjustments/preview` / `confirm` (explicit keys or bounded `selection`) | Select rows, select page, **select all matching**; preview shows records changing state and the change in included cash / shares (unknown amounts counted); confirm; undo |
-| Actions `include` / `exclude` / `restore` / `distinct` / `duplicate` / `correct` | Same actions; corrections keep the original values and apply only to imported / manual rows; provider rows can't be edited |
-| `POST /accounting/manual-records` | "Add manual record" (imported or manual accounts only) |
+| Account UUIDs independent of labels | Stable `id`s (`acc-…`); labels are editable and may repeat; venue chosen explicitly |
+| Import preview + confirm, `acceptUnlinked` | Import flow: file → account (existing or new, with venue) → supplement / independent → preview (overlaps, unreported fees, carried decisions) → confirm → result; a local notification |
+| Stable batch ids; `replaces` with decision carry-over by stable event id | Keys are `batchId#row`; the same file into another account never collides; the same file into the same account is a replacement that supersedes the batch and carries decisions by source reference |
+| `GET /accounting/records` filters | Search, account, venue, source, type, status (incl. corrected, any decision), batch, dates, duplicates; filters live in the URL so accounts and imports link to them |
+| Filtered selection with `except`, preview, revision, atomic confirm | Select row / page / all matching; changing filters clears the selection (and says so); preview lists selected, changing and unchanged records, accounts, unknown amounts, cash per account and shares per account + market + outcome |
+| Membership `include` / `exclude` / `restore`; `reset_correction` / `reset_identity` / `reset_duplicate` / `reset_all`; `distinct`; `duplicate` pins a target | Same dimensions and actions. A duplicate whose target is excluded or removed needs review instead of counting again |
+| Manual records (shared storage, separate quota) | Add record: any account (incl. connected), catalog market or local instrument, explicit YES/NO, buy/sell, date-time, fee or "unknown" |
 
-Integration replaces `lib/records.ts` with API calls (keeping the same UI states), uses the returned review revision on confirm and handles 409 by re-previewing. The preview's simple effects are replaced by the backend's before/after holdings and cash. Permanent source deletion stays out of this view.
+Integration replaces `lib/records.ts` with API calls (keeping the UI states), binds confirmations to the returned review revision, handles 409 by re-previewing, and swaps the simple previews for the backend's before/after holdings and cash.
+
+## Phase 4 and Phase 5 presentation contracts
+
+- **Availability.** Every figure that comes from the backend carries a state: known, partial (known components), estimated, user-declared, provider-reported, reconstructed, stale or unavailable. The UI keeps these words (Portfolio › Data coverage lists them) and never shows unavailable as $0.
+- **Scope.** Analytics read a scope (accounts, denomination asset, date range). Page filters stay views; provider-reported and reconstructed views are labelled separately. No cross-asset sums without conversion.
+- **Performance (ANALYTICS.md).** Daily/weekly/monthly series with availability, time- and money-weighted returns, flow-adjusted index, drawdown, contributions. A missing interval is a gap in the chart. The sample Analytics keep their current figures and don't synthesize these metrics.
+- **Risk.** Exposure from selected ledger results and, separately, the provider snapshot; reviewed settlement structures with exact vs. bounded ranges; user-declared payouts only in a conditional view; verified facts never mixed with scenario constraints.
+- **Scenario baseline (Phase 5).** A saved current-portfolio scenario should pin the portfolio **revision** it started from (today only `baseAsOf`, a date). When the effective portfolio changes, the user chooses: keep the original baseline, rebase explicitly to the latest, or create an updated copy. Never reinterpret a saved scenario against different holdings or cash silently.
+- **Scenario funding (Phase 5).** Scenario cash is keyed by venue today and mapped to that venue's single account (shown in setup). With several accounts per venue it must be keyed by account; hypothetical funds never move between accounts.
 
 ## Adding sources (CSV, providers)
 

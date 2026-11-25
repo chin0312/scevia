@@ -23,7 +23,8 @@ App: `web/` (Vite + React + TS). Run `npm run dev` in `web/`. Current state, lim
 - Hypothetical fees go through `estimateFee()` (lib/fees.ts) only. Never hard-code a provider-wide rate, and never recalculate historical fees.
 - Scenario targets go through `targetShares()`: shares, $ amount and % of start are views of one position. Never convert silently when the view changes.
 - Identity is account + instrument. Use `holdingsOfInstrument()`; never map an instrument to "the first" holding.
-- The records workspace (`/accounts`, `lib/records.ts`) is a labelled sample: it never feeds `PortfolioData` or any portfolio figure, never reads user files, and never deletes source records.
+- Portfolio management lives at `/portfolio/:section` (accounts, sources, transactions, imports, coverage). Its records (`lib/records.ts`, `lib/useWorkspace.ts`) are a labelled sample: they never feed `PortfolioData` or any portfolio figure, never read user files, and never delete source records. Record decisions keep separate dimensions (membership, identity, duplicate, correction) with separate resets.
+- One authoritative destination per task. Top-bar utilities: Search · Portfolio · Help · Notifications · Settings (workspace preferences only) · Account (identity and personal data). Don't duplicate an item across them.
 - Actual accounting belongs to the backend replay. Don't build a second actual ledger in the frontend.
 
 ## Numbers

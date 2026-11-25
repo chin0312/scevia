@@ -53,7 +53,7 @@ authority; the frontend will consume its holdings, cash and availability fields 
 | Settlement | Pays $1/$0 directly into cash | Records an entitlement; cash moves on redemption |
 | Partial exits | Closed trades are pre-aggregated | Buy/sell fills replayed with weighted average |
 | Missing marks / opening balances | Not modelled (sample is complete) | Valuation is null; known components are scoped |
-| Evidence decisions | None in the portfolio (see the sample records workspace) | Include / exclude / duplicate / correct / restore, append-only |
+| Evidence decisions | None in the portfolio (see Portfolio › Transactions, a sample) | Include / exclude / duplicate / correct / restore, append-only |
 
 ## History
 

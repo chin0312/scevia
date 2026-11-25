@@ -7,16 +7,12 @@ Required states for every interactive component: **default, hover, focus-visible
 
 ## Shell
 - **AppShell** `.shell`: top bar + left section rail + main. Use for every product page. Don't use for modals or onboarding.
-- **TopNav** `.topbar`: brand wordmark (`/brand/scevia-logo.png`, 28px tall), the 4 areas (Overview, Analytics, Risk, Scenario Lab), utilities on the right, each with one job (no item appears in two menus):
-  - **Search** (⌘K palette);
-  - **Portfolio menu** (data chip `Sample portfolio · date`): portfolio identity, its accounts with freshness, *Data sources*, *Accounts & records*, *Data coverage*;
-  - **Help**: search, “How Scevia calculates”, shortcuts;
-  - **Notifications**: alerts filtered by the user's alert settings, *Mark all read*, *Alert settings*;
-  - **Settings** (gear, opens `SettingsModal` directly);
-  - **Profile** (avatar): sign-in state, Settings, Data & privacy; *Sign in* disabled with a reason.
-  The top bar is `z-index: --z-dropdown` (also when not sticky on phones), so its menus always paint above sticky section bars and cards. Don't add more top-level areas. New things become sections.
-- **SettingsModal** (`components/Settings.tsx`, `lib/settings.tsx`, `.set-row`): tabs *General* (default platform scope, default period, Scenario Lab sizing, currency), *Alerts* (resolution window, price-move threshold, data-quality alerts), *Risk* (single-event guardrail, shared with Risk), *Data & privacy* (what is stored, clear with confirmation). Every control takes effect immediately; *Restore defaults*. Only preferences that change something real belong here; data sources live in the portfolio menu.
-- **SectionRail** `SectionRail` (`.rail`, `.rail-sub`): this page's sections as jump links. Cards that share a row are **one group** (the row container has the group id) with one child entry per card, so side-by-side cards never compete for the active state. Scroll-spy tracks groups only. A click (or a `#hash` link) scrolls to the target, focuses it (`tabindex=-1`) and flashes it (`.section-flash`), and keeps that entry active until the user scrolls themselves (wheel, touch, PageUp/Down, arrows, Home/End, Space); reaching the bottom of the page never overrides it. Exactly one entry has `aria-current="location"`. Programmatic jumps (“Show in Holdings”) call `scrollToSection(id)` so they behave like rail clicks; scrollbar drags and Back/Forward release the lock too. The spy offset is measured from whatever is sticky (top bar, and the rail when it is a horizontal bar). Also holds saved scenarios and one context card. One level of children at most.
+- **TopNav** `.topbar`: brand wordmark (`/brand/scevia-logo.png`, 28px tall), the 4 areas (Overview, Analytics, Risk, Scenario Lab), then six utilities, one job each: **Search** (⌘K palette) · **Portfolio** menu (data chip: identity, accounts with freshness, single-portfolio note, links to the five Portfolio sections) · **Help** menu (opens `HelpCentre` at a tab; feedback link) · **Notifications** (`NotificationCentre`) · **Settings** (gear → `SettingsModal`) · **Account** (`AccountMenu`). No item appears in two utilities. The top bar is `z-index: --z-dropdown` at every width; on phones the utilities wrap to their own row and menus are capped to the viewport (`Menu` width `min(width, 100vw − 16px)`, anchored to the top bar). Don't add top-level areas.
+- **CommandPalette** (`shell.tsx`, `.palette`): combobox + listbox with `aria-activedescendant`; groups (Actions, Pages, Portfolio, Accounts, Positions, Events, Transactions, Scenarios, Help), 5 per group with *Show N more*, ranked (prefix > word > substring; all terms must match label, context or keywords). Results are keyed by stable ids and show context (account, outcome, reference). Empty query shows suggested actions and destinations.
+- **NotificationCentre** (`components/Notifications.tsx`, `lib/notifications.ts`): All / Unread (`menuitemradio`), category select, items with category · date · sample/local, unread tint and a per-item *Mark as read*, *Mark all read*, *Notification preferences*. Opening one marks only that one. Read ids persist in `scevia-notif-read`. Empty states for no notifications, all read, and empty category.
+- **HelpCentre** (`components/Help.tsx`, Modal + Tabs): Getting started (steps linking into the app), Guides (cards with a destination), Methodology (calculated now / with connected accounts), Shortcuts (platform-aware ⌘/Ctrl), About (feedback → GitHub Issues).
+- **SettingsModal** (`components/Settings.tsx`, `lib/settings.tsx`, `.set-row`): tabs General · Analytics · Risk · Scenario Lab · Notifications. Every control takes effect immediately. Footer: *Reset all…* (inline confirmation; preferences only), *Restore {section} defaults*, *Done*. No privacy or data sources here.
+- **AccountMenu / PrivacyDialog** (`components/Account.tsx`): guest header, *Data & privacy*, *Sign in* disabled with a reason. The dialog lists data groups (preferences, scenarios, sample records, notification state) with *Clear…* each and *Clear everything…*, each with an inline confirmation; clearing reloads so no view writes the data back.
 
 ## Responsive behaviour (`web/src/styles/responsive.css`)
 Desktop-first and **fluid**:
@@ -103,7 +99,7 @@ Smaller screens reflow instead of shrinking.
 - **Select** `.select`: native select for long option lists (outcome-matrix events).
 - **InfoTip**: "How calculated" popover on hover and focus; Esc closes. Text must match the definitions in `web/src/lib/finance.ts`.
 - **InfoModal** (Help menu): the shared definitions list, and Data & privacy, which describes only what the current build does. *Clear saved scenarios & settings* asks for confirmation, removes only `scevia-` keys (`lib/storage.ts`) and reports failure instead of claiming success.
-- **DataSources** `useConnect()` (`ConnectSources.tsx`): the active source (sample portfolio) and the user-selectable source types: Polymarket public wallet, Kalshi read-only account, File import (CSV, any provider). Actions that don't work in this build are disabled with a reason. Never simulate a connection, upload, sync or verification.
+- **useConnect()** (`ConnectSources.tsx`): a contextual shortcut that navigates to Portfolio › Sources (or Coverage). There is no separate data-sources modal.
 - **Staleness** `.stale`: warn-coloured source age when data is older than 24h. Pair it with an explanation of what “stale” means for the numbers.
 - **AdjustmentRow**: replaced by `PositionRow`. Invalid input shows inline (`role="alert"`); that row is excluded from results and blocks Save. A funding shortfall is a status note (`role="status"`), not an error: the trade stays in the results as if funded.
 - **Scenario status** (`lib/scenarios.ts`): `Not saved` / `Saved` / `Unsaved changes`, based on name + adjustments vs. the saved snapshot. Revert restores the snapshot.
@@ -137,16 +133,10 @@ Smaller screens reflow instead of shrinking.
 - **OutcomeMatrix / Dumbbell** (`pages/lab/Impact.tsx`): events come from the scenario's own start and result. “Not possible” cells name the linked constraints (followed through other events). Two events are needed for the matrix.
 - **CompareView** (`pages/lab/Compare.tsx`): scenario picker `.pick-chip` (up to 5, plus the actual portfolio), basis Seg (Absolute / Change from start / % of own start), Settlement range (RangeRows), Capital deployment and Category allocation (StackBars), detailed table (setup rows incl. added capital **by venue** and starting value; each value with its change vs. its own start; “change unavailable”). A callout when setups differ.
 
-## Accounts & records (`pages/Records.tsx`, sample workspace)
-- **Account cards** `.acct-card`: venue + account label, kind chip (Connected / Imported / Manual), sources, record range, opening-balance status, unknown-fee and review counts, *Show records*.
-- **Record filters** `.rec-filters` (`role="search"`): search, account, venue, source, type, status (incl. corrected), date range, potential duplicates, *Clear filters*.
-- **Selection scope bar** `.sel-scope` (`role="toolbar"`): count, *Select all N matching* (beyond the page), *Clear selection*, bulk actions (each opens a preview), *Undo: …*.
-- **Record table** `.rec-table`: paginated (10); excluded rows struck through; status chips (Needs review, Excluded/Duplicate, Corrected, Possible duplicate); unknown cash effect and unreported fees shown as such.
-- **ConfirmBulk** (Modal): what the action means, records changing state, change in included cash and shares, unknown amounts counted.
-- **RecordDetail** (Drawer): original vs. effective values, decision, duplicate resolution (*Duplicate of … : exclude this one* / *Distinct trades: keep both*), include/exclude/restore, correction form (imported/manual only).
-- **ImportFlow** (Modal, `.steps`): File → Account → Preview → Confirm → Result, sample files only.
-- **ManualRecord** (Modal): imported/manual accounts only.
-
-- **AdjustmentRow** `.adj`: position + action chip (Buy / Sell / Exit / No change) + Slider + hypothetical price Field + cash impact.
-- **BeforeAfterTable** `.ba`: metric · current · scenario · change (DeltaBadge, colour by "better for the user", not by sign).
-- **OutcomeMatrix** `.matrix`: 2×2 (or 2×N) joint outcomes, each tile shows scenario P&L, "was" P&L, and the change. Unknown dependencies → `warn` chip on the card.
+## Portfolio workspace (`pages/Portfolio.tsx`)
+- **Layout:** a route rail (`/portfolio/:section`, NavLinks styled as the SectionRail) with Accounts · Sources · Transactions · Imports & reconciliation · Data coverage; page head with *Import CSV…* and *Add record…*. A record-management sample callout on Transactions and Imports only.
+- **Account cards** `.acct-card`: name (ellipsis), kind chip, venue, sources, last observed, records and range, opening state, whether it's in the sample figures; review/unknown counts; actions *Transactions* (filtered link), *Import…*, *Add record…*, rename.
+- **Sources** `.src-row`: sources in use per account (sample connections, CSV batches, manual), and *Add a source* with disabled connections.
+- **Transactions:** filters in the URL (`role="search"`), selection scope bar `.sel-scope` (`role="toolbar"`: count and scope, *Select all N matching*, *Clear selection*, primary actions, *More…* resets, *Undo*), paginated `.rec-table`, `ConfirmBulk` preview, `RecordDetail` drawer (original vs. effective values, membership, identity, duplicate candidates as radio choices, explicit resets, correction form with *Fee unknown*).
+- **Imports:** review and duplicate counters, import history table (batch id, account, relationship, status, *Records*, *Replace…*), `ImportFlow` (File → Account → Preview → Confirm → Result).
+- **Data coverage:** the sample portfolio's per-account coverage table, the availability vocabulary, and the record-management sample's counts.
