@@ -160,16 +160,18 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
   }
   const partial = discrepancies.length > 0 || providerEvidencePresent
   const staleMark = (markAt: string | null) => markAt === null || Date.parse(asOf) - Date.parse(markAt) > 86_400_000
-  const accountBalances = [...cash.values()].map((entry) => {
-    const holdings = [...positions.values()].filter((holding) => holding.venue === entry.venue
-      && holding.account === entry.account && holding.asset === entry.asset)
+  const inventoryValues = new Map<string, Decimal | null>()
+  for (const holding of positions.values()) {
+    const key = JSON.stringify([holding.venue, holding.account, holding.asset])
+    const previous = inventoryValues.has(key) ? inventoryValues.get(key)! : zero()
+    if (previous === null) continue
+    if (holding.quantity.isZero()) inventoryValues.set(key, previous.plus(holding.pending))
+    else if (holding.mark === null || staleMark(holding.markAt)) inventoryValues.set(key, null)
+    else inventoryValues.set(key, previous.plus(holding.pending).plus(holding.mark.mul(holding.quantity)))
+  }
+  const accountBalances = [...cash.entries()].map(([key, entry]) => {
     const balance = partial || entry.opening === null || entry.incomplete ? null : entry.opening.plus(entry.delta)
-    const inventory = holdings.reduce<Decimal | null>((total, holding) => {
-      if (total === null) return null
-      if (holding.quantity.isZero()) return total.plus(holding.pending)
-      if (holding.mark === null || staleMark(holding.markAt)) return null
-      return total.plus(holding.pending).plus(holding.mark.mul(holding.quantity))
-    }, zero())
+    const inventory = inventoryValues.has(key) ? inventoryValues.get(key)! : zero()
     return { venue: entry.venue, account: entry.account, asset: entry.asset,
       opening: entry.opening?.toFixed() ?? null, knownDelta: entry.delta.toFixed(), netContributions: entry.contributions.toFixed(),
       knownFees: entry.fees.toFixed(), balance: balance?.toFixed() ?? null,

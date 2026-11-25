@@ -97,6 +97,16 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     return { batchId, confirmedAt: result.confirmedAt }
   })
 
+  async function loadEvidence(portfolioId: string) {
+    const [confirmed, accounts] = await Promise.all([
+      database.select({ id: batches.id, observations: batches.observations }).from(batches)
+        .where(and(eq(batches.portfolioId, portfolioId), isNotNull(batches.confirmedAt), isNull(batches.supersededAt))).orderBy(batches.id),
+      database.select({ id: providerAccounts.id }).from(providerAccounts).where(eq(providerAccounts.portfolioId, portfolioId)).limit(1),
+    ])
+    const evidence = confirmed.flatMap((batch) => batch.observations.map((observation, index) => ({ batchId: batch.id, row: index + 2, observation })))
+    return { evidence, providerEvidencePresent: accounts.length > 0 }
+  }
+
   app.get<{ Params: { portfolioId: string }; Querystring: { asOf?: string } }>(prefix + '/accounting', {
     schema: {
       ...auth, tags: ['accounting'], summary: 'Replay confirmed financial evidence through an optional event-time cutoff',
@@ -109,12 +119,36 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const requested = request.query.asOf
     if (requested && !z.iso.datetime({ offset: true }).safeParse(requested).success) return reply.code(422).send({ error: { code: 'invalid_valuation_cutoff' } })
     const asOf = requested ? new Date(requested).toISOString() : new Date().toISOString()
-    const [confirmed, accounts] = await Promise.all([
-      database.select({ id: batches.id, observations: batches.observations }).from(batches)
-        .where(and(eq(batches.portfolioId, portfolioId), isNotNull(batches.confirmedAt), isNull(batches.supersededAt))).orderBy(batches.id),
-      database.select({ id: providerAccounts.id }).from(providerAccounts).where(eq(providerAccounts.portfolioId, portfolioId)).limit(1),
-    ])
-    const evidence = confirmed.flatMap((batch) => batch.observations.map((observation, index) => ({ batchId: batch.id, row: index + 2, observation })))
-    return replayAccounting(evidence, asOf, accounts.length > 0)
+    const { evidence, providerEvidencePresent } = await loadEvidence(portfolioId)
+    return replayAccounting(evidence, asOf, providerEvidencePresent)
+  })
+
+  app.get<{ Params: { portfolioId: string }; Querystring: { from: string; through: string } }>(prefix + '/accounting/history', {
+    schema: {
+      ...auth, tags: ['accounting'], summary: 'Replay daily portfolio valuations over an inclusive UTC range',
+      params: portfolioParams,
+      querystring: { type: 'object', required: ['from', 'through'], properties: {
+        from: { type: 'string', format: 'date' }, through: { type: 'string', format: 'date' },
+      } },
+    },
+  }, async (request, reply) => {
+    const { portfolioId } = request.params
+    if (!await owned(portfolioId, request.principalId!)) return reply.code(404).send(missing)
+    const day = 86_400_000
+    const start = Date.parse(request.query.from + 'T00:00:00.000Z')
+    const end = Date.parse(request.query.through + 'T00:00:00.000Z')
+    const days = (end - start) / day + 1
+    if (!Number.isInteger(days) || days < 1 || days > 31) {
+      return reply.code(422).send({ error: { code: 'valuation_range_limit' } })
+    }
+    const { evidence, providerEvidencePresent } = await loadEvidence(portfolioId)
+    if (evidence.length * days > 100_000) return reply.code(422).send({ error: { code: 'valuation_work_limit' } })
+    const points = Array.from({ length: days }, (_, index) => {
+      const asOf = new Date(start + (index + 1) * day - 1).toISOString()
+      const state = replayAccounting(evidence, asOf, providerEvidencePresent)
+      return { asOf, status: state.status, discrepancyCount: state.discrepancies.length, balances: state.cash }
+    })
+    return { method: 'weighted_average', points }
+
   })
 }

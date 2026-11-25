@@ -15,6 +15,8 @@ All paths below are under `/v1/portfolios/{portfolioId}` and require the portfol
 
 Preview expires in 30 minutes. Expired previews are inaccessible and purged on the next preview for that portfolio. Request bodies are bounded to 512 KiB, with 2,000 data rows and 25 retained batches per portfolio. Raw file bytes are not stored. Import evidence is data only and the API emits JSON. A production retention/deletion policy and configurable large-import handling are future work.
 
+Use `GET /accounting/history?from=YYYY-MM-DD&through=YYYY-MM-DD` for up to 31 inclusive UTC end-of-day valuations, subject to a bounded replay work limit. Each point carries status and discrepancy count. Historical replay uses only evidence at or before that point.
+
 ## Canonical Scevia CSV
 
 ```csv
@@ -43,6 +45,6 @@ A mark applies only at or after its timestamp. An imported mark is estimated and
 
 ## Handoff and review gates
 
-Phase 2B should show imported, estimated, provider-reported and unavailable amounts distinctly. Phase 4 should consume replay results only with their coverage and discrepancy status. A normalized archive and independent replay are available now. Provider-to-CSV evidence links, reconciliation against source position/cash snapshots, general split/merge and partial redemption, and historical time series beyond single-cutoff replay still require implementation. Existing Phase 2A data-use gates remain. No live financial records were queried in this phase.
+Phase 2B should show imported, estimated, provider-reported and unavailable amounts distinctly. Phase 4 should consume replay results only with their coverage and discrepancy status. A normalized archive and independent replay are available now. Provider-to-CSV evidence links, reconciliation against source position/cash snapshots, general split/merge and partial redemption, and historical series beyond the bounded daily endpoint still require implementation. Existing Phase 2A data-use gates remain. No live financial records were queried in this phase.
 
 For future chain evidence, the MIT [Subgraph V2 exchange handler](https://github.com/psyberck/polymarket-subgraph-v2/blob/main/src/handlers/ExchangeMapping.ts) models decoded fill fees and cost basis with log identity. Use it as a reference for role, collateral and reorganization tests; no source code or dataset was incorporated into this implementation.

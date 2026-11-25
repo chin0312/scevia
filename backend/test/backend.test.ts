@@ -143,6 +143,14 @@ describe('migrations and canonical persistence', () => {
     expect(replaced.statusCode).toBe(200)
     expect((await replace()).json()).toEqual(replaced.json())
     expect((await read()).json().cash).toMatchObject([{ knownDelta: '45' }])
+    const history = await app.inject({
+      method: 'GET', url: prefix + '/accounting/history?from=2026-11-24&through=2026-11-25', headers,
+    })
+    expect(history.statusCode).toBe(200)
+    expect(history.json().points).toMatchObject([
+      { asOf: '2026-11-24T23:59:59.999Z', balances: [] },
+      { asOf: '2026-11-25T23:59:59.999Z', balances: [{ knownDelta: '45' }] },
+    ])
     const unauthorized = await app.inject({
       method: 'POST', url: `/v1/portfolios/${OTHER_PORTFOLIO_ID}/imports/${batch}/confirm`, headers,
     })
