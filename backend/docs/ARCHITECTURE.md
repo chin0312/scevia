@@ -135,3 +135,7 @@ Accounting reads a consistent portfolio evidence window from confirmed CSV batch
 Phase 3 portfolio decisions are a separate append-only overlay keyed by stable import row or provider source identity. Review digests bind a bounded change set to current affected evidence. Adjustments preserve original financial evidence and make the selected portfolio distinct from the complete external account.
 
 The portfolio overlay composes membership, financial values, accepted identity and duplicate links independently. Duplicate links validate the effective target revision. Batch replacement previews reconcile prior decisions against unique stable row identities, and the reviewed decision transfer commits in the same transaction as replacement. Manual records keep their original stable keys under an independent capacity limit.
+
+Phase 4 analytics are scoped read models over Phase 3 replay. Return calculations and reviewed settlement enumeration are reusable pure modules. See [Analytics](ANALYTICS.md) for financial eligibility and workload bounds.
+
+Phase 4 exposes separate revisions for selected accounting evidence, provider coverage, snapshots, current catalog and reviewed settlement inputs. Phase 5 can freeze the scope and revisions of a baseline and reuse the pure analytics functions with isolated scenario inputs. See [Phase 4 methodology](ANALYTICS.md).

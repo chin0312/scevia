@@ -1,14 +1,19 @@
+import { canonicalInstrumentKeys, instrumentKey } from '../analytics/scope.js'
 import { Decimal } from 'decimal.js'
 import { createHash, randomUUID } from 'node:crypto'
-import { and, count, desc, eq, inArray, isNotNull, isNull, lte } from 'drizzle-orm'
+import { and, count, desc, eq, inArray, isNotNull, isNull, lte, or } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { Database } from '../db/client.js'
-import { financialImportBatches as batches, portfolios, providerAccounts, sourceRecords, portfolioAccountingDecisions as decisions } from '../db/schema.js'
+import { financialImportBatches as batches, portfolios, providerAccounts, sourceRecords, instruments, markets, events, reviewedBinaryRules, reviewedSettlementConstraints, portfolioAccountingDecisions as decisions } from '../db/schema.js'
 import { normalizeManualEvent, parseFinancialCsv } from '../accounting/csv.js'
 import { loadProviderEvidence } from '../accounting/provider-evidence.js'
 import type { Evidence, PortfolioDecision } from '../accounting/model.js'
 import { applyDecisions, compose, digest, potentialOverlaps, recordKey, replacementDecisions } from '../accounting/decisions.js'
+import { conditionalSettlementResponse, exposureResponse, performanceResponse } from '../analytics/contracts.js'
+import { analyzePerformance } from '../analytics/performance.js'
+import { analyzeExposure, analyzeReportedExposure } from '../analytics/exposure.js'
+import { settlementRisk } from '../analytics/settlement.js'
 import { replayAccounting } from '../accounting/ledger.js'
 
 const uuid = { type: 'string', format: 'uuid' }
@@ -212,11 +217,12 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
   })
 
   async function loadEvidence(portfolioId: string, cutoff: string, preview?: Pick<typeof batches.$inferSelect,
-    'id' | 'observations' | 'associatedAccountId' | 'sourceLinks'> & { manual?: boolean; acceptUnlinked?: boolean }, read?: AccountingRead, replaces?: string) {
+    'id' | 'observations' | 'associatedAccountId' | 'sourceLinks'> & { manual?: boolean; acceptUnlinked?: boolean }, read?: AccountingRead, replaces?: string, accountScope?: string[]) {
     const readAll = async (tx: AccountingRead) => {
       const confirmed = await tx.select().from(batches).where(and(eq(batches.portfolioId, portfolioId),
         isNotNull(batches.confirmedAt), isNull(batches.supersededAt))).orderBy(batches.id)
-      const provider = await loadProviderEvidence(tx, portfolioId, new Date(cutoff))
+      const provider = await loadProviderEvidence(tx, portfolioId, new Date(cutoff),
+        accountScope?.filter((account) => z.uuid().safeParse(account).success))
       const latest = await tx.selectDistinctOn([decisions.recordKey], {
         key: decisions.recordKey, decision: decisions.decision, revision: decisions.revision,
       }).from(decisions).where(eq(decisions.portfolioId, portfolioId)).orderBy(decisions.recordKey, desc(decisions.revision)).limit(10001)
@@ -241,7 +247,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       if (providerEvidence && providerEvidence.observation.account === batch.associatedAccountId) {
         const canonical = providerEvidence.observation
         const candidate = { ...observation, id: canonical.id }
-        return Object.entries(candidate).every(([key, value]) => canonical[key as keyof typeof canonical] === value)
+        return Object.entries(candidate).every(([key, value]) => key === 'canonicalInstrumentId' || canonical[key as keyof typeof canonical] === value)
           ? { ...ref, observation: canonical, originalObservation: observation, linkedSourceRecordId: requested!,
             ...(providerEvidence.instrumentMetadata ? { instrumentMetadata: providerEvidence.instrumentMetadata } : {}) }
           : { ...ref, observation: candidate, originalObservation: observation, linkedSourceRecordId: requested!, unresolvedReason: 'linked_source_financial_conflict' }
@@ -416,10 +422,11 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
 
       if (change.action === 'correct') {
         if (record.source.kind !== 'import' || !change.correction || (record.linkedSourceRecordId && record.dimensions.identity?.mode !== 'distinct')) throw new Error('import_correction_required')
-        const { coveredThrough, entitlementId, relatedEventId, feeTiming, completeSet, ...base } = record.adjusted
+        const { coveredThrough, entitlementId, relatedEventId, feeTiming, completeSet, canonicalInstrumentId, ...base } = record.adjusted
         if (coveredThrough || entitlementId || relatedEventId || feeTiming || completeSet) throw new Error('replace_complex_event_via_import')
-        next.financial = { revision: record.revision, values: normalizeManualEvent({ ...base, ...change.correction, venue: base.venue, account: base.account,
-          id: base.id }) }
+        const values = normalizeManualEvent({ ...base, ...change.correction, venue: base.venue, account: base.account, id: base.id })
+        if (canonicalInstrumentId && values.instrument === canonicalInstrumentId) values.canonicalInstrumentId = canonicalInstrumentId
+        next.financial = { revision: record.revision, values }
       }
       if (change.action === 'duplicate') {
         const target = change.duplicateOf ? records.get(change.duplicateOf) : undefined
@@ -533,6 +540,293 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       }),
     }
   }
+
+  const AnalyticalDecimal = Decimal.clone({ precision: 70, rounding: Decimal.ROUND_HALF_EVEN })
+  const analyticsQuery = z.object({
+    asset: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$/),
+    asOf: z.iso.datetime({ offset: true }),
+    accounts: z.string().max(4000).optional(), venue: z.string().min(1).max(160).optional(),
+  })
+  const performanceQuery = analyticsQuery.extend({ from: z.iso.datetime({ offset: true }),
+    sampling: z.enum(['daily', 'weekly', 'monthly']).optional() })
+  function selectAccounts(input: Awaited<ReturnType<typeof loadEvidence>>, requested?: string, venue?: string) {
+    const available = new Set([...input.accounts.filter((account) => !venue || account.venue === venue).map((account) => account.account),
+      ...input.records.filter((record) => !venue || record.adjusted.venue === venue).map((record) => record.adjusted.account)])
+    const accounts = requested === undefined ? [...available].sort() : [...new Set(requested.split(','))].sort()
+    if (accounts.length > 100 || accounts.some((account) => !available.has(account))) return null
+    return accounts
+  }
+  function analyticalContext(input: Awaited<ReturnType<typeof loadEvidence>>, accounts: string[], asOf: string, asset: string, venue?: string) {
+    const accountSet = new Set(accounts)
+    const inScope = (row: { account: string; venue: string }) => accountSet.has(row.account) && (!venue || row.venue === venue)
+    const evidence = input.evidence.filter((item) => inScope(item.observation))
+    const identities = new Map<string, { venue: string; account: string; assets: Set<string> }>()
+    for (const row of [...input.accounts, ...input.records.map((item) => item.adjusted), ...input.positions, ...input.balances]) {
+      if (!inScope(row)) continue
+      const key = JSON.stringify([row.venue, row.account])
+      const identity = identities.get(key) ?? { venue: row.venue, account: row.account, assets: new Set<string>() }
+      if ('asset' in row && row.asset && row.asset !== 'UNKNOWN') identity.assets.add(row.asset)
+      if ('feeAsset' in row && row.feeAsset) identity.assets.add(row.feeAsset)
+      identities.set(key, identity)
+    }
+    const accountIdentities = [...identities.values()].sort((left, right) => left.venue.localeCompare(right.venue)
+      || left.account.localeCompare(right.account)).map(({ venue, account, assets }) => ({ venue, account,
+      knownAssets: [...assets].sort(), selectedAssetEvidence: assets.has(asset) ? 'observed' : 'unknown' }))
+    return { evidence, context: { asOf, asset, accounts, accountIdentities, venue: venue ?? null,
+      evidenceRevision: digest(input.records.filter((record) => inScope(record.adjusted))
+        .map((record) => [record.key, record.revision, record.decision]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))),
+      coverageRevision: digest(input.coverage.filter(inScope)
+        .map((row) => [row.venue, row.account, row.entity, row.status, row.lastSuccessfulRunId, row.lastAttemptStatus,
+          row.lastAttemptAt?.toISOString(), row.lastSuccessfulSyncAt?.toISOString()])
+        .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))),
+      accountingScope: input.records.some((record) => inScope(record.adjusted) && record.decision !== null)
+        ? 'user_selected' : 'available_evidence',
+      fullAccountCoverage: 'unverified',
+    } }
+  }
+
+  app.get<{ Params: { portfolioId: string }; Querystring: unknown }>(prefix + '/analytics/performance', {
+    schema: { ...auth, tags: ['analytics'], summary: 'Read selected-asset historical portfolio performance',
+      params: portfolioParams, response: { 200: performanceResponse }, querystring: { type: 'object', required: ['asset', 'asOf', 'from'],
+        properties: z.toJSONSchema(performanceQuery).properties ?? {} } },
+  }, async (request, reply) => {
+    const { portfolioId } = request.params
+    if (!await owned(portfolioId, request.principalId!)) return reply.code(404).send(missing)
+    const query = performanceQuery.safeParse(request.query)
+    if (!query.success) return reply.code(422).send({ error: { code: 'invalid_analytics_scope' } })
+    const asOf = new Date(query.data.asOf).toISOString()
+    const from = new Date(query.data.from).toISOString()
+    if (from >= asOf) return reply.code(422).send({ error: { code: 'invalid_analytics_range' } })
+    return database.transaction(async (tx) => {
+      const input = await loadEvidence(portfolioId, asOf, undefined, tx, undefined, query.data.accounts?.split(','))
+      if (input.truncated) return reply.code(422).send({ error: { code: 'provider_evidence_limit' } })
+      const accounts = selectAccounts(input, query.data.accounts, query.data.venue)
+      if (!accounts) return reply.code(422).send({ error: { code: 'invalid_analytics_accounts' } })
+      const { context, evidence } = analyticalContext(input, accounts, asOf, query.data.asset, query.data.venue)
+      try {
+        const data = analyzePerformance(evidence, accounts, query.data.asset, from, asOf, context.accountIdentities)
+        const canonicalKeys = canonicalInstrumentKeys(evidence, asOf)
+        const identified = [...new Set(data.attribution.instruments
+          .filter((row) => canonicalKeys.has(instrumentKey(row, row.instrument)) && z.uuid().safeParse(row.instrument).success)
+          .map((row) => row.instrument))]
+        const metadata = identified.length ? await tx.select({ instrument: instruments.id, market: markets.id, event: markets.eventId })
+          .from(instruments).innerJoin(markets, eq(instruments.marketId, markets.id)).where(inArray(instruments.id, identified)) : []
+        const identities = new Map(metadata.map((row) => [row.instrument, row]))
+        const instrumentAttribution = data.attribution.instruments.map((row) => {
+          const identity = canonicalKeys.has(instrumentKey(row, row.instrument)) ? identities.get(row.instrument) : undefined
+          return { ...row, market: identity?.market ?? null, event: identity?.event ?? null }
+        })
+        type AttributionRow = typeof instrumentAttribution[number]
+        function groupAttribution(keyOf: (row: AttributionRow) => string) {
+          const groups = new Map<string, AttributionRow[]>()
+          for (const row of instrumentAttribution) {
+            const key = keyOf(row)
+            const group = groups.get(key)
+            if (group) group.push(row)
+            else groups.set(key, [row])
+          }
+          return [...groups].map(([id, rows]) => {
+            const total = (key: 'knownRealized' | 'knownUnrealizedChange') => {
+              const known = rows.flatMap((row) => row[key] === null ? [] : [row[key]])
+              return { subtotal: known.length ? known.reduce((value, amount) => value.plus(amount), new AnalyticalDecimal(0)).toFixed() : null,
+                known: known.length, unavailable: rows.length - known.length }
+            }
+            const realized = total('knownRealized')
+            const unrealized = total('knownUnrealizedChange')
+            return { id, knownRealized: realized.subtotal, knownUnrealizedChange: unrealized.subtotal,
+              realizedComponents: realized.known, unavailableRealizedComponents: realized.unavailable,
+              unrealizedComponents: unrealized.known, unavailableUnrealizedComponents: unrealized.unavailable }
+          })
+        }
+        const attribution = { ...data.attribution, instruments: instrumentAttribution,
+          byEvent: groupAttribution((row) => row.event ?? row.identity).map((row) => ({ ...row, event: row.id })),
+          byMarket: groupAttribution((row) => row.market ?? row.identity),
+          byInstrument: groupAttribution((row) => row.market ? row.instrument : row.identity),
+          byAccount: groupAttribution((row) => JSON.stringify([row.venue, row.account])),
+          byVenue: groupAttribution((row) => row.venue),
+        }
+        const catalogRevision = digest(metadata.sort((left, right) => left.instrument.localeCompare(right.instrument)))
+        const sampling = query.data.sampling ?? 'daily'
+        if (sampling === 'daily') return { context, catalogRevision, from, sampling, ...data, attribution }
+        const history = data.history.filter((point, index, points) => {
+          if (index === 0 || index === points.length - 1) return true
+          const date = new Date(point.asOf)
+          return sampling === 'weekly' ? date.getUTCDay() === 0 : new Date(date.getTime() + 1).getUTCDate() === 1
+        })
+        return { context, catalogRevision, from, sampling, ...data, attribution, history }
+      }
+      catch (error) {
+        if (error instanceof Error && ['analytics_range_limit', 'analytics_replay_limit'].includes(error.message)) {
+          return reply.code(422).send({ error: { code: error.message } })
+        }
+        throw error
+      }
+    }, { isolationLevel: 'repeatable read', accessMode: 'read only' })
+  })
+
+  app.get<{ Params: { portfolioId: string }; Querystring: unknown }>(prefix + '/analytics/exposure', {
+    schema: { ...auth, tags: ['analytics'], summary: 'Read allocation, resolution timeline and reviewed settlement risk',
+      params: portfolioParams, response: { 200: exposureResponse }, querystring: { type: 'object', required: ['asset', 'asOf'],
+        properties: z.toJSONSchema(analyticsQuery).properties ?? {} } },
+  }, async (request, reply) => {
+    const { portfolioId } = request.params
+    if (!await owned(portfolioId, request.principalId!)) return reply.code(404).send(missing)
+    const query = analyticsQuery.safeParse(request.query)
+    if (!query.success) return reply.code(422).send({ error: { code: 'invalid_analytics_scope' } })
+    const { asset } = query.data
+    const asOf = new Date(query.data.asOf).toISOString()
+    return database.transaction(async (tx) => {
+      const input = await loadEvidence(portfolioId, asOf, undefined, tx, undefined, query.data.accounts?.split(','))
+      if (input.truncated) return reply.code(422).send({ error: { code: 'provider_evidence_limit' } })
+      const accounts = selectAccounts(input, query.data.accounts, query.data.venue)
+      if (!accounts) return reply.code(422).send({ error: { code: 'invalid_analytics_accounts' } })
+      const { context, evidence } = analyticalContext(input, accounts, asOf, asset, query.data.venue)
+      const state = replayAccounting(evidence, asOf)
+      const snapshots = input.positions.filter((row) => accounts.includes(row.account) && row.asset === asset && (!query.data.venue || row.venue === query.data.venue))
+      const holdings = state.holdings.filter((row) => row.asset === asset && new AnalyticalDecimal(row.quantity).gt(0))
+      const canonicalKeys = canonicalInstrumentKeys(evidence, asOf)
+      const canonicalHoldings = holdings.filter((row) => canonicalKeys.has(instrumentKey(row, row.instrument)))
+      const ids = [...new Set([...canonicalHoldings, ...snapshots]
+        .map((row) => row.instrument).filter((id) => z.uuid().safeParse(id).success))]
+      if (ids.length > 2000) return reply.code(422).send({ error: { code: 'analytics_instrument_limit' } })
+      const relevant = ids.length ? await tx.select({ instrument: instruments.id, market: instruments.marketId }).from(instruments)
+        .where(inArray(instruments.id, ids)) : []
+      const marketIds = [...new Set(relevant.map((item) => item.market))]
+      const recentSnapshotIds = snapshots.filter((row) => new AnalyticalDecimal(row.quantity).gt(0)
+        && Date.parse(asOf) - row.observedAt.getTime() <= 86_400_000).map((row) => row.instrument)
+      const held = new Set(canonicalHoldings.filter((row) => row.quantityStatus === 'reconstructed_from_declaration')
+        .map((row) => row.instrument))
+      const loadGraph = async (seedInstruments: Set<string>) => {
+        const seedMarkets = [...new Set(relevant.filter((row) => seedInstruments.has(row.instrument)).map((row) => row.market))]
+        const graph = new Set((seedMarkets.length ? await tx.select({ market: reviewedBinaryRules.marketId })
+          .from(reviewedBinaryRules).where(and(inArray(reviewedBinaryRules.marketId, seedMarkets),
+            lte(reviewedBinaryRules.reviewedAt, new Date(asOf)), eq(reviewedBinaryRules.assetCode, asset))) : [])
+          .map((rule) => rule.market))
+        let graphLimit = graph.size > 256
+        let edges: Array<{ left: string; right: string; kind: 'equivalent' | 'exclusive' | 'implies'; evidence: string; reviewedAt: Date }> = []
+        let graphRounds = 0
+        while (graph.size && !graphLimit) {
+          if (++graphRounds > 256) { graphLimit = true; break }
+          const nodes = [...graph]
+          edges = await tx.select({ left: reviewedSettlementConstraints.leftMarketId, right: reviewedSettlementConstraints.rightMarketId,
+            kind: reviewedSettlementConstraints.kind, evidence: reviewedSettlementConstraints.evidence, reviewedAt: reviewedSettlementConstraints.reviewedAt,
+          }).from(reviewedSettlementConstraints).where(and(
+            or(inArray(reviewedSettlementConstraints.leftMarketId, nodes), inArray(reviewedSettlementConstraints.rightMarketId, nodes)),
+            lte(reviewedSettlementConstraints.reviewedAt, new Date(asOf)))).limit(1001)
+          if (edges.length > 1000) { graphLimit = true; break }
+          for (const edge of edges) { graph.add(edge.left); graph.add(edge.right) }
+          graphLimit = graph.size > 256
+          if (nodes.length === graph.size) break
+        }
+        return { graph, edges: graphLimit ? [] : edges, graphLimit }
+      }
+      const effective = await loadGraph(held)
+      const reported = await loadGraph(new Set(recentSnapshotIds))
+      const includedMarkets = [...new Set([...marketIds,
+        ...(effective.graphLimit ? [] : effective.graph), ...(reported.graphLimit ? [] : reported.graph)])]
+
+      const metadata = includedMarkets.length ? await tx.select({
+        instrument: instruments.id, market: markets.id, event: events.id, outcome: instruments.outcomeName,
+        resolvesAt: events.resolvesAt, title: markets.title, lifecycle: markets.lifecycle,
+      }).from(instruments).innerJoin(markets, eq(instruments.marketId, markets.id))
+        .innerJoin(events, eq(markets.eventId, events.id)).where(inArray(markets.id, includedMarkets)) : []
+      const rules = includedMarkets.length ? await tx.select({
+        market: reviewedBinaryRules.marketId, event: markets.eventId, yes: reviewedBinaryRules.yesInstrumentId,
+        no: reviewedBinaryRules.noInstrumentId, asset: reviewedBinaryRules.assetCode, evidence: reviewedBinaryRules.evidence,
+        reviewedAt: reviewedBinaryRules.reviewedAt,
+      }).from(reviewedBinaryRules).innerJoin(markets, eq(reviewedBinaryRules.marketId, markets.id))
+        .where(inArray(reviewedBinaryRules.marketId, includedMarkets)) : []
+      const edgeOrder = (left: { left: string; right: string }, right: { left: string; right: string }) =>
+        left.left.localeCompare(right.left) || left.right.localeCompare(right.right)
+      return { context, metadataBasis: 'current_catalog',
+        snapshotRevision: digest(snapshots.map((row) => ({ ...row, observedAt: row.observedAt.toISOString(),
+          markAt: row.markAt?.toISOString() ?? null })).sort((left, right) => left.venue.localeCompare(right.venue) || left.account.localeCompare(right.account)
+            || left.instrument.localeCompare(right.instrument) || left.sourceRecordId.localeCompare(right.sourceRecordId))),
+        catalogRevision: digest(metadata.map((row) => ({ ...row, resolvesAt: row.resolvesAt?.toISOString() ?? null }))
+          .sort((left, right) => left.instrument.localeCompare(right.instrument))),
+        reportedExposure: analyzeReportedExposure(snapshots, input.coverage, asOf, asset, metadata, rules, reported.edges, reported.graphLimit),
+        settlementEvidenceRevision: digest([
+          rules.map((rule) => ({ ...rule, reviewedAt: rule.reviewedAt.toISOString() })).sort((left, right) => left.market.localeCompare(right.market)),
+          { effectiveLimit: effective.graphLimit, reportedLimit: reported.graphLimit,
+            effective: effective.edges.sort(edgeOrder).map((edge) => ({ ...edge, reviewedAt: edge.reviewedAt.toISOString() })),
+            reported: reported.edges.sort(edgeOrder).map((edge) => ({ ...edge, reviewedAt: edge.reviewedAt.toISOString() })) },
+        ]),
+        ...analyzeExposure(state, asset, accounts, metadata, rules, effective.edges, effective.graph, effective.graphLimit, context.accountIdentities, canonicalKeys) }
+    }, { isolationLevel: 'repeatable read', accessMode: 'read only' })
+  })
+
+  app.get<{ Params: { portfolioId: string } }>(prefix + '/analytics/scope', {
+    schema: { ...auth, tags: ['analytics'], summary: 'Discover accounts and denominations in selected financial evidence', params: portfolioParams },
+  }, async (request, reply) => {
+    const { portfolioId } = request.params
+    if (!await owned(portfolioId, request.principalId!)) return reply.code(404).send(missing)
+    const asOf = new Date().toISOString()
+    const input = await loadEvidence(portfolioId, asOf)
+    const accountKey = (venue: string, id: string) => JSON.stringify([venue, id])
+    const accounts = new Map<string, { id: string; venue: string; assets: Map<string, Set<string>> }>()
+    const register = (venue: string, id: string, asset?: string | null, evidence?: string) => {
+      const key = accountKey(venue, id)
+      let row = accounts.get(key)
+      if (!row) {
+        row = { id, venue, assets: new Map() }
+        accounts.set(key, row)
+      }
+      if (asset && evidence && asset !== 'UNKNOWN') {
+        const sources = row.assets.get(asset) ?? new Set<string>()
+        sources.add(evidence)
+        row.assets.set(asset, sources)
+      }
+    }
+    for (const row of input.accounts) register(row.venue, row.account)
+    for (const { adjusted } of input.records) register(adjusted.venue, adjusted.account)
+    for (const { observation } of input.evidence) {
+      register(observation.venue, observation.account, observation.asset, observation.type === 'mark'
+        ? 'reference_mark' : observation.type === 'opening_inventory' ? 'inventory_declaration'
+          : observation.instrument ? 'selected_position_activity' : 'selected_cash_activity')
+      register(observation.venue, observation.account, observation.feeAsset, 'fee_denomination')
+    }
+    for (const row of input.positions) register(row.venue, row.account, row.asset, 'provider_position_snapshot')
+    for (const row of input.balances) register(row.venue, row.account, row.asset, 'provider_balance_snapshot')
+    return { asOf, status: input.truncated ? 'partial' : 'available',
+      accounts: [...accounts.values()].sort((left, right) => left.venue.localeCompare(right.venue) || left.id.localeCompare(right.id))
+        .map(({ id, venue, assets }) => ({ id, venue, assets: [...assets.keys()].sort(),
+          assetEvidence: [...assets.keys()].sort().map((asset) => ({ asset, sources: [...assets.get(asset)!].sort() })) })) }
+  })
+
+  const conditionalQuery = z.object({
+    account: z.string().min(1).max(160), venue: z.string().min(1).max(160),
+    asOf: z.iso.datetime({ offset: true }), asset: z.string().min(1).max(80),
+    yes: z.string().min(1).max(160), no: z.string().min(1).max(160),
+    unitPayout: z.string().regex(/^\d{1,20}(?:\.\d{1,18})?$/),
+  }).strict()
+  app.post<{ Params: { portfolioId: string }; Body: unknown }>(prefix + '/analytics/conditional-settlement', {
+    bodyLimit: 4096,
+    schema: { ...auth, tags: ['analytics'], summary: 'Calculate an isolated user-declared binary payout',
+      params: portfolioParams, body: { type: 'object' }, response: { 200: conditionalSettlementResponse } },
+  }, async (request, reply) => {
+    const { portfolioId } = request.params
+    if (!await owned(portfolioId, request.principalId!)) return reply.code(404).send(missing)
+    const parsed = conditionalQuery.safeParse(request.body)
+    if (!parsed.success || parsed.data.yes === parsed.data.no || new AnalyticalDecimal(parsed.data.unitPayout).lte(0)) {
+      return reply.code(422).send({ error: { code: 'invalid_payout_declaration' } })
+    }
+    const { account, venue, asset, yes, no, unitPayout } = parsed.data
+    const asOf = new Date(parsed.data.asOf).toISOString()
+    const input = await loadEvidence(portfolioId, asOf, undefined, undefined, undefined, [account])
+    if (input.truncated) return reply.code(422).send({ error: { code: 'provider_evidence_limit' } })
+    if (!selectAccounts(input, account, venue)) return reply.code(422).send({ error: { code: 'invalid_analytics_accounts' } })
+    const { evidence, context } = analyticalContext(input, [account], asOf, asset, venue)
+    const rows = replayAccounting(evidence, asOf).holdings.filter((row) => row.venue === venue && row.asset === asset
+      && (row.instrument === yes || row.instrument === no) && new AnalyticalDecimal(row.quantity).gt(0))
+    return { context, scope: 'user_declared_contract_known_selected_quantities',
+      quantityCoverage: !rows.length ? 'unavailable' : rows.every((row) => row.quantityStatus === 'reconstructed_from_declaration')
+        ? 'reconstructed_from_declaration' : 'known_partial_quantities',
+      declaration: { venue, yes, no, unitPayout },
+      holdings: rows.map(({ instrument, quantity, quantityStatus }) => ({ instrument, quantity, quantityStatus })),
+      result: rows.length ? settlementRisk([{ id: 'declared', yes, no, unitPayout, asset, legs: rows.map((row) => ({
+        account, venue, instrument: row.instrument, quantity: row.quantity, mark: row.markStatus === 'estimated' ? row.mark : null,
+      })) }], []) : { status: 'unavailable', reason: 'no_matching_selected_positions' } }
+  })
 
   app.get<{ Params: { portfolioId: string }; Querystring: { asOf?: string; view?: 'summary' | 'detail' } }>(prefix + '/accounting', {
     schema: {

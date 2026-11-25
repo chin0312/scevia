@@ -8,6 +8,7 @@ export interface FinancialObservation {
   sequence: number | null
   type: typeof financialEventTypes[number] | 'unresolved_activity'
   instrument: string | null
+  canonicalInstrumentId?: string
   asset: string
   quantity: string | null
   price: string | null

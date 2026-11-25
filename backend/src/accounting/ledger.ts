@@ -4,6 +4,7 @@ export type { Evidence } from './model.js'
 
 const Money = Decimal.clone({ precision: 70, rounding: Decimal.ROUND_HALF_EVEN })
 const zero = () => new Money(0)
+const financialValues = ({ canonicalInstrumentId: _association, ...values }: FinancialObservation) => values
 
 export function replayAccounting(evidence: Evidence[], asOf: string, providerEvidencePresent = false) {
   const groups = new Map<string, Evidence[]>()
@@ -22,8 +23,9 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
     groups.set(key, group)
   }
   const events = [...groups.entries()].flatMap(([id, group]) => {
-    const observation = group[0]!.observation
-    if (group.some((item) => JSON.stringify(item.observation) !== JSON.stringify(observation))) {
+    const observation = financialValues(group[0]!.observation)
+    const fingerprint = JSON.stringify(observation)
+    if (group.some((item) => JSON.stringify(financialValues(item.observation)) !== fingerprint)) {
       discrepancies.push({ reason: 'conflicting_observations', sources: sources(group), scope: scope(observation) })
       return []
     }
@@ -44,8 +46,9 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
     venue: string; account: string; asset: string; delta: Decimal; opening: Decimal | null; openingAt: string | null
     contributions: Decimal; unclassifiedCashFlow: boolean; realized: Decimal; fees: Decimal; posted: boolean; inventoryOpeningAt: string | null; coverageFrom: string | null; coverageThrough: string | null; incomplete: boolean; pnlIncomplete: boolean
   }>()
+  type FeeEffect = { kind: 'execution' | 'standalone' | 'funding'; amount: string | null }
   const ledger: Array<{
-    eventId: string; asset: string; instrument?: string; cashDelta: string; quantityDelta: string; basisDelta: string | null; entitlementDelta: string; realized: string | null
+    eventId: string; asset: string; instrument?: string; cashDelta: string; quantityDelta: string; basisDelta: string | null; entitlementDelta: string; realized: string | null; feeEffect?: FeeEffect
   }> = []
   const getCash = (event: FinancialObservation, asset = event.asset) => {
     const key = JSON.stringify([event.venue, event.account, asset])
@@ -116,6 +119,7 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
     if (affectsPosition(event) && positionKeys(event).some((key) => { const group = ordering.get(key)!; return group.count > 1 && !group.buysOnly })) { reject('position_event_order_ambiguous'); continue }
 
     const amount = new Money(event.amount ?? 0)
+    let feeEffect: FeeEffect | undefined
     let delta = zero()
     let quantityDelta = zero()
     let basisDelta: Decimal | null = zero()
@@ -144,6 +148,7 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
       delta = event.type === 'deposit' ? amount : amount.negated()
       if (event.sources.some((item) => 'providerAccountId' in item)) {
         money.unclassifiedCashFlow = true
+        feeEffect = { kind: 'funding', amount: event.fee }
         if (event.fee === null) money.incomplete = true
         else {
           delta = delta.minus(event.fee)
@@ -170,7 +175,10 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
         continue
       }
       delta = event.type === 'fee' ? amount.negated() : amount
-      if (event.type !== 'reward') money.fees = money.fees.minus(delta)
+      if (event.type !== 'reward') {
+        money.fees = money.fees.minus(delta)
+        feeEffect = { kind: 'standalone', amount: delta.negated().toFixed() }
+      }
       realized = delta
     } else if (event.type === 'split' || event.type === 'merge') {
       const quantity = new Money(event.quantity ?? 0)
@@ -269,6 +277,7 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
         if (realized === null) money.pnlIncomplete = true
       }
       if (event.type === 'buy' || event.type === 'sell') {
+        if (sameAsset || event.fee === null) feeEffect = { kind: 'execution', amount: event.fee }
         if (event.fee === null) money.incomplete = true
         else {
           const feeState = getCash(event, event.feeAsset ?? event.asset)
@@ -276,7 +285,7 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
           if (!sameAsset) {
             feeState.posted = true
             feeState.delta = feeState.delta.minus(fee)
-            ledger.push({ eventId: event.economicId, asset: event.feeAsset!, cashDelta: fee.negated().toFixed(), quantityDelta: '0', basisDelta: '0', entitlementDelta: '0', realized: null })
+            ledger.push({ eventId: event.economicId, asset: event.feeAsset!, cashDelta: fee.negated().toFixed(), quantityDelta: '0', basisDelta: '0', entitlementDelta: '0', realized: null, feeEffect: { kind: 'execution', amount: fee.toFixed() } })
           }
         }
       }
@@ -287,7 +296,7 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
     if (realized !== null) money.realized = money.realized.plus(realized)
     ledger.push({ eventId: event.economicId, asset: event.asset,
       ...(event.instrument && !event.completeSet ? { instrument: event.instrument } : {}), cashDelta: delta.toFixed(), quantityDelta: quantityDelta.toFixed(),
-      basisDelta: basisDelta?.toFixed() ?? null, entitlementDelta: entitlementDelta.toFixed(), realized: realized?.toFixed() ?? null })
+      basisDelta: basisDelta?.toFixed() ?? null, entitlementDelta: entitlementDelta.toFixed(), realized: realized?.toFixed() ?? null, ...(feeEffect ? { feeEffect } : {}) })
   }
   const affectedScopes = new Set(discrepancies.filter((issue) => issue.reason !== 'same_time_marks_conflict').flatMap(({ scope }) => [...new Set([scope.asset, scope.feeAsset].filter(Boolean))]
     .map((asset) => JSON.stringify([scope.venue, scope.account, asset]))))
