@@ -1,0 +1,2 @@
+ALTER TABLE "scevia"."financial_import_batches" ADD COLUMN "superseded_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "scevia"."financial_import_batches" ADD COLUMN "superseded_by" uuid;

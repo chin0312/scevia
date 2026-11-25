@@ -89,3 +89,7 @@ This phase does not store provider credentials. Future integrations should use p
 The API is a backend foundation, not a production-ready authentication service. Source payloads and private financial records are stored in plaintext for backend processing; there is no user-facing retention, export, or deletion workflow. These trust boundaries and the planned user-controlled source model are documented in [the architecture and threat model](docs/ARCHITECTURE.md) and [frontend integration notes](docs/FRONTEND_INTEGRATION.md).
 
 The live Polymarket HTTP integration defaults to disabled. Enable it only for permitted local development on a loopback bind by setting `POLYMARKET_LIVE_DATA_AUTHORIZED=YES` in the server environment. This setting records an operator decision and does not grant data-use rights. Fixture adapters and injected contract-test transports work without live access.
+
+See [Accounting](docs/ACCOUNTING.md) for the source-independent CSV format, import workflow, weighted-average replay and Phase 3 scope.
+
+The accounting API supports independent imported accounts, manual records, transaction filters, and previewed bulk reconciliation choices. See the owner-controlled transaction management section in [Accounting](docs/ACCOUNTING.md).

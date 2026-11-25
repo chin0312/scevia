@@ -6,6 +6,7 @@ import { runMigrations } from '../src/db/migrate.js'
 import {
   activityFactOccurrences,
   cashMovements,
+  financialImportBatches,
   events,
   fills,
   instruments,
@@ -112,6 +113,294 @@ afterAll(async () => {
 })
 
 describe('migrations and canonical persistence', () => {
+  it('previews and confirms owned financial CSV batches idempotently', async () => {
+    const app = await createTestApp()
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const prefix = `/v1/portfolios/${PORTFOLIO_ID}`
+    const header = 'venue,account,id,timestamp,sequence,type,instrument,asset,quantity,price,amount,fee,fee_asset'
+    const cash = 'fixture,import,open,2026-11-25T00:00:00Z,,opening_cash,,USDC,,,0,,'
+    const deposit = 'fixture,import,deposit,2026-11-25T01:00:00Z,,deposit,,USDC,,,40,,'
+    const preview = (rows: string[], replaces?: string) => app.inject({
+      method: 'POST', url: prefix + '/imports/preview', headers, payload: { csv: [header, ...rows].join('\n'), replaces },
+    })
+    const first = await preview([cash, deposit])
+    expect(first.statusCode).toBe(200)
+    const batch = first.json().batchId
+    expect((await preview([deposit, cash])).json().batchId).toBe(batch)
+    expect((await preview([cash, 'invalid'])).statusCode).toBe(422)
+    const read = () => app.inject({ method: 'GET', url: prefix + '/accounting?asOf=2026-11-25T02:00:00Z', headers })
+    expect((await read()).json().events).toEqual([])
+    const confirm = () => app.inject({ method: 'POST', url: prefix + '/imports/' + batch + '/confirm?reviewRevision=' + first.json().reviewRevision, headers })
+    const confirmed = await confirm()
+    expect(confirmed.statusCode).toBe(200)
+    expect((await confirm()).json()).toEqual(confirmed.json())
+    expect((await read()).json().events).toHaveLength(2)
+    const revised = await preview([cash, deposit.replace(',40,,', ',45,,')], batch)
+    expect(revised.statusCode).toBe(200)
+    const replace = () => app.inject({
+      method: 'POST', url: prefix + '/imports/' + revised.json().batchId + '/confirm?replaces=' + batch + '&reviewRevision=' + revised.json().reviewRevision, headers,
+    })
+    const replaced = await replace()
+    expect(replaced.statusCode).toBe(200)
+    expect((await replace()).json()).toEqual(replaced.json())
+    expect((await read()).json().cash).toMatchObject([{ knownDelta: '45' }])
+    const history = await app.inject({
+      method: 'GET', url: prefix + '/accounting/history?from=2026-11-24&through=2026-11-25', headers,
+    })
+    expect(history.statusCode).toBe(200)
+    expect(history.json().points).toMatchObject([
+      { asOf: '2026-11-24T23:59:59.999Z', balances: [] },
+      { asOf: '2026-11-25T23:59:59.999Z', balances: [{ knownDelta: '45' }] },
+    ])
+    const unauthorized = await app.inject({
+      method: 'POST', url: `/v1/portfolios/${OTHER_PORTFOLIO_ID}/imports/${batch}/confirm`, headers,
+    })
+    expect(unauthorized.statusCode).toBe(404)
+  })
+
+  it('persists portfolio decisions, freezes filtered selections, and restores the reference valuation', async () => {
+    const app = await createTestApp()
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const prefix = `/v1/portfolios/${PORTFOLIO_ID}`
+    const post = (path: string, payload: object) => app.inject({ method: 'POST', url: prefix + path, headers, payload })
+    const get = (path: string) => app.inject({ method: 'GET', url: prefix + path, headers })
+    const newAccount = await post('/accounting/accounts', { venue: 'fixture-multisided', label: 'Independent import' })
+    expect(newAccount.statusCode).toBe(201)
+    const account = newAccount.json().id
+    const csv = [
+      'venue,account,id,timestamp,sequence,type,instrument,asset,quantity,price,amount,fee,fee_asset',
+      'fixture-multisided,local,cash,2026-11-25T00:00:00Z,,opening_cash,,USD,,,0,,',
+      'fixture-multisided,local,inventory,2026-11-25T00:00:00Z,,opening_inventory,,USD,,,,,',
+      'fixture-multisided,local,funding,2026-11-25T01:00:00Z,,deposit,,USD,,,1000,,',
+      'fixture-multisided,local,buy-a,2026-11-25T02:00:00Z,,buy,yes,USD,100,0.4,,0,',
+      'fixture-multisided,local,buy-b,2026-11-25T03:00:00Z,,buy,yes,USD,100,0.6,,0,',
+      'fixture-multisided,local,duplicate-b,2026-11-25T03:00:00Z,,buy,yes,USD,100,0.6,,0,',
+      'fixture-multisided,local,sale,2026-11-25T04:00:00Z,,sell,yes,USD,80,0.75,,0,',
+      'fixture-multisided,local,mark,2026-11-25T05:00:00Z,,mark,yes,USD,,0.55,,,',
+    ].join('\n')
+    const preview = await post('/imports/preview', { csv, providerAccountId: account })
+    expect(preview.statusCode).toBe(200)
+    const batch = preview.json().batchId
+    expect((await post('/imports/' + batch + '/confirm?reviewRevision=' + preview.json().reviewRevision, {})).statusCode).toBe(200)
+    const rows = (await get('/accounting/records?account=' + account + '&type=buy')).json().items
+    const first = rows.find((row: { original: { id: string } }) => row.original.id === 'buy-a')
+    const duplicate = rows.find((row: { original: { id: string } }) => row.original.id === 'duplicate-b')
+    const preferred = rows.find((row: { original: { id: string } }) => row.original.id === 'buy-b')
+    expect(duplicate.potentialOverlap.count).toBe(1)
+    const choose = async (request: object) => {
+      const result = await post('/accounting/adjustments/preview', request)
+      expect(result.statusCode).toBe(200)
+      return post('/accounting/adjustments/confirm', { ...request, revision: result.json().revision })
+    }
+    expect((await choose({ changes: [{ key: duplicate.key, action: 'duplicate', duplicateOf: preferred.key }] })).statusCode).toBe(200)
+    const state = async () => (await get('/accounting?asOf=2026-11-25T06:00:00Z')).json()
+    expect((await state()).cash).toContainEqual(expect.objectContaining({ account, balance: '960', realized: '20', portfolioValue: '1026' }))
+    const bulk = { selection: { batchId: batch, type: 'buy', action: 'exclude', except: [preferred.key, duplicate.key] } }
+    expect((await choose(bulk)).statusCode).toBe(200)
+    const selected = await state()
+    expect(selected.portfolioScope).toBe('user_selected')
+    expect(selected.holdings).toContainEqual(expect.objectContaining({ account, quantity: '20', basis: '12', unrealized: '-1' }))
+    expect(selected.cash).toContainEqual(expect.objectContaining({ account, balance: '1000', realized: '12', portfolioValue: '1011', fullAccountValue: null }))
+    expect((await choose({ changes: [{ key: first.key, action: 'restore' }] })).statusCode).toBe(200)
+    expect((await state()).cash).toContainEqual(expect.objectContaining({ account, portfolioValue: '1026' }))
+    const adjustment = { changes: [{ key: first.key, action: 'correct', correction: { price: '0.45' } }] }
+    const stale = await post('/accounting/adjustments/preview', adjustment)
+    expect(stale.statusCode).toBe(200)
+    const manual = { accountId: account, clientId: '00000000-0000-4000-8000-000000000912',
+      event: { type: 'reward', timestamp: '2026-11-25T05:30:00Z', asset: 'USD', amount: '1' } }
+    const reviewedCsv = [
+      'venue,account,id,timestamp,sequence,type,instrument,asset,quantity,price,amount,fee,fee_asset',
+      'fixture-multisided,local,bonus,2026-11-25T05:40:00Z,,reward,,USD,,,2,,',
+    ].join('\n')
+    const importPreview = await post('/imports/preview', { csv: reviewedCsv, providerAccountId: account })
+    expect(importPreview.statusCode).toBe(200)
+    const added = await post('/accounting/manual-records', manual)
+    expect(added.statusCode).toBe(200)
+    expect((await post('/accounting/manual-records', manual)).json()).toEqual(added.json())
+    expect((await post('/accounting/adjustments/confirm', { ...adjustment, revision: stale.json().revision })).statusCode).toBe(409)
+    const importPath = '/imports/' + importPreview.json().batchId + '/confirm'
+    expect((await post(importPath, {})).json()).toMatchObject({ error: { code: 'import_preview_stale' } })
+    const importRefreshed = await post('/imports/preview', { csv: reviewedCsv, providerAccountId: account })
+    expect(importRefreshed.json().batchId).toBe(importPreview.json().batchId)
+    expect((await post(importPath + '?reviewRevision=' + importRefreshed.json().reviewRevision, {})).statusCode).toBe(200)
+    expect((await choose(adjustment)).statusCode).toBe(200)
+    const revised = (await get('/accounting/records?key=' + encodeURIComponent(first.key))).json().items[0]
+    expect(revised.original.price).toBe('0.4')
+    expect(revised.effective.observation.price).toBe('0.45')
+    expect((await choose({ changes: [{ key: first.key, action: 'exclude' }] })).statusCode).toBe(200)
+    expect((await choose({ changes: [{ key: first.key, action: 'restore' }] })).statusCode).toBe(200)
+    expect((await get('/accounting/records?key=' + encodeURIComponent(first.key))).json().items[0]
+      .effective.observation.price).toBe('0.45')
+    const beforeRewards = async () => (await get('/accounting?asOf=2026-11-25T05:15:00Z')).json()
+    const correctedState = await beforeRewards()
+    expect(correctedState.holdings).toContainEqual(expect.objectContaining({
+      account, quantity: '120', basis: '63', averageCost: '0.525', marketValue: '66', unrealized: '3',
+    }))
+    expect(correctedState.cash).toContainEqual(expect.objectContaining({
+      account, balance: '955', realized: '18', portfolioValue: '1021',
+    }))
+    const timestamp = '2026-11-25T02:15:00.000Z'
+    const quantityPatch = { key: first.key, action: 'correct', correction: { quantity: '120', timestamp } }
+    expect((await choose({ changes: [quantityPatch] })).statusCode).toBe(200)
+    expect((await choose({ changes: [{ key: first.key, action: 'exclude' }] })).statusCode).toBe(200)
+    const filters = { account, inclusion: 'excluded', from: timestamp, through: timestamp }
+    const filtered = (await get('/accounting/records?' + new URLSearchParams(filters))).json()
+    expect(filtered.items).toEqual([expect.objectContaining({ key: first.key, effective: null,
+      original: expect.objectContaining({ price: '0.4', quantity: '100' }),
+      adjusted: expect.objectContaining({ price: '0.45', quantity: '120', timestamp }),
+    })])
+    expect((await choose({ selection: { ...filters, action: 'restore' } })).statusCode).toBe(200)
+    expect((await get('/accounting/records?key=' + encodeURIComponent(first.key))).json().items[0])
+      .toMatchObject({ effective: { observation: { price: '0.45', quantity: '120', timestamp } } })
+    const reset = await choose({ changes: [{ key: first.key, action: 'reset_correction' }] })
+    expect(reset.statusCode).toBe(200)
+    expect((await get('/accounting/records?key=' + encodeURIComponent(first.key))).json().items[0])
+      .toMatchObject({ adjusted: { price: '0.4', quantity: '100', timestamp: '2026-11-25T02:00:00.000Z' } })
+    expect((await beforeRewards()).cash).toContainEqual(expect.objectContaining({ account, portfolioValue: '1026' }))
+    expect((await choose(adjustment)).statusCode).toBe(200)
+    expect((await choose({ changes: [{ key: preferred.key, action: 'exclude' }] })).statusCode).toBe(200)
+    const broken = (await get('/accounting/records?key=' + encodeURIComponent(duplicate.key))).json().items[0]
+    expect(broken).toMatchObject({ inclusion: 'unresolved', duplicateLinkStatus: 'review_required' })
+    expect((await state()).discrepancies).toContainEqual(expect.objectContaining({ reason: 'duplicate_relationship_requires_review' }))
+    expect((await choose({ changes: [{ key: preferred.key, action: 'restore' }] })).statusCode).toBe(200)
+    expect((await choose({ changes: [{ key: preferred.key, action: 'correct', correction: { price: '0.61' } }] })).statusCode).toBe(200)
+    expect((await get('/accounting/records?key=' + encodeURIComponent(duplicate.key))).json().items[0])
+      .toMatchObject({ inclusion: 'unresolved', duplicateLinkStatus: 'target_revised' })
+    const cycle = await post('/accounting/adjustments/preview', { changes: [{ key: preferred.key, action: 'duplicate', duplicateOf: duplicate.key }] })
+    expect(cycle.statusCode).toBe(422)
+    expect((await choose({ changes: [{ key: preferred.key, action: 'reset_correction' }] })).statusCode).toBe(200)
+    const [header, ...body] = csv.split('\n')
+    const reordered = [header, ...body.map((line) => line.includes(',buy-a,') ? line.replace(',0.4,', ',0.45,') : line).reverse()].join('\n')
+    const replacement = await post('/imports/preview', { csv: reordered, providerAccountId: account, replaces: batch })
+    expect(replacement.statusCode).toBe(200)
+    expect(replacement.json().replacementDecisions).toContainEqual(expect.objectContaining({ from: first.key, status: 'correction_incorporated' }))
+    expect(replacement.json().replacementDecisions).toContainEqual(expect.objectContaining({ from: duplicate.key, status: 'carried' }))
+    const replacementPath = '/imports/' + replacement.json().batchId + '/confirm?replaces=' + batch
+    expect((await post(replacementPath, {})).statusCode).toBe(409)
+    expect((await post(replacementPath + '&reviewRevision=' + replacement.json().reviewRevision, {})).statusCode).toBe(200)
+    const afterReplacement = (await get('/accounting/records?batchId=' + replacement.json().batchId)).json().items
+    expect(afterReplacement).toContainEqual(expect.objectContaining({ original: expect.objectContaining({ id: 'duplicate-b' }),
+      duplicateLinkStatus: 'selected', inclusion: 'excluded' }))
+    expect((await app.inject({ method: 'POST', url: `/v1/portfolios/${OTHER_PORTFOLIO_ID}/accounting/adjustments/preview`,
+      headers, payload: adjustment })).statusCode).toBe(404)
+  })
+
+  it('handles 526 filtered records and hundreds of manual records without using CSV batch capacity', async () => {
+    await new IngestionService(database, providerRegistry).syncProviderAccount(MULTI_ACCOUNT_ROW_ID)
+    const app = await createTestApp()
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const prefix = `/v1/portfolios/${PORTFOLIO_ID}`
+    const post = (path: string, payload: object) => app.inject({ method: 'POST', url: prefix + path, headers, payload })
+    const created = await post('/accounting/accounts', { venue: 'fixture-multisided', label: 'Scale test' })
+    const account = created.json().id
+    const now = new Date()
+    await database.insert(financialImportBatches).values(Array.from({ length: 250 }, (_, index) => ({
+      portfolioId: PORTFOLIO_ID, associatedAccountId: account, contentHash: 'scale-manual-' + index,
+      manual: true, confirmedAt: now, expiresAt: now, observations: [{
+        venue: 'fixture-multisided', account, id: 'manual-' + index, type: 'reward' as const,
+        timestamp: '2026-11-01T00:00:00.000Z', asset: 'USD', amount: '1',
+        instrument: null, quantity: null, price: null, fee: null, feeAsset: null, sequence: null,
+      }],
+    })))
+    const csvHeader = 'venue,account,id,timestamp,sequence,type,instrument,asset,quantity,price,amount,fee,fee_asset'
+    const lines = Array.from({ length: 526 }, (_, index) =>
+      `fixture-multisided,local,large-${index},2026-11-02T00:00:00Z,,buy,yes,USD,1,0.25,,0,`)
+    for (const group of [lines, ['fixture-multisided,local,bonus-scale,2026-11-03T00:00:00Z,,reward,,USD,,,1,,']]) {
+      const preview = await post('/imports/preview', { providerAccountId: account, csv: [csvHeader, ...group].join('\n') })
+      expect(preview.statusCode).toBe(200)
+      expect((await post('/imports/' + preview.json().batchId + '/confirm?reviewRevision=' + preview.json().reviewRevision, {})).statusCode).toBe(200)
+    }
+    const manual = await post('/accounting/manual-records', { accountId: account, clientId: '00000000-0000-4000-8000-000000000913',
+      event: { type: 'reward', timestamp: '2026-11-04T00:00:00Z', asset: 'USD', amount: '1' } })
+    expect(manual.statusCode).toBe(200)
+    const filters = { source: 'import', venue: 'fixture-multisided', type: 'buy', from: '2026-11-01T00:00:00Z',
+      through: '2026-11-15T23:59:59Z', duplicates: 'yes' }
+    const page = await app.inject({ method: 'GET', url: prefix + '/accounting/records?' + new URLSearchParams(filters), headers })
+    expect(page.json()).toMatchObject({ total: 526, limit: 50 })
+    const request = { selection: { ...filters, action: 'exclude', except: [page.json().items[0].key] } }
+    const preview = await post('/accounting/adjustments/preview', request)
+    expect(preview.json().affected).toBe(525)
+    const confirmation = { ...request, revision: preview.json().revision }
+    expect((await post('/accounting/adjustments/confirm', confirmation)).json()).toEqual({ applied: 525 })
+    expect((await post('/accounting/adjustments/confirm', confirmation)).json()).toEqual({ applied: 525 })
+    const summary = await app.inject({ method: 'GET', url: prefix + '/accounting?view=summary', headers })
+    expect(summary.json().holdings).toContainEqual(expect.objectContaining({ account, quantity: '1' }))
+    expect(summary.json().ledger).toBeUndefined()
+  })
+
+  it('replays synchronized provider evidence and coalesces an explicitly linked CSV observation', async () => {
+    await new IngestionService(database, providerRegistry).syncProviderAccount(MULTI_ACCOUNT_ROW_ID)
+    const app = await createTestApp()
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const prefix = `/v1/portfolios/${PORTFOLIO_ID}`
+    const read = () => app.inject({ method: 'GET', url: prefix + '/accounting?asOf=2026-11-25T02:00:00Z', headers })
+    const initial = await read()
+    expect(initial.statusCode).toBe(200)
+    const before = initial.json()
+    expect(before.status).toBe('partial')
+    const fill = before.events.find((event: { id: string }) => event.id === 'fill:fill-multi-001')
+    expect(fill).toMatchObject({ quantity: '12.000000000000000001', account: MULTI_ACCOUNT_ROW_ID, fee: null })
+    expect(before.ledger.filter((entry: { eventId: string }) => entry.eventId === fill.economicId)).toHaveLength(1)
+    expect(before.snapshots.positions).toContainEqual(expect.objectContaining({
+      account: MULTI_ACCOUNT_ROW_ID, quantity: '12.000000000000000001', knownQuantity: '12.000000000000000001',
+      status: 'observed_components_match',
+    }))
+    expect(before.snapshots.cash).toContainEqual(expect.objectContaining({ status: 'not_comparable' }))
+    const header = 'venue,account,id,timestamp,sequence,type,instrument,asset,quantity,price,amount,fee,fee_asset'
+    const csv = [header, `fixture-multisided,local,csv-trade,2026-11-20T12:30:00Z,,buy,${fill.instrument},USD,12.000000000000000001,0.234567890123456789,,,`].join('\n')
+    const create = (providerAccountId: string, sourceLinks?: Record<string, string>) => app.inject({
+      method: 'POST', url: prefix + '/imports/preview', headers, payload: { csv, providerAccountId, sourceLinks },
+    })
+    expect((await create('00000000-0000-4000-8000-000000000999')).statusCode).toBe(404)
+    const preview = await create(MULTI_ACCOUNT_ROW_ID, { 'csv-trade': fill.sources[0].sourceRecordId })
+    expect(preview.statusCode).toBe(200)
+    const confirm = (batch: { batchId: string; reviewRevision: string }) => app.inject({ method: 'POST', url: prefix + '/imports/' + batch.batchId + '/confirm?reviewRevision=' + batch.reviewRevision, headers })
+    expect((await confirm(preview.json())).statusCode).toBe(200)
+    const overlap = await create(MULTI_ACCOUNT_ROW_ID)
+    expect(overlap.statusCode).toBe(200)
+    expect((await confirm(overlap.json())).statusCode).toBe(200)
+    const after = (await read()).json()
+    expect(after.events.find((event: { economicId: string }) => event.economicId === fill.economicId).sources).toHaveLength(2)
+    expect(after.ledger).toEqual(before.ledger)
+    expect(after.discrepancies).toContainEqual(expect.objectContaining({ reason: 'cross_source_overlap_unresolved' }))
+    const records = (await app.inject({ method: 'GET', url: prefix + '/accounting/records', headers })).json().items
+    const pending = records.find((item: { originalReason: string }) => item.originalReason === 'cross_source_overlap_unresolved')
+    const providerFill = records.find((item: { original: { id: string }; acquisition: string }) =>
+      item.acquisition === 'provider' && item.original.id === 'fill:fill-multi-001')
+    const adjust = async (changes: Array<{ key: string; action: string }>) => {
+      const proposal = await app.inject({ method: 'POST', url: prefix + '/accounting/adjustments/preview', headers, payload: { changes } })
+      expect(proposal.statusCode).toBe(200)
+      return app.inject({ method: 'POST', url: prefix + '/accounting/adjustments/confirm', headers, payload: { changes, revision: proposal.json().revision } })
+    }
+    expect((await adjust([{ key: pending.key, action: 'include' }, { key: providerFill.key, action: 'exclude' }])).statusCode).toBe(200)
+    await new IngestionService(database, providerRegistry).syncProviderAccount(MULTI_ACCOUNT_ROW_ID)
+    const selected = (await read()).json()
+    expect(selected.portfolioScope).toBe('user_selected')
+    expect(selected.events).toContainEqual(expect.objectContaining({ authority: 'user_accepted', quantity: '12.000000000000000001' }))
+    const decisionRows = (await app.inject({ method: 'GET', url: prefix + '/accounting/records?inclusion=excluded', headers })).json().items
+    expect(decisionRows).toContainEqual(expect.objectContaining({ key: providerFill.key, acquisition: 'provider', inclusion: 'excluded' }))
+
+    const gapCsv = [header, 'fixture-multisided,local,,2026-11-10T12:30:00Z,,reward,,USD,,,4,,'].join('\n')
+    const supplement = await app.inject({ method: 'POST', url: prefix + '/imports/preview', headers,
+      payload: { csv: gapCsv, providerAccountId: MULTI_ACCOUNT_ROW_ID, acceptUnlinked: true } })
+    expect(supplement.statusCode).toBe(200)
+    expect((await confirm(supplement.json())).statusCode).toBe(200)
+    expect((await read()).json().events).toContainEqual(expect.objectContaining({ type: 'reward', amount: '4',
+      account: MULTI_ACCOUNT_ROW_ID, authority: 'user_accepted' }))
+    const original = new MultiOutcomeFixtureAdapter()
+    const correction: ProviderAdapter = {
+      capabilities: original.capabilities,
+      fetchPage: (request) => original.fetchPage(request.streamName === 'activity' ? { ...request, checkpoint: null } : request),
+      normalizePage: (page, streamName) => original.normalizePage(page, streamName).map((record) =>
+        record.kind !== 'fill' || record.externalId !== 'fill-multi-001' ? record :
+          { ...record, quantity: '13', rawPayload: { ...record.rawPayload, quantity: '13' } }),
+    }
+    await new IngestionService(database, new ProviderRegistry([correction])).syncProviderAccount(MULTI_ACCOUNT_ROW_ID)
+    const revised = (await app.inject({ method: 'GET', url: prefix + '/accounting/records?key=' + encodeURIComponent(providerFill.key), headers })).json().items
+    expect(revised).toContainEqual(expect.objectContaining({ key: providerFill.key, inclusion: 'excluded', revisionChanged: true }))
+
+  })
+
   it('applies a clean migration set and rejects inconsistent fee values', async () => {
     const ingestion = new IngestionService(database, providerRegistry)
     const result = await ingestion.syncProviderAccount({
@@ -335,6 +624,13 @@ describe('migrations and canonical persistence', () => {
     expect(runEvidence.json().items).toContainEqual(expect.objectContaining({
       resolutionReason: 'trade_identity_ambiguous', observationsInRun: 2,
     }))
+    const unresolved = await app.inject({ method: 'GET', url: `/v1/portfolios/${PORTFOLIO_ID}/accounting/records?source=provider&type=TRADE_UNRESOLVED&search=0xno-id`, headers: auth })
+    expect(unresolved.statusCode).toBe(200)
+    expect(unresolved.json().items).toContainEqual(expect.objectContaining({
+      inclusion: 'unresolved', original: expect.objectContaining({ quantity: '2', price: '0.25' }),
+      providerActivity: expect.objectContaining({ type: 'TRADE_UNRESOLVED', transactionHash: '0xno-id', largestObservedRunCount: 2 }),
+    }))
+
 
     omitPositions = true
     const emptyRefresh = await app.inject({ method: 'POST', url: `/v1/provider-accounts/${accountId}/sync?scope=current`, headers: auth })

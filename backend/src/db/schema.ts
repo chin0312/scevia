@@ -540,3 +540,38 @@ export const activityFactOccurrences = scevia.table('activity_fact_occurrences',
   index('activity_fact_occurrences_fact_idx').on(table.activityFactId),
   check('activity_fact_occurrences_positive', sql`${table.observations} > 0`),
 ])
+
+export const financialImportBatches = scevia.table('financial_import_batches', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  portfolioId: uuid('portfolio_id').notNull().references(() => portfolios.id, { onDelete: 'cascade' }),
+  contentHash: text('content_hash').notNull(),
+  associatedAccountId: uuid('associated_account_id').references(() => providerAccounts.id, { onDelete: 'cascade' }),
+  sourceLinks: jsonb('source_links').$type<Record<string, string>>().notNull().default({}),
+  reviewDigest: text('review_digest'),
+  reviewReplaces: uuid('review_replaces'),
+  manual: boolean('manual').notNull().default(false),
+  acceptUnlinked: boolean('accept_unlinked').notNull().default(false),
+  observations: jsonb('observations').$type<import('../accounting/model.js').FinancialObservation[]>().notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
+  supersededAt: timestamp('superseded_at', { withTimezone: true }),
+  supersededBy: uuid('superseded_by'),
+}, (table) => [
+  uniqueIndex('financial_import_batches_portfolio_content').on(table.portfolioId, table.contentHash),
+])
+
+export const portfolioAccountingDecisions = scevia.table('portfolio_accounting_decisions', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  portfolioId: uuid('portfolio_id').notNull().references(() => portfolios.id, { onDelete: 'cascade' }),
+  recordKey: text('record_key').notNull(),
+  decision: jsonb('decision').$type<import('../accounting/model.js').PortfolioDecision | null>(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  revision: integer('revision').notNull(),
+  operationDigest: text('operation_digest'),
+  operationCount: integer('operation_count'),
+}, (table) => [
+  uniqueIndex('accounting_decision_operation_unique').on(table.portfolioId, table.operationDigest),
+  uniqueIndex('accounting_decision_revision_unique').on(table.portfolioId, table.revision),
+  index('accounting_decision_record_idx').on(table.portfolioId, table.recordKey, table.revision),
+])
