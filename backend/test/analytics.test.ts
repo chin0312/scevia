@@ -43,7 +43,8 @@ describe('independent analytics examples', () => {
     expect(settlementRisk([{ ...binary, fixed: 'yes' }, { ...other, fixed: 'no' }], [
       { left: 'a', right: 'b', kind: 'equivalent' },
     ])).toMatchObject({ status: 'unavailable', reason: 'no_feasible_outcomes', supportedSubset: null })
-    const independent = Array.from({ length: 30 }, (_, index) => ({ ...binary, id: String(index) }))
+    const independent = Array.from({ length: 30 }, (_, index) => ({ ...binary, id: String(index), yes: 'yes-' + index, no: 'no-' + index,
+      legs: binary.legs.map((leg) => ({ ...leg, instrument: leg.instrument + '-' + index })) }))
     expect(settlementRisk(independent, [])).toMatchObject({
       status: 'exact', feasibleCountExact: '1073741824', reference: '2760', downside: '360',
       worst: { payout: '2400' }, best: { payout: '3000', changeFromReference: '240' },
@@ -74,7 +75,7 @@ describe('independent analytics examples', () => {
     const observed = analyzeReportedExposure([
       { account: 'a', venue: 'v', instrument: 'yes', asset: 'USD', sourceRecordId: 's', syncRunId: 'refresh',
         observedAt, quantity: '100', mark: '0.6', markAt: observedAt },
-    ], [{ account: 'a', entity: 'positions', status: 'partial', lastSuccessfulRunId: 'refresh',
+    ], [{ account: 'a', venue: 'v', entity: 'positions', status: 'partial', lastSuccessfulRunId: 'refresh',
       lastAttemptStatus: 'complete', lastAttemptAt: observedAt, lastSuccessfulSyncAt: observedAt }],
     asOf, 'USD', metadata, [{ market: 'm', event: 'e', yes: 'yes', no: 'no', asset: 'USD', evidence: 'fixture', reviewedAt: observedAt }], [], false)
     expect(observed).toMatchObject({ effectivePortfolioReplacement: false,
@@ -109,6 +110,46 @@ describe('independent analytics examples', () => {
     expect(eth.trading.fills).toBe(0)
   })
 
+
+  it('uses only execution fees posted for the trades in the notional denominator', () => {
+    const base: FinancialObservation = { venue: 'local', account: 'a', id: 'eth', timestamp: '2026-01-02T00:00:00.000Z',
+      sequence: null, type: 'buy', instrument: 'yes', asset: 'ETH', quantity: '100', price: '1',
+      amount: null, fee: null, feeAsset: null }
+    const evidence = (values: Partial<FinancialObservation>[]) => values.map((value, index): Evidence =>
+      ({ batchId: 'b', row: index + 2, observation: { ...base, ...value } }))
+    const result = (values: Partial<FinancialObservation>[]) => analyzePerformance(evidence(values), ['a'], 'ETH',
+      '2026-01-01T00:00:00.000Z', '2026-01-05T00:00:00.000Z')
+    const usd = { id: 'usd', asset: 'USD', quantity: '1000', fee: '0.05', feeAsset: 'ETH' }
+    const linked = { id: 'fee', timestamp: '2026-01-03T00:00:00.000Z', type: 'fee', instrument: null, quantity: null,
+      price: null, amount: '1', relatedEventId: 'eth', feeTiming: 'execution_evidence' } as const
+    for (const rows of [[{ fee: '1' }, usd, linked], [{}, usd, linked]]) {
+      expect(result(rows)).toMatchObject({ fees: { netExecutionFees: '1.05' },
+        trading: { grossNotional: '100', netExecutionFeeToNotional: { value: '0.01' } } })
+    }
+    expect(result([{}, usd]).trading.netExecutionFeeToNotional.value).toBeNull()
+    expect(result([{ fee: '-1' }, usd]).trading.netExecutionFeeToNotional.value).toBe('-0.01')
+    expect(result([{ fee: '0' }, usd]).trading.netExecutionFeeToNotional.value).toBe('0')
+  })
+
+  it('rejects unsuitable financial data at the settlement boundary', () => {
+    const leg = { instrument: 'yes', quantity: '100', mark: '0.5', account: 'a', venue: 'v' }
+    const group = { id: 'a', yes: 'yes', no: 'no', asset: 'USD', legs: [leg] }
+    for (const quantity of ['-1', 'Infinity', 'NaN', 'abc', '1\n']) {
+      expect(settlementRisk([{ ...group, legs: [{ ...leg, quantity }] }], [])).toMatchObject({ status: 'unavailable', reason: 'invalid_quantity' })
+    }
+    for (const unitPayout of ['0', '-1', 'Infinity', 'NaN']) {
+      expect(settlementRisk([{ ...group, unitPayout }], [])).toMatchObject({ status: 'unavailable', reason: 'invalid_payout_unit' })
+    }
+    for (const mark of ['1.01', '-0.1', 'Infinity', 'NaN']) {
+      expect(settlementRisk([{ ...group, legs: [{ ...leg, mark }] }], [])).toMatchObject({ status: 'unavailable', reason: 'invalid_reference_mark' })
+    }
+    expect(settlementRisk([group, { ...group, id: 'other' }], [])).toMatchObject({ reason: 'conflicting_instrument_assignment' })
+    expect(settlementRisk([group, group], [])).toMatchObject({ reason: 'invalid_group_identity' })
+    expect(settlementRisk([group, { ...group, id: 'b', yes: 'b-yes', no: 'b-no', asset: 'ETH', legs: [] }], []))
+      .toMatchObject({ reason: 'incompatible_settlement_assets' })
+    expect(settlementRisk([group], [])).toMatchObject({ status: 'exact', basis: 'mathematical_model',
+      best: { contributions: [{ market: 'a', instrument: 'yes', account: 'a', venue: 'v', payout: '100' }] } })
+  })
 
   it('matches direct replay at daily boundaries including mark expiry and a later execution fee', () => {
     const item = (row: number, values: Partial<FinancialObservation>): Evidence => ({
@@ -165,6 +206,28 @@ describe('independent analytics examples', () => {
   })
 
 
+  it('does not infer market or event concentration from four unmapped holdings', () => {
+    const asOf = '2026-01-02T00:00:00.000Z'
+    const base: FinancialObservation = { venue: 'v', account: 'a', asset: 'USD', id: null,
+      type: 'opening_position', timestamp: '2026-01-01T00:00:00.000Z', sequence: null, instrument: null,
+      quantity: '500', price: null, amount: '250', fee: null, feeAsset: null }
+    const rows: FinancialObservation[] = Array.from({ length: 4 }, (_, index) => {
+      const instrument = 'local:' + index
+      return [{ ...base, instrument, id: 'opening:' + index }, { ...base, instrument, id: 'mark:' + index,
+        type: 'mark' as const, timestamp: asOf, quantity: null, amount: null, price: '0.5' }]
+    }).flat()
+    const state = replayAccounting([
+      { batchId: 'b', row: 2, observation: { ...base, id: 'inventory', type: 'opening_inventory', quantity: null, amount: null } },
+      ...rows.map((observation, index) => ({ batchId: 'b', row: index + 3, observation })),
+    ], asOf)
+    const { allocation } = analyzeExposure(state, 'USD', ['a'], [], [], [], new Set(), false)
+    expect(allocation.byInstrument).toMatchObject({ denominator: '1000', concentration: { hhi: '0.25' } })
+    for (const dimension of [allocation.byMarket, allocation.byEvent]) {
+      expect(dimension).toMatchObject({ denominator: null, concentration: null, availability: 'unavailable',
+        mappingCoverage: { unmappedKnownValue: '1000', unmappedHoldings: 4 } })
+    }
+  })
+
   it('allocates known cash against explicitly empty inventory', () => {
     const asOf = '2026-01-01T00:00:00.000Z'
     const cash: FinancialObservation = { venue: 'v', account: 'a', asset: 'USD', id: 'cash',
@@ -181,7 +244,7 @@ describe('independent analytics examples', () => {
 
   it('retains supported outcomes when another component has a missing connector rule', () => {
     const group = { id: 'supported', yes: 'yes', no: 'no', legs: [{ instrument: 'yes', quantity: '10', mark: '0.6' }] }
-    const linked = { ...group, id: 'linked' }
+    const linked = { ...group, id: 'linked', yes: 'linked-yes', no: 'linked-no', legs: [] }
     expect(settlementRisk([group, linked], [{ left: 'linked', right: 'missing', kind: 'exclusive' }], ['missing']))
       .toMatchObject({ status: 'unavailable', reason: 'connected_rule_unavailable', supportedSubset: {
         reference: '6', worst: { payout: '0' }, best: { payout: '10' },

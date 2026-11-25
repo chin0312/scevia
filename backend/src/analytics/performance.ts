@@ -1,3 +1,4 @@
+import { coversAccounts, type AccountIdentity } from './scope.js'
 import { Decimal } from 'decimal.js'
 import { replayAccounting } from '../accounting/ledger.js'
 import type { Evidence } from '../accounting/model.js'
@@ -116,9 +117,7 @@ function upperBound(sorted: readonly number[], cutoff: number) {
 
 function valuation(replay: ValuationReplay, accounts: string[], asset: string, openingCutoff: string, scopes: Array<{ venue: string; account: string }>) {
   const balances = replay.cash.filter((bucket) => bucket.asset === asset)
-  const complete = accounts.every((account) => balances.some((bucket) => bucket.account === account))
-    && scopes.every((scope) => balances.some((bucket) => bucket.account === scope.account && bucket.venue === scope.venue))
-    && balances.length > 0 && balances.every((bucket) => bucket.portfolioValue !== null)
+  const complete = coversAccounts(balances, accounts, scopes) && balances.every((bucket) => bucket.portfolioValue !== null)
   return {
     asOf: replay.asOf, accounts: balances.length,
     knownValue: balances.some((bucket) => bucket.portfolioValue !== null)
@@ -132,7 +131,7 @@ function valuation(replay: ValuationReplay, accounts: string[], asset: string, o
   }
 }
 
-export function analyzePerformance(evidence: Evidence[], accounts: string[], asset: string, from: string, through: string) {
+export function analyzePerformance(evidence: Evidence[], accounts: string[], asset: string, from: string, through: string, selectedScopes?: AccountIdentity[]) {
   const start = Date.parse(from)
   const end = Date.parse(through)
   const days = Math.floor((end - start) / dayMs) + 1
@@ -148,7 +147,7 @@ export function analyzePerformance(evidence: Evidence[], accounts: string[], ass
   }
   const initialState = replayAt(evidence, from)
   const endingState = through === from ? initialState : replayAt(evidence, through)
-  const scopes = [...new Map(evidence.map(({ observation: { venue, account } }) =>
+  const scopes = selectedScopes ?? [...new Map(evidence.map(({ observation: { venue, account } }) =>
     [JSON.stringify([venue, account]), { venue, account }])).values()]
   const opening = valuation(initialState, accounts, asset, from, scopes)
   const ending = valuation(endingState, accounts, asset, from, scopes)
@@ -334,7 +333,7 @@ export function analyzePerformance(evidence: Evidence[], accounts: string[], ass
   const realized = sum([...attribution.values()].map((amount) => amount.toFixed()))
   const eligibleTrades = posted.filter((event) => event.type === 'buy' || event.type === 'sell')
   const postedFeeRows = entries.flatMap((entry) => entry.feeEffect
-    ? [{ ...entry.feeEffect, timestamp: byId.get(entry.eventId)!.timestamp,
+    ? [{ ...entry.feeEffect, eventId: entry.eventId, timestamp: byId.get(entry.eventId)!.timestamp,
       venue: byId.get(entry.eventId)!.venue, account: byId.get(entry.eventId)!.account }] : [])
   const feeSum = (rows: typeof postedFeeRows, kind: 'execution' | 'standalone' | 'funding', negative: boolean) => sum(rows
     .filter((row) => row.kind === kind && row.amount !== null && (negative ? decimal(row.amount).lt(0) : decimal(row.amount).gte(0)))
@@ -373,6 +372,11 @@ export function analyzePerformance(evidence: Evidence[], accounts: string[], ass
     const trades = eligibleTrades.filter(within)
     return { ...point, trading: tradeSummary(trades), fees: feeSummary(postedFeeRows.filter(within)) }
   })
+  const executionByTrade = new Map(postedFeeRows.filter((row) => row.kind === 'execution').map((row) => [row.eventId, row.amount]))
+  const compatibleFees = eligibleTrades.map((event) => executionByTrade.get(event.economicId))
+  const compatibleNotional = notional(eligibleTrades)
+  const feeToNotional = compatibleNotional.gt(0) && compatibleFees.every((fee) => fee != null)
+    ? sum(compatibleFees).div(compatibleNotional) : null
   const feeRows = postedFeeRows
   const executionCharges = feeSum(feeRows, 'execution', false)
   const executionRebates = feeSum(feeRows, 'execution', true)
@@ -428,10 +432,7 @@ export function analyzePerformance(evidence: Evidence[], accounts: string[], ass
       exitProfitFactor: metric(losses.gt(0) ? gains.div(losses) : null, 'no_known_gross_exit_loss'),
       ...tradeSummary(eligibleTrades),
       byAccount: groupActivity(eligibleTrades, tradeSummary),
-      netExecutionFeeToNotional: metric(notional(eligibleTrades).gt(0)
-        && feeRows.filter((row) => row.kind === 'execution').every((row) => row.amount !== null)
-        && eligibleTrades.every((event) => !event.feeAsset || event.feeAsset === asset)
-        ? executionCharges.minus(executionRebates).div(notional(eligibleTrades)) : null, 'compatible_posted_fees_or_notional_missing'),
+      netExecutionFeeToNotional: metric(feeToNotional, 'compatible_posted_fees_or_notional_missing'),
       grossRealizedExitGains: gains.toFixed(), grossRealizedExitLosses: losses.toFixed(),
       attachedFeeObservations: feeRows.filter((row) => row.kind === 'execution' && row.amount !== null).length,
       missingAttachedFees: feeRows.filter((row) => row.kind === 'execution' && row.amount === null).length,

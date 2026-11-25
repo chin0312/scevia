@@ -4,6 +4,7 @@ export type { Evidence } from './model.js'
 
 const Money = Decimal.clone({ precision: 70, rounding: Decimal.ROUND_HALF_EVEN })
 const zero = () => new Money(0)
+const financialValues = ({ canonicalInstrumentId: _association, ...values }: FinancialObservation) => values
 
 export function replayAccounting(evidence: Evidence[], asOf: string, providerEvidencePresent = false) {
   const groups = new Map<string, Evidence[]>()
@@ -22,8 +23,9 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
     groups.set(key, group)
   }
   const events = [...groups.entries()].flatMap(([id, group]) => {
-    const observation = group[0]!.observation
-    if (group.some((item) => JSON.stringify(item.observation) !== JSON.stringify(observation))) {
+    const observation = financialValues(group[0]!.observation)
+    const fingerprint = JSON.stringify(observation)
+    if (group.some((item) => JSON.stringify(financialValues(item.observation)) !== fingerprint)) {
       discrepancies.push({ reason: 'conflicting_observations', sources: sources(group), scope: scope(observation) })
       return []
     }

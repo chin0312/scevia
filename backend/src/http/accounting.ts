@@ -1,3 +1,4 @@
+import { canonicalInstrumentKeys, instrumentKey } from '../analytics/scope.js'
 import { Decimal } from 'decimal.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { and, count, desc, eq, inArray, isNotNull, isNull, lte, or } from 'drizzle-orm'
@@ -246,7 +247,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       if (providerEvidence && providerEvidence.observation.account === batch.associatedAccountId) {
         const canonical = providerEvidence.observation
         const candidate = { ...observation, id: canonical.id }
-        return Object.entries(candidate).every(([key, value]) => canonical[key as keyof typeof canonical] === value)
+        return Object.entries(candidate).every(([key, value]) => key === 'canonicalInstrumentId' || canonical[key as keyof typeof canonical] === value)
           ? { ...ref, observation: canonical, originalObservation: observation, linkedSourceRecordId: requested!,
             ...(providerEvidence.instrumentMetadata ? { instrumentMetadata: providerEvidence.instrumentMetadata } : {}) }
           : { ...ref, observation: candidate, originalObservation: observation, linkedSourceRecordId: requested!, unresolvedReason: 'linked_source_financial_conflict' }
@@ -421,10 +422,11 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
 
       if (change.action === 'correct') {
         if (record.source.kind !== 'import' || !change.correction || (record.linkedSourceRecordId && record.dimensions.identity?.mode !== 'distinct')) throw new Error('import_correction_required')
-        const { coveredThrough, entitlementId, relatedEventId, feeTiming, completeSet, ...base } = record.adjusted
+        const { coveredThrough, entitlementId, relatedEventId, feeTiming, completeSet, canonicalInstrumentId, ...base } = record.adjusted
         if (coveredThrough || entitlementId || relatedEventId || feeTiming || completeSet) throw new Error('replace_complex_event_via_import')
-        next.financial = { revision: record.revision, values: normalizeManualEvent({ ...base, ...change.correction, venue: base.venue, account: base.account,
-          id: base.id }) }
+        const values = normalizeManualEvent({ ...base, ...change.correction, venue: base.venue, account: base.account, id: base.id })
+        if (canonicalInstrumentId && values.instrument === canonicalInstrumentId) values.canonicalInstrumentId = canonicalInstrumentId
+        next.financial = { revision: record.revision, values }
       }
       if (change.action === 'duplicate') {
         const target = change.duplicateOf ? records.get(change.duplicateOf) : undefined
@@ -559,7 +561,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const inScope = (row: { account: string; venue: string }) => accountSet.has(row.account) && (!venue || row.venue === venue)
     const evidence = input.evidence.filter((item) => inScope(item.observation))
     const identities = new Map<string, { venue: string; account: string; assets: Set<string> }>()
-    for (const row of [...input.accounts, ...evidence.map((item) => item.observation), ...input.positions, ...input.balances]) {
+    for (const row of [...input.accounts, ...input.records.map((item) => item.adjusted), ...input.positions, ...input.balances]) {
       if (!inScope(row)) continue
       const key = JSON.stringify([row.venue, row.account])
       const identity = identities.get(key) ?? { venue: row.venue, account: row.account, assets: new Set<string>() }
@@ -573,8 +575,8 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     return { evidence, context: { asOf, asset, accounts, accountIdentities, venue: venue ?? null,
       evidenceRevision: digest(input.records.filter((record) => inScope(record.adjusted))
         .map((record) => [record.key, record.revision, record.decision]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))),
-      coverageRevision: digest(input.coverage.filter((row) => accountSet.has(row.account))
-        .map((row) => [row.account, row.entity, row.status, row.lastSuccessfulRunId, row.lastAttemptStatus,
+      coverageRevision: digest(input.coverage.filter(inScope)
+        .map((row) => [row.venue, row.account, row.entity, row.status, row.lastSuccessfulRunId, row.lastAttemptStatus,
           row.lastAttemptAt?.toISOString(), row.lastSuccessfulSyncAt?.toISOString()])
         .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))),
       accountingScope: input.records.some((record) => inScope(record.adjusted) && record.decision !== null)
@@ -602,13 +604,16 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       if (!accounts) return reply.code(422).send({ error: { code: 'invalid_analytics_accounts' } })
       const { context, evidence } = analyticalContext(input, accounts, asOf, query.data.asset, query.data.venue)
       try {
-        const data = analyzePerformance(evidence, accounts, query.data.asset, from, asOf)
-        const identified = data.attribution.instruments.map(({ instrument }) => instrument).filter((id) => z.uuid().safeParse(id).success)
+        const data = analyzePerformance(evidence, accounts, query.data.asset, from, asOf, context.accountIdentities)
+        const canonicalKeys = canonicalInstrumentKeys(evidence, asOf)
+        const identified = [...new Set(data.attribution.instruments
+          .filter((row) => canonicalKeys.has(instrumentKey(row, row.instrument)) && z.uuid().safeParse(row.instrument).success)
+          .map((row) => row.instrument))]
         const metadata = identified.length ? await tx.select({ instrument: instruments.id, market: markets.id, event: markets.eventId })
           .from(instruments).innerJoin(markets, eq(instruments.marketId, markets.id)).where(inArray(instruments.id, identified)) : []
         const identities = new Map(metadata.map((row) => [row.instrument, row]))
         const instrumentAttribution = data.attribution.instruments.map((row) => {
-          const identity = identities.get(row.instrument)
+          const identity = canonicalKeys.has(instrumentKey(row, row.instrument)) ? identities.get(row.instrument) : undefined
           return { ...row, market: identity?.market ?? null, event: identity?.event ?? null }
         })
         type AttributionRow = typeof instrumentAttribution[number]
@@ -640,14 +645,15 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
           byAccount: groupAttribution((row) => JSON.stringify([row.venue, row.account])),
           byVenue: groupAttribution((row) => row.venue),
         }
+        const catalogRevision = digest(metadata.sort((left, right) => left.instrument.localeCompare(right.instrument)))
         const sampling = query.data.sampling ?? 'daily'
-        if (sampling === 'daily') return { context, from, sampling, ...data, attribution }
+        if (sampling === 'daily') return { context, catalogRevision, from, sampling, ...data, attribution }
         const history = data.history.filter((point, index, points) => {
           if (index === 0 || index === points.length - 1) return true
           const date = new Date(point.asOf)
           return sampling === 'weekly' ? date.getUTCDay() === 0 : new Date(date.getTime() + 1).getUTCDate() === 1
         })
-        return { context, from, sampling, ...data, attribution, history }
+        return { context, catalogRevision, from, sampling, ...data, attribution, history }
       }
       catch (error) {
         if (error instanceof Error && ['analytics_range_limit', 'analytics_replay_limit'].includes(error.message)) {
@@ -678,7 +684,9 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       const state = replayAccounting(evidence, asOf)
       const snapshots = input.positions.filter((row) => accounts.includes(row.account) && row.asset === asset && (!query.data.venue || row.venue === query.data.venue))
       const holdings = state.holdings.filter((row) => row.asset === asset && new AnalyticalDecimal(row.quantity).gt(0))
-      const ids = [...new Set([...holdings, ...snapshots]
+      const canonicalKeys = canonicalInstrumentKeys(evidence, asOf)
+      const canonicalHoldings = holdings.filter((row) => canonicalKeys.has(instrumentKey(row, row.instrument)))
+      const ids = [...new Set([...canonicalHoldings, ...snapshots]
         .map((row) => row.instrument).filter((id) => z.uuid().safeParse(id).success))]
       if (ids.length > 2000) return reply.code(422).send({ error: { code: 'analytics_instrument_limit' } })
       const relevant = ids.length ? await tx.select({ instrument: instruments.id, market: instruments.marketId }).from(instruments)
@@ -686,7 +694,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       const marketIds = [...new Set(relevant.map((item) => item.market))]
       const recentSnapshotIds = snapshots.filter((row) => new AnalyticalDecimal(row.quantity).gt(0)
         && Date.parse(asOf) - row.observedAt.getTime() <= 86_400_000).map((row) => row.instrument)
-      const held = new Set(holdings.filter((row) => row.quantityStatus === 'reconstructed_from_declaration')
+      const held = new Set(canonicalHoldings.filter((row) => row.quantityStatus === 'reconstructed_from_declaration')
         .map((row) => row.instrument))
       const loadGraph = async (seedInstruments: Set<string>) => {
         const seedMarkets = [...new Set(relevant.filter((row) => seedInstruments.has(row.instrument)).map((row) => row.market))]
@@ -695,13 +703,13 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
             lte(reviewedBinaryRules.reviewedAt, new Date(asOf)), eq(reviewedBinaryRules.assetCode, asset))) : [])
           .map((rule) => rule.market))
         let graphLimit = graph.size > 256
-        let edges: Array<{ left: string; right: string; kind: 'equivalent' | 'exclusive' | 'implies'; evidence: string }> = []
+        let edges: Array<{ left: string; right: string; kind: 'equivalent' | 'exclusive' | 'implies'; evidence: string; reviewedAt: Date }> = []
         let graphRounds = 0
         while (graph.size && !graphLimit) {
           if (++graphRounds > 256) { graphLimit = true; break }
           const nodes = [...graph]
           edges = await tx.select({ left: reviewedSettlementConstraints.leftMarketId, right: reviewedSettlementConstraints.rightMarketId,
-            kind: reviewedSettlementConstraints.kind, evidence: reviewedSettlementConstraints.evidence,
+            kind: reviewedSettlementConstraints.kind, evidence: reviewedSettlementConstraints.evidence, reviewedAt: reviewedSettlementConstraints.reviewedAt,
           }).from(reviewedSettlementConstraints).where(and(
             or(inArray(reviewedSettlementConstraints.leftMarketId, nodes), inArray(reviewedSettlementConstraints.rightMarketId, nodes)),
             lte(reviewedSettlementConstraints.reviewedAt, new Date(asOf)))).limit(1001)
@@ -732,16 +740,18 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
         left.left.localeCompare(right.left) || left.right.localeCompare(right.right)
       return { context, metadataBasis: 'current_catalog',
         snapshotRevision: digest(snapshots.map((row) => ({ ...row, observedAt: row.observedAt.toISOString(),
-          markAt: row.markAt?.toISOString() ?? null })).sort((left, right) => left.sourceRecordId.localeCompare(right.sourceRecordId))),
+          markAt: row.markAt?.toISOString() ?? null })).sort((left, right) => left.venue.localeCompare(right.venue) || left.account.localeCompare(right.account)
+            || left.instrument.localeCompare(right.instrument) || left.sourceRecordId.localeCompare(right.sourceRecordId))),
         catalogRevision: digest(metadata.map((row) => ({ ...row, resolvesAt: row.resolvesAt?.toISOString() ?? null }))
           .sort((left, right) => left.instrument.localeCompare(right.instrument))),
         reportedExposure: analyzeReportedExposure(snapshots, input.coverage, asOf, asset, metadata, rules, reported.edges, reported.graphLimit),
         settlementEvidenceRevision: digest([
           rules.map((rule) => ({ ...rule, reviewedAt: rule.reviewedAt.toISOString() })).sort((left, right) => left.market.localeCompare(right.market)),
           { effectiveLimit: effective.graphLimit, reportedLimit: reported.graphLimit,
-            effective: effective.edges.sort(edgeOrder), reported: reported.edges.sort(edgeOrder) },
+            effective: effective.edges.sort(edgeOrder).map((edge) => ({ ...edge, reviewedAt: edge.reviewedAt.toISOString() })),
+            reported: reported.edges.sort(edgeOrder).map((edge) => ({ ...edge, reviewedAt: edge.reviewedAt.toISOString() })) },
         ]),
-        ...analyzeExposure(state, asset, accounts, metadata, rules, effective.edges, effective.graph, effective.graphLimit) }
+        ...analyzeExposure(state, asset, accounts, metadata, rules, effective.edges, effective.graph, effective.graphLimit, context.accountIdentities, canonicalKeys) }
     }, { isolationLevel: 'repeatable read', accessMode: 'read only' })
   })
 
@@ -768,6 +778,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       }
     }
     for (const row of input.accounts) register(row.venue, row.account)
+    for (const { adjusted } of input.records) register(adjusted.venue, adjusted.account)
     for (const { observation } of input.evidence) {
       register(observation.venue, observation.account, observation.asset, observation.type === 'mark'
         ? 'reference_mark' : observation.type === 'opening_inventory' ? 'inventory_declaration'
@@ -812,8 +823,8 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
         ? 'reconstructed_from_declaration' : 'known_partial_quantities',
       declaration: { venue, yes, no, unitPayout },
       holdings: rows.map(({ instrument, quantity, quantityStatus }) => ({ instrument, quantity, quantityStatus })),
-      result: rows.length ? settlementRisk([{ id: 'declared', yes, no, unitPayout, legs: rows.map((row) => ({
-        account, instrument: row.instrument, quantity: row.quantity, mark: row.markStatus === 'estimated' ? row.mark : null,
+      result: rows.length ? settlementRisk([{ id: 'declared', yes, no, unitPayout, asset, legs: rows.map((row) => ({
+        account, venue, instrument: row.instrument, quantity: row.quantity, mark: row.markStatus === 'estimated' ? row.mark : null,
       })) }], []) : { status: 'unavailable', reason: 'no_matching_selected_positions' } }
   })
 

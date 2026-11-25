@@ -11,7 +11,7 @@ const time = z.iso.datetime({ offset: true })
 export function parseFinancialCsv(input: string) {
   const table = csvRows(input.replace(/^\uFEFF/, ''))
   const header = table.shift()
-  const allowed: readonly string[] = [...columns, 'entitlement_id', 'counter_instrument', 'primary_basis_fraction', 'related_event_id', 'fee_timing', 'coverage_through']
+  const allowed: readonly string[] = [...columns, 'entitlement_id', 'counter_instrument', 'primary_basis_fraction', 'related_event_id', 'fee_timing', 'coverage_through', 'canonical_instrument_id']
   if (!header || new Set(header).size !== header.length || header.some((name) => !allowed.includes(name))
     || columns.some((name) => !header.includes(name))) throw new Error('invalid_csv_header')
   if (table.length === 0) throw new Error('empty_csv')
@@ -21,6 +21,11 @@ export function parseFinancialCsv(input: string) {
     try {
       if (cells.length !== header.length) throw new Error('invalid_column_count')
       const row = normalize(columns.map((name) => cells[header.indexOf(name)]!))
+      const canonical = cells[header.indexOf('canonical_instrument_id')]?.trim()
+      if (canonical) {
+        if (canonical !== row.instrument || !z.uuid().safeParse(canonical).success) throw new Error('invalid_canonical_instrument')
+        row.canonicalInstrumentId = canonical
+      }
       const entitlement = cells[header.indexOf('entitlement_id')]?.trim()
       if (entitlement) {
         if (row.type !== 'redemption' || !identifier.test(entitlement)) throw new Error('invalid_entitlement_reference')

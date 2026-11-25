@@ -72,3 +72,13 @@ Scope discovery identifies venue/account pairs and returns the observed evidence
 Performance returns include calendar-period posted fill counts, gross trade notional and posted fees by asset. Charges, rebates, missing amounts and observed zeros remain separate. Attribution reports the number of instruments lacking a usable unrealized change and retains the known subtotal. Fee and trade totals are limited to posted activity.
 
 A baseline can store the exact analytical scope and as-of cutoff, the evidence and coverage revisions, and the exposure catalog, snapshot and reviewed-settlement revisions. A changed revision warrants an explicit baseline refresh or rebase. Phase 5 can call the pure calculations with scenario inputs while preserving the provenance and scope of the baseline. Historical catalog versioning, authoritative market-level resolution timing, permissioned native contract ingestion and production benchmarks remain integration work.
+
+### Phase 5 contract details
+
+Execution fee totals include posted effects denominated in the selected asset. The fee-to-notional ratio joins the fee to the same posted trade that contributes to notional. A compatible explicit zero or a posted rebate participates at its signed value. Unknown or incompatible fees on included trades make the ratio unavailable. Phase 3 resolves linked execution fee evidence before aggregation.
+
+Performance and exposure use the same selected venue/account pairs. A missing selected-asset bucket leaves the aggregate unavailable. Known cash remains visible as a subtotal. Market and event concentrations use identified holdings only and report mapping coverage and known unmapped value separately.
+
+A provider fill with a canonical source association can establish instrument identity. CSV rows can declare an existing catalog instrument by supplying its UUID in both `instrument` and the optional `canonical_instrument_id` column. The catalog lookup and declaration apply within the financial venue/account scope. An unassociated local identifier retains its local identity, including when its text matches an existing catalog UUID.
+
+The binary settlement solver validates identities, denominations, quantities, marks and payout units before enumeration. Marks may be null, or decimals between zero and the payout unit. It reports exact modeled extrema with venue/account, market and instrument payoff contributions and jointly feasible outcomes. Unavailable results carry structured reasons and can include a separately qualified evaluated subset. Mathematical exactness describes the supplied model. Financial completeness and rule authority are reported by the enclosing analytical view.
