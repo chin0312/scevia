@@ -9,7 +9,7 @@ _Last updated: 2026-11-25_
 - **Frontend:** all four modules are built (Overview, Analytics, Risk, Scenario Lab). It is a dark-only design system enforced by lint.
 - **Data:** a deterministic **sample portfolio** (`web/src/data/sample.ts`) used as both fixture and exploration mode. There is no backend, no auth and no account connections.
 - **Calculations:** one pure module (`web/src/lib/finance.ts`) with 50+ unit tests. Scenario bookkeeping is in `web/src/lib/scenarios.ts`.
-- **Persistence:** scenarios, the guardrail, the fee setting and the BTC × ETH relationship choice are kept in `sessionStorage` (one browser tab) through `lib/storage.ts`.
+- **Persistence:** scenarios (with their fee treatment and constraints) and the guardrail are kept in `sessionStorage` (one browser tab) through `lib/storage.ts`.
   - Only `scevia-`-prefixed keys are used and cleared.
   - Reads are validated (`scenarios.sanitize`), and dangling position references are dropped.
   - Write failures surface in the UI.
@@ -30,11 +30,18 @@ _Last updated: 2026-11-25_
   - intermediate historical marks are synthetic paths between real anchors (first fill → previous visit → today);
   - drawdown and the value chart use weekly snapshots;
   - closed-trade fees are recognised at close; trades can't be partially closed in the history model (a closed trade is one round trip).
-- **Fees:** the rates in `feeRates` are fictional. Real Kalshi fees are not a flat percentage.
+- **Fees:**
+  - Hypothetical fees use the published formulas with sample per-market parameters (`data/sampleFees.ts`).
+  - Kalshi figures are from secondary summaries of the official schedule, which was unreachable from our network; re-verify them.
+  - Historical sample fees are fictional records.
 - **Scenarios:**
   - no slippage or order-book depth;
   - the assumed fill price is applied to the whole size.
-- **Relationships:** only the BTC × ETH relationship is user-classifiable; others are fixed in the data or unclassified. Equivalent contracts are modelled by sharing an `eventId`.
+- **Relationships:**
+  - Source relationships carry provenance; only verified ones constrain Risk.
+  - Scenarios may add hypothetical mutex/equivalent constraints.
+  - Equivalent contracts share an `eventId` (settlement group).
+  - No multi-market constraint types (e.g. negative-risk sets) yet.
 - **Outcomes:**
   - binary YES/NO only, settling at $1/$0;
   - mixed YES and NO holdings on one event are netted correctly (METHODOLOGY);
@@ -59,7 +66,6 @@ _Last updated: 2026-11-25_
 ## Technical debt
 
 - `lib/finance.ts` reads the portfolio as module-level constants (`data/portfolio.ts`). This is fine for a synchronous fixture, but real data will be async and per-user. Next step: pass `PortfolioData` explicitly (or via React context) and memoise derived values per portfolio.
-- `relationsFor()` special-cases the BTC × ETH pair. Replace it with user overrides keyed by event pair once relationships come from data.
 - Event grouping relies on `eventId` provided by the data. Cross-platform matching rules don't exist yet.
 - Some pages compute a lot in render (`series()` per filter). It's fast for the sample; profile it with real history sizes.
 
@@ -67,7 +73,7 @@ _Last updated: 2026-11-25_
 
 These are separate concepts today and must stay separate when persisted:
 - **Portfolio records.** Source data, read through `data/portfolio.ts`. The backend owns ingestion; see `backend/docs/FRONTEND_INTEGRATION.md` in PR #3.
-- **Analytical assumptions.** Relationships, guardrail, fee setting (`lib/storage.ts`).
+- **Analytical assumptions.** The guardrail (shared). Fee treatment and hypothetical constraints belong to each scenario.
 - **Scenarios.** `lib/scenarios.ts`, pure; hypothetical only.
 - **Source configuration.** Which sources a user selected; not built yet.
 
@@ -78,7 +84,7 @@ A future authorized workspace persists the last three per user. Portfolio record
 **Built (Phase 0):**
 - current-portfolio and empty-portfolio starting points;
 - per-platform added capital;
-- per-scenario fees and relationship override;
+- per-scenario fee treatment (provider estimate / custom / excluded) and hypothetical settlement constraints;
 - held and new instruments (`Adjustment.instrument`);
 - the Add position dialog (holdings / search / paste link);
 - allocation impact;
@@ -96,11 +102,13 @@ A future authorized workspace persists the last three per user. Portfolio record
 |---|---|
 | Search | Server-side search over public market metadata. Optional provider filter. Paginated. Returns events with markets and outcomes. |
 | Link resolution | A backend endpoint takes the pasted URL and returns `resolved` / `not-found` / `unsupported` / `unavailable` (same states as `LinkResolution`). The browser sends the URL only to Scevia's backend. |
-| Identity | Provider-native `externalEventId`, `externalMarketId`, outcome `externalId` (backend `NormalizedMarket`). The frontend's `marketId` / `outcome` map to these. |
+| Identity | Provider-native `externalEventId`, `externalMarketId`, outcome `externalId` / token id (backend `NormalizedMarket`). The frontend's `marketId` / `outcome` map to these. A position id is account-specific; held positions are matched to instruments by provider + market + outcome, so multiple accounts holding the same contract stay distinct positions. |
 | Prices | Reference price per outcome as a **decimal string**, with `observedAt` (UTC) and `priceKind`. It may be null; the UI then requires a typed price and shows value as unavailable. |
 | Lifecycle | Market and event lifecycle (open / closed / resolved) and resolution rules or settlement terms. Closed or resolved markets can't be added. |
 | Outcomes | Binary YES/NO today. The response should list all outcomes, so multi-outcome markets can be shown and, later, modelled. |
-| Fees | The provider's fee schedule or an explicit "estimated / unavailable" status, not a flat sample rate. |
+| Fees | Per market: the provider's fee parameters, as decimal strings and with nothing silently defaulted (Phase 2 returns Polymarket `feeRateBps`, nullable). Also the fee type (taker-only vs. maker+taker), the rounding rule, and the schedule's **source and effective date**. Missing parameters are shown as unavailable. The frontend never keeps its own copy of provider fee schedules. |
+| Execution role | Maker/taker can't be known in advance, so it stays a scenario assumption. The backend should say which roles a market charges. |
+| Relationships | Verified settlement facts only, with provenance. Examples: Polymarket `negativeRisk` events (at most one market resolves YES), equivalent contracts after review, payout rules per outcome. Unreviewed similarity is never a constraint. |
 | Settlement groups | Which contracts settle together comes from **reviewed** relationships, never title matching. |
 
 **Phase 5 (real-data scenario construction):**

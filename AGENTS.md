@@ -18,7 +18,9 @@ App: `web/` (Vite + React + TS). Run `npm run dev` in `web/`. Current state, lim
 - Browser storage goes through `lib/storage.ts` (`scevia-` keys only).
 - Hypothetical positions live only in scenarios (`simulate()` results). Never add them to `PortfolioData`, and never let them change Overview, Analytics or Risk.
 - Market lookup goes through the `MarketCatalog` interface (`data/markets.ts`). Never fetch user-supplied URLs, and always label sample market data as such.
-- A missing number (no price, too many events, invalid input) is unavailable, not zero. Use `diff()`-style null-safe arithmetic for changes.
+- A missing number (no price, no fee parameters, too many events, invalid input) is unavailable, not zero. Use `diff()` / `judge()` for changes.
+- Relationships are settlement logic with provenance. Only `verified` (facts) and a scenario's own `hypothetical` constraints remove outcomes; Risk never sees hypothetical ones. Never add event-specific relationship controls.
+- Hypothetical fees go through `estimateFee()` (lib/fees.ts) only. Never hard-code a provider-wide rate, and never recalculate historical fees.
 
 ## Numbers
 - Every figure comes from `web/src/lib/finance.ts`, which reads data only via `web/src/data/portfolio.ts`. Never hard-code a metric, summary sentence or insight in a page, and never import `data/sample.ts` directly.

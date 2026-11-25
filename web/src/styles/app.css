@@ -337,3 +337,14 @@ button.choice > svg:last-child { margin-left: auto; color: var(--color-text-tert
 .scn-n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .scn-title { overflow-wrap: anywhere; }
 @container (max-width: 640px) { .alloc-impact .bar-col { display: none; } }
+
+/* Scenario Lab: optional advanced assumptions */
+.adv { border-top: 1px solid var(--color-border-subtle); padding-top: var(--space-3); }
+.adv > summary { display: flex; justify-content: flex-start; align-items: baseline; gap: var(--space-2); flex-wrap: wrap; cursor: pointer; font-size: var(--font-size-sm); list-style: none; }
+.adv > summary::-webkit-details-marker { display: none; }
+.adv > summary::before { content: '▸'; color: var(--color-text-tertiary); }
+.adv[open] > summary::before { content: '▾'; }
+.adv > summary:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; border-radius: var(--radius-sm); }
+.adv > summary > span:last-child { font-size: var(--font-size-xs); margin-left: auto; }
+.adv-b { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-3); }
+.adv-add .select { max-width: 260px; }

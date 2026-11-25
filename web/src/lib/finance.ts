@@ -12,9 +12,11 @@
  *  - Portfolio value   cash + Σ shares × mark.   Identity: value − net deposits = net P&L.
  *  - Settlement payoff a contract pays $1 per share if its side wins, $0 otherwise.
  */
-import { CASH_FLOWS, CLOSED_TRADES, EVENTS, FEE_RATE, HISTORY_START, LAST_VISIT, OPEN_POSITIONS, PORTFOLIO, TODAY } from '../data/portfolio'
+import { CASH_FLOWS, CLOSED_TRADES, EVENTS, HISTORY_START, LAST_VISIT, OPEN_POSITIONS, PORTFOLIO, TODAY } from '../data/portfolio'
+import { DEFAULT_FEES, estimateFee, type FeeAssumption, type FeeSchedule, type FeeStatus } from './fees'
 import type { Category, ClosedTrade, DataSource, OpenPosition, Platform, RelClass, Relation, RiskEvent, Side } from '../data/types'
 export type { RelClass, Relation }
+export type { RelProvenance } from '../data/types'
 
 export type PlatformFilter = 'all' | Platform
 const inPlatform = (f: PlatformFilter, p: Platform) => f === 'all' || f === p
@@ -223,18 +225,40 @@ const EDGE_LABEL: Record<Category, true> = { Economics: true, Climate: true, Cry
 
 /* ───────────── Events & relationships ───────────── */
 export type Outcome = 'YES' | 'NO'
-/** The portfolio's relationships with the user's override for the one classifiable pair (BTC × ETH) applied. */
-export const relationsFor = (crypto: RelClass): Relation[] =>
-  PORTFOLIO.relations.map((r) => ((r.a === 'btc' && r.b === 'eth') || (r.a === 'eth' && r.b === 'btc') ? { ...r, cls: crypto } : r))
+/** Relationships from the portfolio's sources: verified facts and descriptive annotations. Risk uses these only;
+ *  scenarios may add their own hypothetical constraints on top (see `withConstraints`). */
+export const sourceRelations = (): Relation[] => PORTFOLIO.relations
+/** Only verified facts and a scenario's own hypothetical assumptions can remove joint outcomes. Annotations never do. */
+export const constrains = (r: Relation) => (r.cls === 'mutex' || r.cls === 'equivalent') && r.provenance !== 'annotation'
+const samePair = (r: { a: string; b: string }, a: string, b: string) => (r.a === a && r.b === b) || (r.a === b && r.b === a)
 export function pairRelation(a: string, b: string, rels: Relation[]): RelClass | null {
   if (a === b) return 'equivalent'
-  return rels.find((r) => (r.a === a && r.b === b) || (r.a === b && r.b === a))?.cls ?? null
+  return findRelation(a, b, rels)?.cls ?? null
 }
-/** A joint outcome is feasible unless it breaks a confirmed constraint:
+/** The relationship that applies to a pair: a verified fact wins over anything else; then a hypothetical constraint. */
+export function findRelation(a: string, b: string, rels: Relation[]): Relation | null {
+  const all = rels.filter((r) => samePair(r, a, b))
+  return all.find((r) => r.provenance === 'verified') ?? all.find((r) => r.provenance === 'hypothetical') ?? all[0] ?? null
+}
+/** A scenario's hypothetical constraint (never a fact; never used by Risk). */
+export interface Constraint { a: string; b: string; cls: 'mutex' | 'equivalent' }
+/** Source relationships plus a scenario's hypothetical constraints. A pair with a verified relationship keeps it:
+ *  a hypothetical constraint can't override a fact. Duplicates for the same pair keep the first. */
+export function withConstraints(base: Relation[], cs: Constraint[] = []): Relation[] {
+  const out = [...base]
+  for (const c of cs) {
+    if (c.a === c.b || out.some((r) => samePair(r, c.a, c.b) && (r.provenance === 'verified' || r.provenance === 'hypothetical'))) continue
+    out.push({ a: c.a, b: c.b, cls: c.cls, provenance: 'hypothetical' })
+  }
+  return out
+}
+/** A joint outcome is feasible unless it breaks a constraint that applies (see `constrains`):
  *  mutually exclusive → both can't resolve YES; equivalent → must resolve the same way.
- *  Related, unknown and unclassified pairs impose no constraint (and are flagged as caveats instead). */
+ *  Related, unknown and unclassified pairs impose no constraint. This is logical feasibility, not probability:
+ *  excluding a combination changes the deterministic settlement range, never how likely anything is. */
 export function isFeasible(o: Record<string, Outcome>, rels: Relation[]) {
   return rels.every((r) => {
+    if (!constrains(r)) return true
     if (!(r.a in o) || !(r.b in o)) return true
     if (r.cls === 'mutex') return !(o[r.a] === 'YES' && o[r.b] === 'YES')
     if (r.cls === 'equivalent') return o[r.a] === o[r.b]
@@ -250,8 +274,16 @@ export function* jointOutcomes(ids: string[]): Generator<Record<string, Outcome>
   for (let mask = 0; mask < 2 ** ids.length; mask++) yield Object.fromEntries(ids.map((id, i) => [id, Math.floor(mask / 2 ** i) % 2 ? 'YES' : 'NO'])) as Record<string, Outcome>
 }
 export interface OutcomeRange { min: number; max: number; argmin: Record<string, Outcome>; argmax: Record<string, Outcome>; feasible: number; excluded: number }
+export type RangeIssue = 'too-many-events' | 'no-feasible-outcome'
+/** Why a range is unavailable, or null when it can be computed. */
+export function rangeIssue(ids: string[], rels: Relation[]): RangeIssue | null {
+  if (ids.length > MAX_JOINT_EVENTS) return 'too-many-events'
+  for (const o of jointOutcomes(ids)) if (isFeasible(o, rels)) return null
+  return ids.length ? 'no-feasible-outcome' : null
+}
 /** Min/max of `fn` over feasible joint outcomes only. Impossible combinations are excluded, never patched afterwards.
- *  Returns null when there are too many events to enumerate exactly. */
+ *  Returns null when there are too many events to enumerate exactly, or when the constraints leave no feasible
+ *  outcome (an inconsistent constraint set): never Infinity or a fabricated range. */
 export function outcomeRange(ids: string[], rels: Relation[], fn: (o: Record<string, Outcome>) => number): OutcomeRange | null {
   if (ids.length > MAX_JOINT_EVENTS) return null
   let min = Infinity, max = -Infinity, argmin: Record<string, Outcome> = {}, argmax: Record<string, Outcome> = {}, feasible = 0, excluded = 0
@@ -262,6 +294,7 @@ export function outcomeRange(ids: string[], rels: Relation[], fn: (o: Record<str
     if (v < min) { min = v; argmin = o }
     if (v > max) { max = v; argmax = o }
   }
+  if (feasible === 0) return null
   return { min, max, argmin, argmax, feasible, excluded }
 }
 
@@ -271,12 +304,16 @@ export function outcomeRange(ids: string[], rels: Relation[], fn: (o: Record<str
 export interface Holding {
   id: string; eventId: string; platform: Platform; side: Side; shares: number; cost: number; mark: number | null
   category: Category; title: string; eventTitle: string
+  /** Provider-native market id (identity of the contract, independent of account or position id). */
+  marketId: string
+  /** Fee parameters for hypothetical trades in this market; null/undefined = unavailable. */
+  fee?: FeeSchedule | null
   /** True for an instrument that isn't in the starting portfolio (a hypothetical new position). */
   isNew?: boolean
 }
 const eventName = (id: string) => EVENTS.find((e) => e.id === id)?.name ?? id
 export const baseHoldings = (): Record<string, Holding> =>
-  Object.fromEntries(POSITIONS.map((p) => [p.id, { id: p.id, eventId: p.eventId, platform: p.platform, side: p.side, shares: p.shares, cost: p.cost, mark: p.mark, category: p.category, title: p.market, eventTitle: eventName(p.eventId) }]))
+  Object.fromEntries(POSITIONS.map((p) => [p.id, { id: p.id, eventId: p.eventId, platform: p.platform, side: p.side, shares: p.shares, cost: p.cost, mark: p.mark, category: p.category, title: p.market, eventTitle: eventName(p.eventId), marketId: p.marketId, fee: p.feeSchedule }]))
 const payout = (h: Holding, o: Outcome) => (h.side === o ? h.shares : 0)
 /** P&L of an event's holdings vs. their cost basis if the event resolves `o` (excludes fees already paid). */
 export const eventPnl = (hs: Holding[], eventId: string, o: Outcome) => sum(hs.filter((h) => h.eventId === eventId), (h) => payout(h, o) - h.cost)
@@ -343,13 +380,18 @@ export interface InstrumentRef {
   refPrice: number | null; refAsOf: string | null
   /** Where the market data came from: the bundled sample catalog, or (later) a live provider lookup. */
   source: 'sample' | 'provider'
+  /** The market's fee parameters as known when the instrument was selected (null = unavailable). */
+  fee?: FeeSchedule | null
 }
 export const instrumentKey = (i: Pick<InstrumentRef, 'provider' | 'marketId' | 'outcome'>) => `${i.provider}:${i.marketId}:${i.outcome}`
 /** Instrument reference for a position the user actually holds (so it can also be used from scratch). */
 export const instrumentOfPosition = (p: Position): InstrumentRef => ({
-  provider: p.platform, eventId: p.eventId, eventTitle: eventName(p.eventId), marketId: p.id, marketTitle: p.market, outcome: p.side,
-  category: p.category, resolves: p.resolves, refPrice: p.mark, refAsOf: sourceOf(p.platform).asOf, source: 'sample',
+  provider: p.platform, eventId: p.eventId, eventTitle: eventName(p.eventId), marketId: p.marketId, marketTitle: p.market, outcome: p.side,
+  category: p.category, resolves: p.resolves, refPrice: p.mark, refAsOf: sourceOf(p.platform).asOf, source: 'sample', fee: p.feeSchedule,
 })
+/** The actual position holding exactly this instrument (same provider, market and outcome), if any. Sharing an
+ *  event and a side is not enough: different markets are different contracts. */
+export const positionFor = (i: Pick<InstrumentRef, 'provider' | 'marketId' | 'outcome'>) => POSITIONS.find((p) => p.platform === i.provider && p.marketId === i.marketId && p.side === i.outcome)
 /** A hypothetical change: hold `to` shares of an instrument, trading at the assumed `price`.
  *  `id` is the actual position id when the instrument is held, otherwise its instrument key.
  *  null `to` / `price` mean "not entered yet": the row is excluded from results and blocks Save. */
@@ -357,7 +399,8 @@ export interface Adjustment { id: string; to: number | null; price: number | nul
 /** Where a scenario starts: the user's current portfolio (holdings + cash from sources), or an empty portfolio. */
 export type Baseline = 'portfolio' | 'scratch'
 export interface SimOptions {
-  includeFees: boolean
+  /** How fees on the scenario's hypothetical trades are treated (default: provider estimate, taker). */
+  fees?: FeeAssumption
   baseline?: Baseline
   /** Hypothetical capital added per platform. Contributed capital, never profit; cash isn't moved between platforms. */
   funding?: Partial<Record<Platform, number>>
@@ -389,6 +432,10 @@ export interface Simulation {
   shortfall: Record<Platform, number>
   /** Per position: realized P&L from hypothetical sales and fees on hypothetical trades. */
   realizedBy: Record<string, number>; feesBy: Record<string, number>
+  /** Per traded position: how its fee was determined. 'unavailable' fees are not in the totals. */
+  feeStatusBy: Record<string, FeeStatus>
+  /** Positions whose fee couldn't be estimated (no fee parameters). Their cash and P&L are before fees. */
+  feesUnavailable: string[]
 }
 export const MIN_PRICE = 0.01, MAX_PRICE = 0.99
 export function validatePrice(v: number) {
@@ -399,7 +446,9 @@ export function validatePrice(v: number) {
 export function simulate(adjs: Adjustment[], opts: SimOptions): Simulation {
   const { holdings, cash } = startingPoint(opts.baseline, opts.funding)
   let realized = 0, fees = 0
+  const feeMode = opts.fees ?? DEFAULT_FEES
   const errors: Record<string, string> = {}, realizedBy: Record<string, number> = {}, feesBy: Record<string, number> = {}
+  const feeStatusBy: Record<string, FeeStatus> = {}, feesUnavailable: string[] = []
   for (const a of adjs) {
     const qtyErr = validateQty(a.to)
     if (qtyErr) { errors[a.id] = qtyErr; continue }
@@ -411,12 +460,17 @@ export function simulate(adjs: Adjustment[], opts: SimOptions): Simulation {
       // Not in the starting portfolio: a hypothetical new holding from zero, valued at its reference price.
       const i = a.instrument
       if (!i) { errors[a.id] = 'Not in this starting portfolio'; continue }
-      h = holdings[a.id] = { id: a.id, eventId: i.eventId, platform: i.provider, side: i.outcome, shares: 0, cost: 0, mark: i.refPrice, category: i.category, title: i.marketTitle, eventTitle: i.eventTitle, isNew: true }
+      h = holdings[a.id] = { id: a.id, eventId: i.eventId, platform: i.provider, side: i.outcome, shares: 0, cost: 0, mark: i.refPrice, category: i.category, title: i.marketTitle, eventTitle: i.eventTitle, marketId: i.marketId, fee: i.fee ?? null, isNew: true }
     }
     const to = a.to!
     const d = to - h.shares
     if (d === 0) continue
-    const notional = Math.abs(d) * a.price, fee = opts.includeFees ? notional * FEE_RATE[h.platform] : 0
+    const notional = Math.abs(d) * a.price
+    const est = estimateFee(d, a.price, h.fee, feeMode)
+    // An unavailable fee is never treated as zero silently: it is flagged, and affected figures are labelled pre-fee.
+    const fee = est.amount ?? 0
+    feeStatusBy[a.id] = est.status
+    if (est.amount == null) feesUnavailable.push(a.id)
     fees += fee; feesBy[a.id] = fee
     if (d > 0) { h.cost += notional; cash[h.platform] -= notional + fee }
     else {
@@ -429,13 +483,13 @@ export function simulate(adjs: Adjustment[], opts: SimOptions): Simulation {
   }
   const gap = (v: number) => (v < -0.005 ? -v : 0)
   const shortfall: Record<Platform, number> = { pm: gap(cash.pm), ks: gap(cash.ks) }
-  return { holdings, cash, realized, fees, errors, shortfall, realizedBy, feesBy }
+  return { holdings, cash, realized, fees, errors, shortfall, realizedBy, feesBy, feeStatusBy, feesUnavailable }
 }
 
 export interface ScenarioMetrics {
   /** positionsValue / totalValue are null when a held instrument has no reference price. */
   cash: number; positionsValue: number | null; totalValue: number | null; committed: number; realized: number; fees: number
-  /** null when the joint-outcome range can't be computed exactly (too many events). */
+  /** null when the joint-outcome range can't be computed (see rangeIssue). */
   worstValue: number | null; bestValue: number | null; worst: Record<string, Outcome>; best: Record<string, Outcome>; excluded: number
   /** Largest settlement loss of a single event, with opposing holdings netted. */
   largestEventLoss: number
@@ -443,6 +497,10 @@ export interface ScenarioMetrics {
   valid: boolean
   /** Total extra cash needed across platforms (0 when the scenario fits current balances). */
   shortfall: number
+  /** Why best/worst are unavailable, if they are. */
+  rangeIssue: RangeIssue | null
+  /** Number of trades whose fee couldn't be estimated; cash, value and fees then exclude those fees. */
+  feesUnavailable: number
 }
 /** Everything is expressed as portfolio value (cash + holdings) so a purchase can never look like profit:
  *  buying moves cash into contracts; at mark it costs the spread and fees; only settlement changes the range. */
@@ -453,12 +511,13 @@ export function scenarioMetrics(sim: Simulation, rels: Relation[]): ScenarioMetr
   const committed = sum(hs, (h) => h.cost)
   const ids = [...new Set(hs.map((h) => h.eventId))]
   const range = ids.length ? outcomeRange(ids, rels, (o) => sum(hs, (h) => payout(h, o[h.eventId]))) : { min: 0, max: 0, argmin: {}, argmax: {}, feasible: 1, excluded: 0 }
+  const issue = range ? null : rangeIssue(ids, rels)
   // Worst settlement of each event on its own, using each holding's side (opposing holdings offset).
   const largestEventLoss = Math.max(0, ...ids.map((id) => -Math.min(eventPnl(hs, id, 'YES'), eventPnl(hs, id, 'NO'))))
   return {
     cash, positionsValue, totalValue: positionsValue == null ? null : cash + positionsValue, committed, realized: sim.realized, fees: sim.fees,
     worstValue: range ? cash + range.min : null, bestValue: range ? cash + range.max : null, worst: range?.argmin ?? {}, best: range?.argmax ?? {},
-    excluded: range?.excluded ?? 0, largestEventLoss, valid: Object.keys(sim.errors).length === 0, shortfall: sim.shortfall.pm + sim.shortfall.ks,
+    excluded: range?.excluded ?? 0, largestEventLoss, valid: Object.keys(sim.errors).length === 0, shortfall: sim.shortfall.pm + sim.shortfall.ks, rangeIssue: issue, feesUnavailable: sim.feesUnavailable.length,
   }
 }
 
@@ -522,5 +581,5 @@ export function allocation(f: PlatformFilter, by: 'category' | 'platform') {
 
 /** Relationships that involve an event (including equivalent contracts merged into it). */
 export function eventRelations(id: string, rels: Relation[]) {
-  return rels.filter((r) => r.a === id || r.b === id).map((r) => ({ other: EVENTS.find((e) => e.id === (r.a === id ? r.b : r.a))!, cls: r.cls })).filter((x) => x.other)
+  return rels.filter((r) => r.a === id || r.b === id).map((r) => ({ other: EVENTS.find((e) => e.id === (r.a === id ? r.b : r.a))!, cls: r.cls, provenance: r.provenance, note: r.note })).filter((x) => x.other)
 }

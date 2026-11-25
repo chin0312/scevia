@@ -60,6 +60,7 @@ Smaller screens reflow instead of shrinking.
 - **Field** `.field`: labelled input. Label always visible. Error text sits below the field in `loss-fg`.
 
 ## Data display
+- **Event relationships** (Risk `#rel`, event details, matrix chip): show class *and* provenance (verified / note / this scenario only). Copy says “settlement logic, not correlation”. No event-specific controls.
 - **Inspectable rows** (`.conc-btn`, `.po-btn`, `.attr-btn`, `.bucket-btn`, `.tl-btn`, `.list-btn`, chart steps `.step`, calendar `.cal-dot`): rows and chart marks that open a detail panel are real buttons (or `role="button"` with Enter/Space), with hover, focus-visible and, when empty, disabled states.
 - **Chip** `.chip` (+ `.yes .no .warn .info .accent`): status, side, or relationship labels. Text is required. Don't make chips clickable unless they're filters.
 - **PlatformBadge** `PlatformBadge` (`PlatformLogo.tsx`, `.plat.pm|.ks`): the official platform marks (Polymarket icon on its blue; Kalshi “K” in its green on canvas), `role="img"` with the platform name. Colours come from `--color-platform-*`; paths use `currentColor`. Never redraw or recolour the marks.
@@ -72,7 +73,7 @@ Smaller screens reflow instead of shrinking.
 
 ## Interactive layer (`web/src/components/`, styles in `web/src/styles/app.css`)
 - **Menu** `Menu` (`.menu`): dropdown anchored to a trigger. Trigger gets `aria-expanded`; items must be `role="menuitem"`; arrow keys move, Esc closes and refocuses the trigger. Use for help, notifications, settings, account, "Add position". Don't use for page navigation.
-- **Modal** `Modal`: a focused decision with Cancel + one primary action (guardrail, classify relationship, delete scenario, add to scenario). Traps Tab, focuses the first field (or `data-autofocus`), returns focus on close if that element still exists. Don't use for long lists (use Drawer).
+- **Modal** `Modal`: a focused decision with Cancel + one primary action (guardrail, delete scenario, add to scenario, starting-portfolio switch). Traps Tab, focuses the first field (or `data-autofocus`), returns focus on close if that element still exists. Don't use for long lists (use Drawer).
 - **Layer stack** (`overlays.tsx`): every Modal, Drawer and the palette register in opening order.
   - Esc closes only the topmost layer, so a child modal never takes its parent drawer with it.
   - Layers underneath are `inert`.
@@ -81,7 +82,6 @@ Smaller screens reflow instead of shrinking.
   - Never add a page-level Esc or scroll-lock handler of your own.
 - **Drawer** `Drawer`: right-side detail list. Same focus and stack rules as Modal; Esc and scrim click close it. For positions, events, groups of holdings and trades, use the shared detail panels below instead of a page-specific drawer.
 - **Detail panels** `DetailProvider` / `useDetails().open(detail)` (`details.tsx`): the one way to **inspect** something without leaving the current module. Position and event panels take the **origin `scope`** (platform filter) and start in it. The event panel offers an explicit Scope switch to All platforms and names holdings outside the scope. Payoffs are shown per outcome (YES / NO), labelled for/against only when the event is held on one side. Kinds: `position` (cost/value/unrealized, payoff, fills, source freshness), `event` (every contract across platforms, sides, quantities, value, committed capital, payoff for/against, relationships, data coverage), `group` (holdings behind a concentration or allocation bucket, with weights), `trades` (closed trades behind a figure; the subtitle states period and platform scope). Panels stack (event → position) with Back. Opening never navigates and never changes scenario state; cross-module actions in the footer are explicit and labelled (“Simulate in Scenario Lab” (hands off exactly the holdings in the panel's scope via `handoffPath`), “Analyze in Risk”). Keyboard openers must `preventDefault()` on Enter, otherwise the keypress activates the panel's Close button.
-- **RelationshipModal** `RelationshipModal` (`relationships.tsx`): the single editor for user-classifiable relationships (BTC × ETH). Used from Risk, Scenario Lab (assumptions, outcome matrix) and event details; all read and write the shared `useRelations()` state.
 - **AddToScenarioModal** (Scenario Lab): confirms a hand-off from `handoffPath(ids, from)` (`lib/handoff.ts`).
   - Shows where the request came from and which platforms the holdings are on.
   - The user picks the target scenario (or a new one) and which holdings to include; positions already in that scenario are shown and skipped.
@@ -110,8 +110,8 @@ Smaller screens reflow instead of shrinking.
 - **Scenario setup** (`Setup` in `ScenarioLab.tsx`):
   - starting portfolio (Seg);
   - added capital per platform (`FundingInput`);
-  - fee treatment;
-  - BTC × ETH relationship: *Shared* or *This scenario only*, with “Use shared” and “Edit shared…”.
+  - **FeeSetup:** *Provider estimate* (with assumed role Taker/Maker), *Custom* (% of notional) or *Excluded*. Every option changes the calculation.
+  - **Constraints** (`details.adv`, collapsed unless the scenario has some): verified relationships shown read-only; add or remove hypothetical *can’t both resolve YES* / *always resolve the same way* pairs between events **in this scenario**; duplicates are blocked.
 
   A read-only **Facts** block separates source facts and fixed methodology from user assumptions. It always comes before results.
 - **Portfolio builder row** `PositionRow` (`pages/lab/Builder.tsx`, `.brow`): one grid row per position.
@@ -127,7 +127,7 @@ Smaller screens reflow instead of shrinking.
   - Events come from the scenario's own start and result, never from a fixed list.
   - Two events are needed for the matrix; empty states otherwise.
 - **Compare** (`ScenarioLab.tsx`):
-  - setup rows (starts from, added capital, fees · relationship, with `*` marking an override);
+  - setup rows (starts from, added capital, fees, hypothetical constraints);
   - each value with its change *vs. its own start*;
   - “change unavailable” when either side is unavailable;
   - a callout when starts differ.

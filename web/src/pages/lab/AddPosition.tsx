@@ -9,14 +9,15 @@ import type { Platform } from '../../data/types'
 import { POSITIONS, fmtDate, instrumentKey, instrumentOfPosition, type Adjustment, type Baseline, type InstrumentRef } from '../../lib/finance'
 import { int } from '../../lib/format'
 import { instrumentFrom, type CatalogEvent, type LinkResolution } from '../../lib/markets'
-import { heldPosition } from './model'
+import { positionFor } from './model'
 
 type Source = 'Your holdings' | 'Search markets' | 'Paste link'
 
-/** Turn a chosen instrument into a scenario row. A held instrument (in a current-portfolio scenario) keeps its
- *  position id and starts at its current size; anything else starts from zero with no quantity or price filled in. */
+/** Turn a chosen instrument into a scenario row. Identity is provider + market + outcome: the same contract you hold
+ *  maps to your position (in a current-portfolio scenario it starts at its current size: no trade); any other
+ *  contract, including one on the same event, is a new instrument from zero with no quantity or price filled in. */
 export function rowFor(i: InstrumentRef, baseline: Baseline): Adjustment {
-  const p = heldPosition(i.provider, i.eventId, i.outcome)
+  const p = positionFor(i)
   if (p && baseline === 'portfolio') return { id: p.id, to: p.shares, price: p.mark, instrument: instrumentOfPosition(p) }
   return { id: p ? p.id : instrumentKey(i), to: null, price: null, instrument: i }
 }

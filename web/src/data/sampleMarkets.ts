@@ -1,15 +1,18 @@
 /* SAMPLE market data for Scenario Lab (fictional; not live provider quotes).
    A few markets overlap the sample portfolio's events (same settlement groups), the rest are markets the sample
    portfolio doesn't hold, so new positions, opposing positions and multi-market events can be explored.
-   Replaced by backend market lookup in Phase 2. */
+   Fee parameters are sample values based on the published formulas; one market (US unemployment) has none, to show
+   how an unavailable fee is handled. Replaced by backend market lookup in Phase 2. */
 import { fixtureCatalog, type CatalogEvent, type CatalogMarket } from '../lib/markets'
 import { TODAY } from './portfolio'
+import { sampleFeeSchedule } from './sampleFees'
 
 const yesNo = (yes: number | null) => [{ outcome: 'YES' as const, refPrice: yes }, { outcome: 'NO' as const, refPrice: yes == null ? null : Math.round((1 - yes + 0.01) * 100) / 100 }]
-const m = (p: Omit<CatalogMarket, 'outcomes' | 'refAsOf' | 'status' | 'rules'> & { yes: number | null; status?: CatalogMarket['status']; rules?: string }): CatalogMarket => ({
+const m = (p: Omit<CatalogMarket, 'outcomes' | 'refAsOf' | 'status' | 'rules' | 'fee'> & { yes: number | null; status?: CatalogMarket['status']; rules?: string; fee?: CatalogMarket['fee']; election?: boolean }): CatalogMarket => ({
   provider: p.provider, marketId: p.marketId, marketTitle: p.marketTitle, settlementGroup: p.settlementGroup, category: p.category, resolves: p.resolves,
   status: p.status ?? 'open', rules: p.rules ?? 'Resolves YES if the stated condition is met by the resolution date, per the provider’s market rules.',
   outcomes: yesNo(p.yes), refAsOf: p.yes == null ? null : TODAY,
+  fee: p.fee === undefined ? sampleFeeSchedule(p.provider, p.category, { election: p.election }) : p.fee,
 })
 
 export const SAMPLE_MARKET_EVENTS: CatalogEvent[] = [
@@ -41,9 +44,9 @@ export const SAMPLE_MARKET_EVENTS: CatalogEvent[] = [
   { provider: 'pm', eventId: 'pm-ev-sol', eventTitle: 'Solana above $500 on Dec 31', url: 'https://polymarket.com/event/solana-above-500-on-december-31', available: true,
     markets: [m({ provider: 'pm', marketId: 'pm-sol-500', marketTitle: 'Solana above $500 on Dec 31', settlementGroup: 'pm-sol-500', category: 'Crypto', resolves: '2026-12-31', yes: 0.12 })] },
   { provider: 'ks', eventId: 'ks-ev-unemp', eventTitle: 'US unemployment above 4.5% in January', url: 'https://kalshi.com/markets/kxunemp-27jan', available: true,
-    markets: [m({ provider: 'ks', marketId: 'ks-unemp-45', marketTitle: 'US unemployment above 4.5% in January', settlementGroup: 'ks-unemp-45', category: 'Economics', resolves: '2027-02-05', yes: 0.22 })] },
+    markets: [m({ provider: 'ks', marketId: 'ks-unemp-45', marketTitle: 'US unemployment above 4.5% in January', settlementGroup: 'ks-unemp-45', category: 'Economics', resolves: '2027-02-05', yes: 0.22, fee: null })] },
   { provider: 'pm', eventId: 'pm-ev-mayor', eventTitle: 'Springfield mayoral election', url: 'https://polymarket.com/event/springfield-mayoral-election', available: true,
-    markets: [m({ provider: 'pm', marketId: 'pm-mayor', marketTitle: 'Incumbent wins Springfield mayoral election', settlementGroup: 'pm-mayor', category: 'Politics', resolves: '2026-11-05', yes: 0.99, status: 'resolved' })] },
+    markets: [m({ provider: 'pm', marketId: 'pm-mayor', marketTitle: 'Incumbent wins Springfield mayoral election', settlementGroup: 'pm-mayor', category: 'Politics', resolves: '2026-11-05', yes: 0.99, status: 'resolved', election: true })] },
   // A known link whose market data is unavailable (e.g. delisted), to exercise that state.
   { provider: 'ks', eventId: 'ks-ev-delisted', eventTitle: 'Delisted market', url: 'https://kalshi.com/markets/kxdelisted-26', available: false, markets: [] },
 ]

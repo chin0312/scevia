@@ -6,6 +6,7 @@
  * and event groupings. Nothing here is real account data. It is deterministic so tests and
  * screenshots are stable.
  */
+import { sampleFeeSchedule } from './sampleFees'
 import { rng } from '../lib/format'
 import type { CashFlow, Category, ClosedOutcome, ClosedTrade, Fill, OpenPosition, Platform, PortfolioData, RiskEvent, Side } from './types'
 
@@ -16,7 +17,7 @@ const HISTORY_START = '2025-01-06'
 /** The user's previous visit, used by "What changed". */
 const LAST_VISIT = '2026-11-17'
 
-/** Estimated fee rate on notional, per platform (fictional; Polymarket charged none in this sample). */
+/** Fees recorded on the sample's historical fills (fictional history). Not used for hypothetical trades. */
 const FEE_RATE: Record<Platform, number> = { pm: 0, ks: 0.007 }
 
 /* ── Cash flows (deposits > 0, withdrawals < 0). Never counted as performance. ── */
@@ -43,16 +44,16 @@ function fills(p: Platform, shares: number, avg: number, dates: [string, string,
 }
 
 const OPEN_POSITIONS: OpenPosition[] = [
-  { id: 'fedk', market: 'Fed cuts rates at Dec 2026 FOMC', eventId: 'fed', category: 'Economics', platform: 'ks', side: 'YES', mark: 0.64, markAtLastVisit: 0.62, resolves: '2026-12-16', fills: fills('ks', 4200, 0.58, ['2026-09-21', '2026-10-12', '2026-11-02']) },
-  { id: 'fedp', market: 'Fed rate cut in December?', eventId: 'fed', category: 'Economics', platform: 'pm', side: 'YES', mark: 0.64, markAtLastVisit: 0.62, resolves: '2026-12-16', fills: fills('pm', 3000, 0.61, ['2026-10-05', '2026-10-26', '2026-11-09']) },
-  { id: 'cpi', market: 'Nov CPI YoY above 3.0%', eventId: 'cpi', category: 'Economics', platform: 'ks', side: 'NO', mark: 0.66, markAtLastVisit: 0.69, resolves: '2026-12-10', fills: fills('ks', 3000, 0.71, ['2026-10-19', '2026-10-28', '2026-11-04']) },
-  { id: 'rec', market: 'US recession declared in 2027', eventId: 'rec', category: 'Economics', platform: 'pm', side: 'NO', mark: 0.82, markAtLastVisit: 0.81, resolves: '2027-12-31', fills: fills('pm', 5000, 0.79, ['2026-06-08', '2026-08-03', '2026-09-14']) },
-  { id: 'hot', market: '2026 hottest year on record', eventId: 'hot', category: 'Climate', platform: 'ks', side: 'YES', mark: 0.93, markAtLastVisit: 0.92, resolves: '2027-01-14', fills: fills('ks', 9000, 0.88, ['2026-07-06', '2026-08-17', '2026-09-28']) },
-  { id: 'shut', market: 'Government shutdown before Feb 1', eventId: 'shut', category: 'Politics', platform: 'pm', side: 'YES', mark: 0.47, markAtLastVisit: 0.41, resolves: '2027-02-01', fills: fills('pm', 7000, 0.38, ['2026-10-05', '2026-11-02', '2026-11-21']) },
-  { id: 'btc', market: 'Bitcoin above $150k on Dec 31', eventId: 'btc', category: 'Crypto', platform: 'pm', side: 'YES', mark: 0.29, markAtLastVisit: 0.31, resolves: '2026-12-31', fills: fills('pm', 8000, 0.34, ['2026-08-24', '2026-09-28', '2026-10-19']) },
-  { id: 'eth', market: 'ETH ETFs net inflows > $1B in Nov', eventId: 'eth', category: 'Crypto', platform: 'ks', side: 'YES', mark: 0.52, markAtLastVisit: 0.5, resolves: '2026-12-02', fills: fills('ks', 3500, 0.45, ['2026-10-26', '2026-11-02', '2026-11-09']) },
-  { id: 'cel', market: 'Celtics win 2027 NBA Finals', eventId: 'cel', category: 'Sports', platform: 'pm', side: 'YES', mark: 0.26, markAtLastVisit: 0.25, resolves: '2027-06-20', fills: fills('pm', 6500, 0.21, ['2026-07-13', '2026-09-07', '2026-10-12']) },
-  { id: 'chf', market: 'Chiefs win Super Bowl LXI', eventId: 'chf', category: 'Sports', platform: 'pm', side: 'YES', mark: 0.12, markAtLastVisit: 0.13, resolves: '2027-02-14', fills: fills('pm', 4000, 0.17, ['2026-08-31', '2026-09-21', '2026-10-05']) },
+  { id: 'fedk', market: 'Fed cuts rates at Dec 2026 FOMC', eventId: 'fed', category: 'Economics', platform: 'ks', marketId: 'ks-fed-dec-cut', feeSchedule: sampleFeeSchedule('ks', 'Economics'), side: 'YES', mark: 0.64, markAtLastVisit: 0.62, resolves: '2026-12-16', fills: fills('ks', 4200, 0.58, ['2026-09-21', '2026-10-12', '2026-11-02']) },
+  { id: 'fedp', market: 'Fed rate cut in December?', eventId: 'fed', category: 'Economics', platform: 'pm', marketId: 'pm-fed-dec-cut', feeSchedule: sampleFeeSchedule('pm', 'Economics'), side: 'YES', mark: 0.64, markAtLastVisit: 0.62, resolves: '2026-12-16', fills: fills('pm', 3000, 0.61, ['2026-10-05', '2026-10-26', '2026-11-09']) },
+  { id: 'cpi', market: 'Nov CPI YoY above 3.0%', eventId: 'cpi', category: 'Economics', platform: 'ks', marketId: 'ks-cpi-nov-3', feeSchedule: sampleFeeSchedule('ks', 'Economics'), side: 'NO', mark: 0.66, markAtLastVisit: 0.69, resolves: '2026-12-10', fills: fills('ks', 3000, 0.71, ['2026-10-19', '2026-10-28', '2026-11-04']) },
+  { id: 'rec', market: 'US recession declared in 2027', eventId: 'rec', category: 'Economics', platform: 'pm', marketId: 'pm-recession-2027', feeSchedule: sampleFeeSchedule('pm', 'Economics'), side: 'NO', mark: 0.82, markAtLastVisit: 0.81, resolves: '2027-12-31', fills: fills('pm', 5000, 0.79, ['2026-06-08', '2026-08-03', '2026-09-14']) },
+  { id: 'hot', market: '2026 hottest year on record', eventId: 'hot', category: 'Climate', platform: 'ks', marketId: 'ks-hottest-2026', feeSchedule: sampleFeeSchedule('ks', 'Climate'), side: 'YES', mark: 0.93, markAtLastVisit: 0.92, resolves: '2027-01-14', fills: fills('ks', 9000, 0.88, ['2026-07-06', '2026-08-17', '2026-09-28']) },
+  { id: 'shut', market: 'Government shutdown before Feb 1', eventId: 'shut', category: 'Politics', platform: 'pm', marketId: 'pm-shutdown-feb1', feeSchedule: sampleFeeSchedule('pm', 'Politics'), side: 'YES', mark: 0.47, markAtLastVisit: 0.41, resolves: '2027-02-01', fills: fills('pm', 7000, 0.38, ['2026-10-05', '2026-11-02', '2026-11-21']) },
+  { id: 'btc', market: 'Bitcoin above $150k on Dec 31', eventId: 'btc', category: 'Crypto', platform: 'pm', marketId: 'pm-btc-150k', feeSchedule: sampleFeeSchedule('pm', 'Crypto'), side: 'YES', mark: 0.29, markAtLastVisit: 0.31, resolves: '2026-12-31', fills: fills('pm', 8000, 0.34, ['2026-08-24', '2026-09-28', '2026-10-19']) },
+  { id: 'eth', market: 'ETH ETFs net inflows > $1B in Nov', eventId: 'eth', category: 'Crypto', platform: 'ks', marketId: 'ks-eth-etf-nov', feeSchedule: sampleFeeSchedule('ks', 'Crypto'), side: 'YES', mark: 0.52, markAtLastVisit: 0.5, resolves: '2026-12-02', fills: fills('ks', 3500, 0.45, ['2026-10-26', '2026-11-02', '2026-11-09']) },
+  { id: 'cel', market: 'Celtics win 2027 NBA Finals', eventId: 'cel', category: 'Sports', platform: 'pm', marketId: 'pm-celtics-2027', feeSchedule: sampleFeeSchedule('pm', 'Sports'), side: 'YES', mark: 0.26, markAtLastVisit: 0.25, resolves: '2027-06-20', fills: fills('pm', 6500, 0.21, ['2026-07-13', '2026-09-07', '2026-10-12']) },
+  { id: 'chf', market: 'Chiefs win Super Bowl LXI', eventId: 'chf', category: 'Sports', platform: 'pm', marketId: 'pm-chiefs-lxi', feeSchedule: sampleFeeSchedule('pm', 'Sports'), side: 'YES', mark: 0.12, markAtLastVisit: 0.13, resolves: '2027-02-14', fills: fills('pm', 4000, 0.17, ['2026-08-31', '2026-09-21', '2026-10-05']) },
 ]
 
 /* ── Events: positions are grouped by the event that decides the payoff ── */
@@ -118,8 +119,12 @@ const CLOSED_TRADES: ClosedTrade[] = generateClosedTrades()
 /** The bundled sample portfolio: a deterministic fixture for tests and for exploring Scevia without an account. */
 export const SAMPLE_PORTFOLIO: PortfolioData = {
   asOf: TODAY, historyStart: HISTORY_START, lastVisit: LAST_VISIT, isSample: true,
-  feeRates: FEE_RATE, cashFlows: CASH_FLOWS, openPositions: OPEN_POSITIONS, closedTrades: CLOSED_TRADES, events: EVENTS,
-  relations: [{ a: 'fed', b: 'cpi', cls: 'related' }, { a: 'fed', b: 'rec', cls: 'related' }, { a: 'cpi', b: 'rec', cls: 'related' }, { a: 'btc', b: 'eth', cls: 'unknown' }],
+  cashFlows: CASH_FLOWS, openPositions: OPEN_POSITIONS, closedTrades: CLOSED_TRADES, events: EVENTS,
+  relations: [
+    { a: 'fed', b: 'cpi', cls: 'related', provenance: 'annotation', note: 'US macro outlook (sample annotation)' },
+    { a: 'fed', b: 'rec', cls: 'related', provenance: 'annotation', note: 'US macro outlook (sample annotation)' },
+    { a: 'cpi', b: 'rec', cls: 'related', provenance: 'annotation', note: 'US macro outlook (sample annotation)' },
+  ],
   sources: {
     pm: { label: 'Polymarket', asOf: TODAY, stale: false },
     ks: { label: 'Kalshi', asOf: '2026-11-22', stale: true },

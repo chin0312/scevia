@@ -81,14 +81,41 @@ Analytics shows a pattern only when it has at least 5 trades. It always shows th
   - The same per-holding payout rule drives portfolio best/worst cases, so event and portfolio figures agree (tested).
 - **Binary assumption:** every contract settles at $1 or $0 on YES/NO. Multi-outcome markets, partial or non-$1 settlements (which the backend models; see `backend/docs/FRONTEND_INTEGRATION.md` in PR #3), and automated cross-platform matching are not modelled. They will follow provider data.
 
-Relationship classes:
+**Event relationships are settlement logic, not correlation.**
+- They say which **joint outcomes are possible**. They never say how likely anything is.
+- Excluding a combination changes the deterministic best/worst range, never a probability.
+- Scevia doesn't estimate correlation and doesn't assume that unrelated events are independent.
 
 | Class | Effect on joint outcomes |
 |---|---|
-| Equivalent contract | Must resolve the same way. In the sample these are merged into one event. |
+| Equivalent settlement | Must resolve the same way. Equivalent contracts share a settlement group (`eventId`) and are merged into one event. |
 | Mutually exclusive outcomes | Both can't resolve YES; that combination is excluded. |
-| Related but non-equivalent | No constraint. Shown together, never netted. |
-| Unknown / unclassified | No constraint. Flagged as an unmodeled dependency. |
+| Related, no constraint | Every combination stays possible; nothing is netted. A descriptive note. |
+| Unknown / unclassified | No constraint. This is not an assumption of independence; it simply removes nothing. |
+
+**Provenance** (`Relation.provenance`) decides whether a relationship constrains:
+
+| Provenance | Where it comes from | Constrains? | Used by |
+|---|---|---|---|
+| `verified` | Source facts: settlement rules or a reviewed source relationship | Yes (equivalent / mutex) | Risk and every scenario |
+| `annotation` | Descriptive notes (e.g. "US macro outlook") | **Never**, whatever its class: a note can't remove a possible loss | Display only |
+| `hypothetical` | A scenario's own constraint (Setup → Settlement constraints) | Yes, in that scenario only | That scenario's best/worst, matrix and comparison |
+
+- **Risk** uses source relationships only (`sourceRelations()`).
+- **A scenario** uses `withConstraints(sources, constraints)`. A pair that already has a verified relationship can't be overridden, and duplicate pairs are ignored.
+- **Inconsistent constraints:**
+  - With binary mutex/equivalent constraints, "everything resolves NO" is always feasible, so a range always exists.
+  - The engine still returns *unavailable* (`rangeIssue = 'no-feasible-outcome'`), never Infinity, if a future constraint type ever leaves no feasible outcome.
+- **Sample data:**
+  - The Fed contracts on Kalshi and Polymarket share a settlement group (verified equivalence in the sample).
+  - Fed / CPI / recession carry a "related" annotation.
+  - There are no other constraints. Older stored scenarios that set the sample BTC × ETH pair to mutually exclusive are migrated to a hypothetical constraint in that scenario only.
+- **Later, only if provider structures justify it:**
+  - mutually exclusive outcome sets (e.g. Polymarket negative-risk events, where at most one market resolves YES);
+  - "exactly one" constraints;
+  - cross-provider equivalence after review.
+
+  These would arrive as verified source facts, not frontend inference.
 
 **Best and worst cases** enumerate every joint outcome of the events in scope, skip infeasible ones, and take the max/min. Nothing is adjusted after the fact.
 
@@ -138,11 +165,43 @@ Each scenario is measured against **its own starting point**: the baseline plus 
 **Trades.**
 - **Buy:** cost basis += shares × price; cash −= shares × price + estimated fee. Realized P&L is unchanged.
 - **Sell / exit:** realized += shares × (price − average cost) − fee; cost basis falls in proportion; cash += proceeds − fee.
-- **Fees:** per scenario, estimated (default) or excluded, at each platform's rate (`feeRates`, a share of notional). These are sample rates. Slippage and order-book depth are not modelled.
+- **Fees:** see *Trading fees on hypothetical trades* below. Slippage and order-book depth are not modelled.
+
+**Trading fees on hypothetical trades** (`lib/fees.ts`, `estimateFee`, used by the engine; the UI only shows what the engine computed).
+- **Published structure,** checked 2026-11-25:
+  - **Polymarket:** fee = C × feeRate × p × (1 − p).
+    - Takers only; makers pay 0.
+    - The rate is set per market or category: 0.05 for sports, elections and similar; 0.01 for crypto, economics, weather and similar; 0 for fee-free categories.
+    - Fees are rounded to 5 decimals.
+    - Source: docs.polymarket.com/trading/fees.
+  - **Kalshi:** taker = round up(0.07 × C × P × (1 − P)) to the next cent.
+    - Maker fees (0.0175 ×) apply only on non-standard series, and series multipliers can differ.
+    - The schedule took effect 2026-07-07.
+    - The official page couldn't be opened from our network, so these figures come from published summaries of the schedule. Re-verify against the official PDF before relying on them for real data.
+- **Modes per scenario:**
+  - *Provider estimate* (default): uses each market's fee parameters and an **assumed order role**. Taker is the default; the user can choose maker. Whether an order fills as maker or taker isn't known in advance.
+  - *Custom*: a % of notional (0–10%), rounded up to the cent.
+  - *Excluded*: trades shown before fees.
+- **Missing parameters:** a market without fee parameters gives an **unavailable** fee, never $0.
+  - The trade stays in the results before that fee, and it is flagged on the row.
+  - The fees row reads "+ unavailable", and the before/after footnote explains it.
+  - A custom fee includes it.
+- **Parameters in this build:** illustrative sample values based on the published formulas (`data/sampleFees.ts`), stored on the market (`FeeSchedule`, with source, reference and effective date). In Phase 2 they come from provider metadata (e.g. Polymarket `feeRateBps` per market).
+- **Historical fees** are source records (reported, estimated or unavailable) and are **never** recalculated with today's schedules or scenario settings (tested).
+
+**Inputs.**
+- **Parsing:** quantities, prices, capital and fee % are parsed strictly (`lib/inputs.ts`).
+  - Scientific notation, signs, and extra decimals are rejected.
+  - Prices take up to 3 decimals; shares are whole numbers; money takes up to 2 decimals.
+- **While a field is empty, being typed or invalid, the row has no value** for it: it is excluded or marked invalid, and the previous value is never reused.
 
 **Results are expressed as portfolio value.**
 - "Value at mark" changes only by the gap between the assumed price and the reference price, plus fees.
-- "Value if worst/best feasible outcome" = cash + $1 per winning share. These are unavailable above 16 events.
+- "Value if worst/best feasible outcome" = cash + $1 per winning share. These are unavailable above 16 events, or if constraints leave no feasible outcome.
+- **"Worst single-event outcome"** is shown as a signed settlement outcome (−$5,000 → −$3,000 is an improvement of +$2,000).
+  - Higher is better; the delta, colour and text agree.
+  - Fees and funding shortfall: lower is better.
+  - Cash, capital committed, positions at mark and events held are transfers or counts, and are never judged better or worse.
 - Any change whose either side is unavailable is itself unavailable. It is never coerced to 0.
 
 **Funding shortfall.**
@@ -151,12 +210,29 @@ Each scenario is measured against **its own starting point**: the baseline plus 
 - It is a property of the scenario, not an input error, so the scenario can still be saved.
 
 **Assumptions.**
-- **Shared:** facts from sources (holdings, cash, marks) and the portfolio's relationship classification, used by Risk and by every scenario that doesn't override it.
+- **Shared facts** (never edited in a scenario): holdings, cash, marks, verified relationships and market fee parameters.
 - **Per scenario:**
   - starting point;
   - added capital;
-  - fee treatment;
-  - an optional **BTC × ETH override**, which affects only that scenario and never Risk or other scenarios.
+  - fee treatment (provider estimate with an assumed role, custom, or excluded);
+  - optional **hypothetical settlement constraints** between events in that scenario.
+
+**Hand-offs and starting points.**
+- **Into a current-portfolio scenario:** a hand-off adds a held position at its current quantity and mark (no trade).
+- **Into an empty-portfolio scenario:** the position is added from zero with no quantity or price. The user can explicitly choose "copy my current quantities as purchases".
+- **Switching an existing scenario's starting point:** asks whether to keep target quantities (which then mean something else) or reset held positions. The ask appears only when held positions would change meaning.
+
+**Funding and allocation.**
+- Added capital, available cash, cash after trades, funding shortfall, open-position value and net value are shown separately.
+- Negative cash is a **funding need**, shown as such ("needs $X funding"). It is never clamped to 0, and never shown as a negative or ordinary cash share.
+
+**Saved definition vs. market data.**
+- The saved state is what the user controls:
+  - name and starting point;
+  - capital, fees and constraints;
+  - positions with instrument identity (provider, market, outcome), quantities and assumed prices.
+- Reference prices, timestamps and fee parameters are a market-data snapshot carried with each new instrument. Refreshing them doesn't make a scenario "unsaved"; results show the reference time.
+- Identity is **provider + market + outcome**. Sharing an event and a side doesn't make two positions the same contract.
 
 **Allocation impact.**
 - Market value (shares × reference price) is grouped by category, platform or event, before and after.

@@ -13,7 +13,6 @@ export const PORTFOLIO: PortfolioData = SAMPLE_PORTFOLIO
 export const TODAY = PORTFOLIO.asOf
 export const HISTORY_START = PORTFOLIO.historyStart
 export const LAST_VISIT = PORTFOLIO.lastVisit
-export const FEE_RATE = PORTFOLIO.feeRates
 export const CASH_FLOWS = PORTFOLIO.cashFlows
 export const OPEN_POSITIONS = PORTFOLIO.openPositions
 export const CLOSED_TRADES = PORTFOLIO.closedTrades

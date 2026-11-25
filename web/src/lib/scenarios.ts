@@ -5,15 +5,16 @@
  * capital, scenario-level assumptions, and a list of positions (target shares at an assumed price). Scenarios never
  * change actual holdings or history; they are evaluated by `simulate()` in lib/finance.ts.
  */
-import type { Adjustment, Baseline, InstrumentRef } from './finance'
-import type { Platform, RelClass } from '../data/types'
+import type { Adjustment, Baseline, Constraint, InstrumentRef } from './finance'
+import { readFeeAssumption, type FeeAssumption, type FeeSchedule } from './fees'
+import type { Platform } from '../data/types'
 
 /** Assumptions a scenario may set for itself. Absent = inherit the shared setting. */
 export interface ScenarioAssumptions {
-  /** Estimate trading fees on the scenario's trades (default: estimated). */
-  includeFees?: boolean
-  /** Hypothetical BTC × ETH relationship for this scenario only; never changes the shared classification. */
-  crypto?: RelClass
+  /** Fees on this scenario's hypothetical trades (default: provider estimate as taker). */
+  fees?: FeeAssumption
+  /** Hypothetical settlement constraints between events, for this scenario only. Never facts; never used by Risk. */
+  constraints?: Constraint[]
 }
 /** Everything that defines a scenario's result; compared to decide saved / unsaved. */
 export interface Snapshot { name: string; adjs: Adjustment[]; baseline: Baseline; funding: Partial<Record<Platform, number>>; assumptions: ScenarioAssumptions }
@@ -25,9 +26,18 @@ export interface Scenario extends Snapshot {
 export type ScenarioStatus = 'new' | 'saved' | 'modified'
 
 const copyAdjs = (a: Adjustment[]) => a.map((x) => ({ ...x, instrument: x.instrument ? { ...x.instrument } : undefined }))
-const snap = (s: Snapshot): Snapshot => ({ name: s.name, adjs: copyAdjs(s.adjs), baseline: s.baseline, funding: { ...s.funding }, assumptions: { ...s.assumptions } })
+const copyAssumptions = (a: ScenarioAssumptions): ScenarioAssumptions => ({ ...a, ...(a.fees ? { fees: { ...a.fees } } : {}), ...(a.constraints ? { constraints: a.constraints.map((c) => ({ ...c })) } : {}) })
+const snap = (s: Snapshot): Snapshot => ({ name: s.name, adjs: copyAdjs(s.adjs), baseline: s.baseline, funding: { ...s.funding }, assumptions: copyAssumptions(s.assumptions) })
 /** Content equality, ignoring key order and undefined fields. */
-const norm = (s: Snapshot) => JSON.stringify({ n: s.name, a: s.adjs.map((x) => [x.id, x.to, x.price]), b: s.baseline, f: [s.funding.pm ?? null, s.funding.ks ?? null], x: [s.assumptions.includeFees ?? null, s.assumptions.crypto ?? null] })
+/** Everything the user controls takes part in saved/unsaved: positions (with instrument identity), starting point,
+ *  capital, fee treatment and constraints. Reference prices are market data, not user input: a refreshed price
+ *  doesn't make a scenario "unsaved" (results always show the reference time). */
+const norm = (s: Snapshot) => JSON.stringify({
+  n: s.name, b: s.baseline, f: [s.funding.pm ?? null, s.funding.ks ?? null],
+  a: s.adjs.map((x) => [x.id, x.to, x.price, x.instrument ? `${x.instrument.provider}:${x.instrument.marketId}:${x.instrument.outcome}` : null]),
+  fee: s.assumptions.fees ?? null,
+  c: (s.assumptions.constraints ?? []).map((c) => [c.a, c.b, c.cls].join()).sort(),
+})
 const same = (a: Snapshot, b: Snapshot) => norm(a) === norm(b)
 
 export const status = (s: Scenario): ScenarioStatus => (!s.saved ? 'new' : same(s.saved, s) ? 'saved' : 'modified')
@@ -60,8 +70,16 @@ export const configure = (s: Scenario, patch: Partial<Pick<Snapshot, 'baseline' 
 
 /* ── Restore from storage ─────────────────────────────────────────── */
 const PLATFORMS: Platform[] = ['pm', 'ks']
-const REL: RelClass[] = ['related', 'mutex', 'unknown']
 const isNum = (v: unknown) => typeof v === 'number' && Number.isFinite(v)
+/** A stored fee schedule, or null (unavailable) when missing or malformed. Never invented. */
+function readSchedule(v: unknown): FeeSchedule | null {
+  if (!v || typeof v !== 'object') return null
+  const f = v as Record<string, unknown>
+  const rate = (x: unknown) => (x === null ? null : isNum(x) && (x as number) >= 0 ? (x as number) : undefined)
+  const taker = rate(f.taker), maker = rate(f.maker)
+  if (f.formula !== 'price-variance' || taker === undefined || maker === undefined || (f.rounding !== 'up-to-cent' && f.rounding !== 'nearest-5dp')) return null
+  return { formula: 'price-variance', taker, maker, rounding: f.rounding, source: f.source === 'provider' ? 'provider' : 'sample', reference: typeof f.reference === 'string' ? f.reference : '', effective: typeof f.effective === 'string' ? f.effective : null }
+}
 function readInstrument(v: unknown): InstrumentRef | undefined | false {
   if (v == null) return undefined
   if (typeof v !== 'object') return false
@@ -74,6 +92,7 @@ function readInstrument(v: unknown): InstrumentRef | undefined | false {
     provider: i.provider as Platform, eventId: i.eventId as string, eventTitle: i.eventTitle as string, marketId: i.marketId as string, marketTitle: i.marketTitle as string,
     outcome: i.outcome, category: i.category as InstrumentRef['category'], resolves: i.resolves as string, refPrice: i.refPrice as number | null,
     refAsOf: typeof i.refAsOf === 'string' ? i.refAsOf : null, source: i.source === 'provider' ? 'provider' : 'sample',
+    fee: readSchedule(i.fee),
   }
 }
 
@@ -105,8 +124,15 @@ export function sanitize(raw: unknown, knownIds: (id: string) => boolean): { sce
     const a: ScenarioAssumptions = {}
     if (v && typeof v === 'object') {
       const o = v as Record<string, unknown>
-      if (typeof o.includeFees === 'boolean') a.includeFees = o.includeFees
-      if (REL.includes(o.crypto as RelClass)) a.crypto = o.crypto as RelClass
+      const fees = readFeeAssumption(o.fees, o.includeFees)
+      if (o.fees || o.includeFees === false) a.fees = fees
+      const cs: Constraint[] = []
+      if (Array.isArray(o.constraints)) for (const c of o.constraints) {
+        if (c && typeof c.a === 'string' && typeof c.b === 'string' && c.a !== c.b && (c.cls === 'mutex' || c.cls === 'equivalent') && !cs.some((x) => (x.a === c.a && x.b === c.b) || (x.a === c.b && x.b === c.a))) cs.push({ a: c.a, b: c.b, cls: c.cls })
+      }
+      // Older scenarios could override the sample BTC × ETH pair; only a constraining override carries meaning.
+      if (o.crypto === 'mutex' && !cs.length) cs.push({ a: 'btc', b: 'eth', cls: 'mutex' })
+      if (cs.length) a.constraints = cs
     }
     return a
   }

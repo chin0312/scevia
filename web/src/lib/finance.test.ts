@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { CASH_FLOWS, CLOSED_TRADES, FEE_RATE, OPEN_POSITIONS, TODAY } from '../data/portfolio'
+import { CASH_FLOWS, CLOSED_TRADES, OPEN_POSITIONS, TODAY } from '../data/portfolio'
+import { sampleFeeSchedule } from '../data/sampleFees'
+import { DEFAULT_FEES } from './fees'
 import {
   MAX_JOINT_EVENTS, POSITIONS, POS_BY_ID, account, allocation, derivePosition, eventExposureOf, opposite, outcomeLabel, attribution, baseHoldings, entryBuckets, eventPnl, eventRelations, groupPnl, insights, isFeasible, jointOutcomes,
-  exposures, netPnlAt, outcomeRange, periodRange, periodStats, relationsFor, scenarioMetrics, series, settlementRange, positionsFor, settlementRangeFor, simulate, tradesIn,
+  exposures, netPnlAt, outcomeRange, periodRange, periodStats, sourceRelations, withConstraints, scenarioMetrics, series, settlementRange, positionsFor, settlementRangeFor, simulate, tradesIn,
   type Outcome, type PlatformFilter,
 } from './finance'
 
@@ -11,6 +13,12 @@ const close = (a: number | null | undefined, b: number | null | undefined, eps =
 const sr = (...a: Parameters<typeof settlementRange>) => settlementRange(...a)!
 const or = (...a: Parameters<typeof outcomeRange>) => outcomeRange(...a)!
 const F: PlatformFilter[] = ['all', 'pm', 'ks']
+// Published formulas, written out independently of lib/fees.ts.
+const kalshiFee = (q: number, p: number) => Math.ceil(0.07 * q * p * (1 - p) * 100 - 1e-9) / 100
+const pmFee = (rate: number, q: number, p: number) => Math.round(rate * q * p * (1 - p) * 1e5) / 1e5
+const FEES = { fees: DEFAULT_FEES }, NOFEES = { fees: { mode: 'excluded' as const } }
+/** The old sample assumption (BTC × ETH mutually exclusive), now an explicit hypothetical constraint. */
+const MUTEX = withConstraints(sourceRelations(), [{ a: 'btc', b: 'eth', cls: 'mutex' }])
 
 describe('account identities', () => {
   it.each(F)('value − net deposits = net P&L (%s)', (f) => {
@@ -120,38 +128,38 @@ describe('periods and analytics', () => {
 
 describe('relationships and feasible outcomes', () => {
   it('mutually exclusive outcomes forbid both YES; equivalent ones must match', () => {
-    expect(isFeasible({ a: 'YES', b: 'YES' }, [{ a: 'a', b: 'b', cls: 'mutex' }])).toBe(false)
-    expect(isFeasible({ a: 'YES', b: 'NO' }, [{ a: 'a', b: 'b', cls: 'mutex' }])).toBe(true)
-    expect(isFeasible({ a: 'NO', b: 'NO' }, [{ a: 'a', b: 'b', cls: 'mutex' }])).toBe(true)
-    expect(isFeasible({ a: 'YES', b: 'NO' }, [{ a: 'a', b: 'b', cls: 'equivalent' }])).toBe(false)
-    for (const cls of ['related', 'unknown'] as const) expect(isFeasible({ a: 'YES', b: 'YES' }, [{ a: 'a', b: 'b', cls }])).toBe(true)
+    expect(isFeasible({ a: 'YES', b: 'YES' }, [{ a: 'a', b: 'b', cls: 'mutex', provenance: 'verified' as const }])).toBe(false)
+    expect(isFeasible({ a: 'YES', b: 'NO' }, [{ a: 'a', b: 'b', cls: 'mutex', provenance: 'verified' as const }])).toBe(true)
+    expect(isFeasible({ a: 'NO', b: 'NO' }, [{ a: 'a', b: 'b', cls: 'mutex', provenance: 'verified' as const }])).toBe(true)
+    expect(isFeasible({ a: 'YES', b: 'NO' }, [{ a: 'a', b: 'b', cls: 'equivalent', provenance: 'verified' as const }])).toBe(false)
+    for (const cls of ['related', 'unknown'] as const) expect(isFeasible({ a: 'YES', b: 'YES' }, [{ a: 'a', b: 'b', cls, provenance: 'verified' }])).toBe(true)
   })
   it('excludes impossible combinations instead of adjusting afterwards', () => {
     const ids = ['x', 'y', 'z']
-    const r = or(ids, [{ a: 'x', b: 'y', cls: 'mutex' }], (o) => (o.x === 'YES' ? 10 : 0) + (o.y === 'YES' ? 7 : 0) + (o.z === 'YES' ? 1 : 0))
+    const r = or(ids, [{ a: 'x', b: 'y', cls: 'mutex', provenance: 'verified' as const }], (o) => (o.x === 'YES' ? 10 : 0) + (o.y === 'YES' ? 7 : 0) + (o.z === 'YES' ? 1 : 0))
     expect(r.excluded).toBe(2)
     expect(r.max).toBe(11) // x YES, y NO, z YES — not 18
     expect(r.min).toBe(0)
   })
   it('portfolio best case under mutex equals a brute-force search of feasible outcomes', () => {
-    const hs = Object.values(baseHoldings()), rels = relationsFor('mutex')
+    const hs = Object.values(baseHoldings()), rels = MUTEX
     const ids = [...new Set(hs.map((h) => h.eventId))]
     let brute = -Infinity
     for (const o of jointOutcomes(ids)) if (isFeasible(o, rels)) brute = Math.max(brute, ids.reduce((s, id) => s + eventPnl(hs, id, o[id]), 0))
     const r = sr(hs, rels)
     close(r.max, brute)
-    expect(r.max).toBeLessThan(sr(hs, relationsFor('unknown')).max)
+    expect(r.max).toBeLessThan(sr(hs, sourceRelations()).max)
     close(r.min, -account('all').committed) // everything against you is still possible
   })
   it('related and unknown relationships don’t constrain outcomes', () => {
     const hs = Object.values(baseHoldings())
-    const a = sr(hs, relationsFor('unknown')), b = sr(hs, relationsFor('related'))
+    const a = sr(hs, sourceRelations()), b = sr(hs, sourceRelations())
     close(a.max, b.max); close(a.min, b.min); expect(a.excluded).toBe(0)
   })
 })
 
 describe('risk scope', () => {
-  const rels = relationsFor('mutex')
+  const rels = MUTEX
   const all = Object.values(baseHoldings())
   it('portfolio range is the same as the range over every event', () => {
     const r = sr(all, rels), f = settlementRangeFor(exposures().map((e) => e.event.id), rels)!
@@ -176,8 +184,8 @@ describe('risk scope', () => {
 })
 
 describe('scenario simulation', () => {
-  const rels = relationsFor('unknown')
-  const base = scenarioMetrics(simulate([], { includeFees: true }), rels)
+  const rels = sourceRelations()
+  const base = scenarioMetrics(simulate([], FEES), rels)
   it('the unchanged scenario matches the account', () => {
     const a = account('all')
     close(base.cash, a.cash); close(base.totalValue, a.totalValue); close(base.committed, a.committed)
@@ -185,8 +193,8 @@ describe('scenario simulation', () => {
   })
   it('a purchase never creates profit: cash moves into contracts, value changes only by spread and fees', () => {
     const p = POS_BY_ID.fedk, d = 1000, px = 0.66
-    const sim = simulate([{ id: 'fedk', to: p.shares + d, price: px }], { includeFees: true })
-    const m = scenarioMetrics(sim, rels), fee = d * px * FEE_RATE.ks
+    const sim = simulate([{ id: 'fedk', to: p.shares + d, price: px }], FEES)
+    const m = scenarioMetrics(sim, rels), fee = kalshiFee(d, px)
     expect(sim.realized).toBe(0)
     close(m.cash, base.cash - d * px - fee)
     close(m.committed, base.committed + d * px)
@@ -195,77 +203,77 @@ describe('scenario simulation', () => {
   })
   it('buying at the mark with fees off leaves portfolio value unchanged', () => {
     const p = POS_BY_ID.cel
-    const m = scenarioMetrics(simulate([{ id: 'cel', to: p.shares + 500, price: p.mark }], { includeFees: false }), rels)
+    const m = scenarioMetrics(simulate([{ id: 'cel', to: p.shares + 500, price: p.mark }], NOFEES), rels)
     close(m.totalValue, base.totalValue)
   })
   it('a partial sale realizes P&L against average cost, after fees', () => {
     const p = POS_BY_ID.btc, q = 3000, px = 0.3
-    const sim = simulate([{ id: 'btc', to: p.shares - q, price: px }], { includeFees: true })
-    const fee = q * px * FEE_RATE.pm
+    const sim = simulate([{ id: 'btc', to: p.shares - q, price: px }], FEES)
+    const fee = pmFee(0.01, q, px) // Polymarket Crypto rate
     close(sim.realized, q * (px - p.avg) - fee)
     close(sim.holdings.btc.cost, p.cost * (1 - q / p.shares))
     close(sim.cash.pm, account('pm').cash + q * px - fee)
   })
   it('a full exit leaves no shares or cost basis', () => {
     const p = POS_BY_ID.hot
-    const sim = simulate([{ id: 'hot', to: 0, price: 0.9 }], { includeFees: true })
+    const sim = simulate([{ id: 'hot', to: 0, price: 0.9 }], FEES)
     expect(sim.holdings.hot.shares).toBe(0)
     expect(sim.holdings.hot.cost).toBe(0)
-    close(sim.realized, p.shares * (0.9 - p.avg) - p.shares * 0.9 * FEE_RATE.ks)
+    close(sim.realized, p.shares * (0.9 - p.avg) - kalshiFee(p.shares, 0.9))
   })
   it('fees can be excluded', () => {
-    expect(simulate([{ id: 'hot', to: 0, price: 0.9 }], { includeFees: false }).fees).toBe(0)
+    expect(simulate([{ id: 'hot', to: 0, price: 0.9 }], NOFEES).fees).toBe(0)
   })
   it('a funding shortfall is reported, not treated as invalid input, and the trade stays in the results', () => {
     const eth = POS_BY_ID.eth, add = 200000 - eth.shares, px = 0.5
-    const sim = simulate([{ id: 'eth', to: 200000, price: px }], { includeFees: true })
+    const sim = simulate([{ id: 'eth', to: 200000, price: px }], FEES)
     const m = scenarioMetrics(sim, rels)
     expect(sim.errors).toEqual({})
     expect(m.valid).toBe(true)
     expect(sim.holdings.eth.shares).toBe(200000)
-    const needed = add * px * (1 + FEE_RATE.ks) - account('ks').cash
+    const needed = add * px + kalshiFee(add, px) - account('ks').cash
     close(sim.shortfall.ks, needed)
     expect(sim.shortfall.pm).toBe(0)
     close(m.shortfall, needed)
-    close(m.cash, account('all').cash - add * px * (1 + FEE_RATE.ks)) // cash goes negative by the shortfall
+    close(m.cash, account('all').cash - add * px - kalshiFee(add, px)) // cash goes negative by the shortfall
   })
   it('within available cash there is no shortfall', () => {
-    const sim = simulate([{ id: 'fedk', to: POS_BY_ID.fedk.shares + 100, price: 0.65 }], { includeFees: true })
+    const sim = simulate([{ id: 'fedk', to: POS_BY_ID.fedk.shares + 100, price: 0.65 }], FEES)
     expect(sim.shortfall).toEqual({ pm: 0, ks: 0 })
   })
   it('an invalid price is excluded and never creates a shortfall', () => {
-    const sim = simulate([{ id: 'eth', to: 200000, price: 7 }], { includeFees: true })
+    const sim = simulate([{ id: 'eth', to: 200000, price: 7 }], FEES)
     expect(sim.errors.eth).toBeTruthy()
     expect(sim.shortfall.ks).toBe(0)
     expect(sim.holdings.eth.shares).toBe(POS_BY_ID.eth.shares)
   })
   it.each([0, 1, 1.5, -0.2, Number.NaN])('rejects invalid price %s and ignores that adjustment', (px) => {
-    const sim = simulate([{ id: 'cpi', to: 0, price: px }], { includeFees: true })
+    const sim = simulate([{ id: 'cpi', to: 0, price: px }], FEES)
     expect(sim.errors.cpi).toBeTruthy()
     expect(sim.holdings.cpi.shares).toBe(POS_BY_ID.cpi.shares)
     expect(sim.realized).toBe(0)
   })
   it('a no-op adjustment changes nothing', () => {
-    const m = scenarioMetrics(simulate([{ id: 'rec', to: POS_BY_ID.rec.shares, price: 0.5 }], { includeFees: true }), rels)
+    const m = scenarioMetrics(simulate([{ id: 'rec', to: POS_BY_ID.rec.shares, price: 0.5 }], FEES), rels)
     close(m.totalValue, base.totalValue); close(m.worstValue, base.worstValue); close(m.bestValue, base.bestValue)
   })
   it('worst/best values use the same feasible outcomes as Risk', () => {
-    const mutex = relationsFor('mutex')
-    const m = scenarioMetrics(simulate([], { includeFees: true }), mutex)
+    const mutex = MUTEX
+    const m = scenarioMetrics(simulate([], FEES), mutex)
     const r = sr(Object.values(baseHoldings()), mutex)
     const a = account('all')
     close(m.bestValue, a.cash + a.committed + r.max)
     close(m.worstValue, a.cash + a.committed + r.min)
   })
   it('group P&L with no trades equals event P&L', () => {
-    const sim = simulate([], { includeFees: true }), hs = Object.values(sim.holdings)
+    const sim = simulate([], FEES), hs = Object.values(sim.holdings)
     for (const o of ['YES', 'NO'] as Outcome[]) close(groupPnl(sim, ['fed'], { fed: o }), eventPnl(hs, 'fed', o))
   })
   it('group P&L of a sold-out position is its realized P&L', () => {
-    const sim = simulate([{ id: 'chf', to: 0, price: 0.12 }], { includeFees: true })
+    const sim = simulate([{ id: 'chf', to: 0, price: 0.12 }], FEES)
     close(groupPnl(sim, ['chf'], { chf: 'YES' }), sim.realized)
     close(groupPnl(sim, ['chf'], { chf: 'NO' }), sim.realized)
-    close(sim.realized, tradeNetLike(POS_BY_ID.chf.shares, 0.12, POS_BY_ID.chf.avg))
+    close(sim.realized, tradeNetLike(POS_BY_ID.chf.shares, 0.12, POS_BY_ID.chf.avg) - pmFee(0.05, POS_BY_ID.chf.shares, 0.12)) // Polymarket Sports rate
   })
 })
 const tradeNetLike = (q: number, px: number, avg: number) => q * (px - avg)
@@ -303,17 +311,18 @@ describe('event details', () => {
     expect(fed.positions.map((p) => p.id).sort()).toEqual(['fedk', 'fedp'])
     expect(fed.platforms.sort()).toEqual(['ks', 'pm'])
   })
-  it('eventRelations follows the shared classification', () => {
-    expect(eventRelations('btc', relationsFor('mutex')).map((r) => [r.other.id, r.cls])).toContainEqual(['eth', 'mutex'])
-    expect(eventRelations('btc', relationsFor('related')).map((r) => r.cls)).toContain('related')
+  it('eventRelations reports class and provenance', () => {
+    expect(eventRelations('btc', MUTEX).map((r) => [r.other.id, r.cls, r.provenance])).toContainEqual(['eth', 'mutex', 'hypothetical'])
+    expect(eventRelations('btc', sourceRelations())).toEqual([]) // nothing recorded: no constraint, not "independent"
+    expect(eventRelations('fed', sourceRelations()).every((r) => r.cls === 'related' && r.provenance === 'annotation')).toBe(true)
   })
 })
 
 describe('event exposure with each holding’s own side', () => {
   const ev = { id: 'x', name: 'Binary event', short: 'X', category: 'Economics' as const }
   const pos = (id: string, side: 'YES' | 'NO', shares: number, price: number, platform: 'pm' | 'ks' = 'pm') =>
-    derivePosition({ id, market: id, eventId: 'x', category: 'Economics', platform, side, mark: price, markAtLastVisit: price, resolves: '2026-12-31', fills: [{ date: '2026-11-01', shares, price, fee: 0 }] })
-  const holdings = (ps: ReturnType<typeof pos>[]) => ps.map((p) => ({ id: p.id, eventId: p.eventId, platform: p.platform, side: p.side, shares: p.shares, cost: p.cost, mark: p.mark as number | null, category: p.category, title: p.market, eventTitle: 'Binary event' }))
+    derivePosition({ id, market: id, marketId: id, feeSchedule: sampleFeeSchedule(platform, 'Economics'), eventId: 'x', category: 'Economics', platform, side, mark: price, markAtLastVisit: price, resolves: '2026-12-31', fills: [{ date: '2026-11-01', shares, price, fee: 0 }] })
+  const holdings = (ps: ReturnType<typeof pos>[]) => ps.map((p) => ({ id: p.id, eventId: p.eventId, platform: p.platform, side: p.side, shares: p.shares, cost: p.cost, mark: p.mark as number | null, category: p.category, title: p.market, eventTitle: 'Binary event', marketId: p.marketId }))
 
   it('opposing YES and NO holdings offset at settlement; committed capital stays gross', () => {
     const e = eventExposureOf(ev, [pos('y', 'YES', 100, 0.6), pos('n', 'NO', 60, 0.4, 'ks')], 84)
@@ -348,7 +357,7 @@ describe('event exposure with each holding’s own side', () => {
   })
   it('largest single-event loss nets opposing holdings', () => {
     const ps = [pos('y', 'YES', 100, 0.6), pos('n', 'NO', 60, 0.4)]
-    const sim = { holdings: Object.fromEntries(holdings(ps).map((h) => [h.id, h])), cash: { pm: 0, ks: 0 }, realized: 0, fees: 0, errors: {}, shortfall: { pm: 0, ks: 0 }, realizedBy: {}, feesBy: {} }
+    const sim = { holdings: Object.fromEntries(holdings(ps).map((h) => [h.id, h])), cash: { pm: 0, ks: 0 }, realized: 0, fees: 0, errors: {}, shortfall: { pm: 0, ks: 0 }, realizedBy: {}, feesBy: {}, feeStatusBy: {}, feesUnavailable: [] }
     close(scenarioMetrics(sim, []).largestEventLoss, 24)
   })
 })

@@ -1,3 +1,4 @@
+import type { FeeSchedule } from '../lib/fees'
 /**
  * Domain model for a portfolio. Any data source (the bundled sample, or a future Polymarket/Kalshi
  * import) must produce a `PortfolioData`; every calculation in lib/finance.ts reads only this shape.
@@ -14,6 +15,10 @@ export interface Fill { date: string; shares: number; price: number; fee: number
 
 export interface OpenPosition {
   id: string; market: string; eventId: string; category: Category; platform: Platform; side: Side
+  /** Provider-native market id. A position id is account-specific; the market id identifies the contract. */
+  marketId: string
+  /** Fee parameters of this market for hypothetical trades (null = not published / unknown). Not used for history. */
+  feeSchedule: FeeSchedule | null
   /** Last traded price on the source platform ("mark"). */
   mark: number
   /** Mark at the user's previous visit, for "What changed". */
@@ -41,7 +46,10 @@ export interface ClosedTrade {
 export interface DataSource { label: string; asOf: string; stale: boolean }
 
 export type RelClass = 'equivalent' | 'mutex' | 'related' | 'unknown'
-export interface Relation { a: string; b: string; cls: RelClass }
+/** Where a relationship comes from. Only 'verified' (source facts, e.g. settlement rules) and 'hypothetical' (a scenario's
+ *  own assumption) constrain feasible outcomes; 'annotation' is a descriptive note and never removes an outcome. */
+export type RelProvenance = 'verified' | 'annotation' | 'hypothetical'
+export interface Relation { a: string; b: string; cls: RelClass; provenance: RelProvenance; note?: string }
 
 export interface PortfolioData {
   /** Date the data describes ("today"). */
@@ -52,7 +60,6 @@ export interface PortfolioData {
   lastVisit: string
   /** True for the bundled sample portfolio. The UI labels sample data as such. */
   isSample: boolean
-  feeRates: Record<Platform, number>
   cashFlows: CashFlow[]
   openPositions: OpenPosition[]
   closedTrades: ClosedTrade[]

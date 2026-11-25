@@ -5,13 +5,12 @@ import { useWidth } from '../components/charts'
 import { useDetails } from '../components/details'
 import { handoffPath } from '../lib/handoff'
 import { Modal, useToast } from '../components/overlays'
-import { RelationshipModal } from '../components/relationships'
 import { SectionRail, useHashScroll, type RailSection } from '../components/shell'
 import { Button, Callout, Card, CardHeader, Chip, Legend, PageHead, PlatformBadge, Seg, Tabs, Tile, cx } from '../components/ui'
 import { TODAY } from '../data/portfolio'
 import { CATEGORIES, CAT_COLOR, PLATFORM_NAME } from '../data/labels'
-import { REL_TEXT, useRelations, type RelClass } from '../data/relations'
-import { account, addDays, baseHoldings, exposures, fmtDate, positionsFor, outcomeLabel, settlementRange, settlementRangeFor, type EventExposure } from '../lib/finance'
+import { PROVENANCE_TEXT, REL_TEXT, type RelClass } from '../data/relations'
+import { account, addDays, baseHoldings, exposures, fmtDate, positionsFor, outcomeLabel, settlementRange, settlementRangeFor, sourceRelations, type EventExposure } from '../lib/finance'
 import { fmt, kfmt, pct, sfmt } from '../lib/format'
 import { useSessionState } from '../lib/useSessionState'
 
@@ -21,7 +20,6 @@ const RAIL: RailSection[] = [
   { id: 'payoffs', label: 'Outcome payoffs', icon: 'table' },
   { id: 'context', label: 'Relationships & timing', icon: 'link', children: [{ id: 'rel', label: 'Event relationships' }, { id: 'calendar', label: 'Resolution calendar' }] },
 ]
-const MACRO = ['fed', 'cpi', 'rec']
 
 /** Largest capital resolving inside any 7-day window within `days`. */
 function busiestWeek(exps: EventExposure[], days = 90) {
@@ -41,13 +39,13 @@ export default function Risk() {
   const toast = useToast()
   const [params] = useSearchParams()
   const focus = params.get('event')
-  const { crypto, rels } = useRelations()
+  // Factual risk uses source relationships only; hypothetical constraints live in scenarios and never reach here.
+  const rels = useMemo(() => sourceRelations(), [])
   const details = useDetails()
   const [groupBy, setGroupBy] = useState<'By event' | 'By category' | 'By platform'>('By event')
   const [limit, setLimit] = useSessionState('scevia-guardrail', 15)
   const [editLimit, setEditLimit] = useState<number | null>(null)
   const [filter, setFilter] = useState<'All events' | 'Next 30 days' | 'Over guardrail'>('All events')
-  const [classify, setClassify] = useState(false)
   const [hotStep, setHotStep] = useState<number | null>(null)
   const [hotCal, setHotCal] = useState<string | null>(null)
   const [range, setRange] = useState<'90 days' | '12 months'>('90 days')
@@ -83,7 +81,6 @@ export default function Risk() {
   const ladderMax = Math.max(10000, Math.ceil((ladder.at(-1) ?? 0) / 10000) * 10000)
   const ladderTicks = Array.from({ length: ladderMax / 10000 + 1 }, (_, i) => i * 10000)
   const [ladderRef, LW] = useWidth<HTMLDivElement>(480)
-  const macroLoss = exps.filter((e) => MACRO.includes(e.event.id)).reduce((a, e) => a + e.maxLoss, 0)
   const poScale = Math.max(1, ...exps.flatMap((e) => [Math.abs(e.pnl.YES), Math.abs(e.pnl.NO)]))
   const soon = exps.filter((e) => e.days <= 30)
   const week = busiestWeek(exps)
@@ -92,8 +89,18 @@ export default function Risk() {
   const portfolio = settlementRange(Object.values(baseHoldings()), rels)
   const shownIds = new Set(rows.map((e) => e.event.id))
   const table = settlementRangeFor([...shownIds], rels)
-  const unclassifiedPair = crypto === 'unknown' && shownIds.has('btc') && shownIds.has('eth')
   const worstValue = portfolio ? acct.cash + committed + portfolio.min : null
+  // Source relationships between held events, grouped by their note (e.g. one annotation covering several pairs).
+  const relGroups = useMemo(() => {
+    const groups = new Map<string, { key: string; title: string; cls: RelClass; provenance: (typeof rels)[number]['provenance']; ids: Set<string> }>()
+    for (const r of rels) {
+      if (!exps.some((e) => e.event.id === r.a) || !exps.some((e) => e.event.id === r.b) || r.cls === 'unknown') continue
+      const key = `${r.cls}|${r.provenance}|${r.note ?? `${r.a}-${r.b}`}`
+      const g = groups.get(key) ?? { key, title: r.note ?? 'Related events', cls: r.cls, provenance: r.provenance, ids: new Set<string>() }
+      g.ids.add(r.a); g.ids.add(r.b); groups.set(key, g)
+    }
+    return [...groups.values()].map((g) => ({ ...g, events: exps.filter((e) => g.ids.has(e.event.id)) }))
+  }, [rels, exps])
   const openEvent = (id: string) => details.open({ kind: 'event', id, scope: 'all' })
   // Explicit hand-off of the holdings behind the rows shown; the Lab confirms the scenario and which of them to add.
   const stressIds = rows.flatMap((e) => e.positions.map((p) => p.id))
@@ -171,7 +178,7 @@ export default function Risk() {
                 {hotStep == null ? <>
                   <div><div className="l">Largest event</div><div className="v loss">{sfmt(-(byLoss[0]?.maxLoss ?? 0))}</div></div>
                   <div><div className="l">Top 3 events</div><div className="v loss">{sfmt(-top3Loss)}</div></div>
-                  <div><div className="l">Macro cluster (related)</div><div className="v loss">{sfmt(-macroLoss)}</div></div>
+                  <div><div className="l">All events</div><div className="v loss">{sfmt(-(ladder.at(-1) ?? 0))}</div></div>
                 </> : <>
                   <div style={{ gridColumn: 'span 2' }}><div className="l">If your top {hotStep + 1} event{hotStep ? 's' : ''} go against you</div><div className="v loss">{sfmt(-ladder[hotStep])}</div></div>
                   <div><div className="l">Adds</div><button type="button" className="link v t2" style={{ fontSize: 'var(--font-size-sm)', whiteSpace: 'normal', textAlign: 'left' }} onClick={() => openEvent(byLoss[hotStep].event.id)}>{byLoss[hotStep].event.name}</button></div>
@@ -204,25 +211,26 @@ export default function Risk() {
           })}
           {table && <div className="po-row t"><span>{filter === 'All events' ? 'Whole portfolio' : `${rows.length} event${rows.length > 1 ? 's' : ''} shown (subtotal)`} · feasible range</span><span /><span className="gain r">{sfmt(table.max)} <small className="t3">best case</small></span><span className="loss r">{sfmt(table.min)} <small className="t3">worst case</small></span><span className="r">{pct(rows.reduce((a, e) => a + shareOf(e.cost), 0), 0)}</span></div>}
           <div className="foot"><span>
-            Best and worst cases search every joint outcome of the events {filter === 'All events' ? 'in the portfolio' : 'shown'} and skip impossible ones{table?.excluded ? ` (${table.excluded} combinations excluded because BTC and ETH are mutually exclusive)` : ''}.{filter !== 'All events' && ` Portfolio-wide: ${portfolio ? `${sfmt(portfolio.min)} to ${sfmt(portfolio.max)}` : na}.`}
-            {unclassifiedPair ? ' BTC × ETH is unclassified, so outcomes that may be unrealistic together are still included (unmodeled dependency).' : ''} Related events are never netted against each other.
+            Best and worst cases search every joint outcome of the events {filter === 'All events' ? 'in the portfolio' : 'shown'} and skip impossible ones{table?.excluded ? ` (${table.excluded} combinations excluded by verified constraints)` : ''}.{filter !== 'All events' && ` Portfolio-wide: ${portfolio ? `${sfmt(portfolio.min)} to ${sfmt(portfolio.max)}` : na}.`}
+ Related and unclassified events keep every combination possible and are never netted. This is settlement logic, not a statement about how likely outcomes are.
           </span></div>
         </Card>
 
         <div className="grid g-12 anchor" id="context">
           <Card id="rel">
-            <CardHeader title="Event relationships" sub="How positions that may move together are treated" />
+            <CardHeader title="Event relationships" sub="Settlement logic from your sources: which joint outcomes are possible (not correlation)" />
             <div className="card-b">
               {exps.filter((e) => e.positions.length > 1).map((e) => (
                 <div className="rel" key={e.event.id}><div className="h"><button type="button" className="link" onClick={() => openEvent(e.event.id)}><b>{e.event.name}</b></button><Chip tone="yes">✓ Equivalent contract · confirmed</Chip></div>
                   {e.positions.map((p) => <div className="leg" key={p.id}><PlatformBadge p={p.platform} />{p.market} · {p.side}</div>)}
                   <p>Same source and date, combined as one event. If it resolves {e.worst.outcome}: <span className={e.worst.pnl < 0 ? 'loss' : 'gain'}>{sfmt(e.worst.pnl)}</span>.</p></div>
               ))}
-              <div className="rel"><div className="h"><b>US macro outlook</b><Chip tone="info">{REL_TEXT.related.label}</Chip></div>
-                <p>{exps.filter((e) => MACRO.includes(e.event.id)).map((e) => `${e.event.short} (${e.side})`).join(' · ')}. These share drivers but settle on different rules, so all combinations stay possible and nothing is netted. <button type="button" className="link" onClick={() => nav(handoffPath(exps.filter((e) => MACRO.includes(e.event.id)).flatMap((e) => e.positions.map((p) => p.id)), 'Risk · US macro outlook (related events) · all platforms'))} title="Choose a scenario and which of these holdings to add">Model them together in Scenario Lab…</button></p></div>
-              <div className={cx('rel', crypto === 'unknown' && 'unk')}><div className="h"><b>BTC year-end · ETH ETF flows</b><Chip tone={REL_TEXT[crypto].tone}>{REL_TEXT[crypto].label}</Chip></div>
-                <p>{crypto === 'unknown' ? <>Probably connected, but not confirmed. Totals keep every combination possible and are marked <i>unmodeled dependency</i>.</> : `Classified by you as “${REL_TEXT[crypto].label}”. Scenario Lab uses the same setting.`} <button type="button" className="link" onClick={() => setClassify(true)}>{crypto === 'unknown' ? 'Classify' : 'Change'}</button></p></div>
-              <p className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>Other event pairs are unclassified: every combination is treated as possible.</p>
+              {relGroups.map((g) => (
+                <div className="rel" key={g.key}><div className="h"><b>{g.title}</b><Chip tone={REL_TEXT[g.cls].tone}>{REL_TEXT[g.cls].label}</Chip><small className="t3">{PROVENANCE_TEXT[g.provenance]}</small></div>
+                  <p>{g.events.map((e) => `${e.event.short} (${e.side === 'Mixed' ? 'YES + NO' : e.side})`).join(' · ')}. {g.cls === 'related' ? 'They may share drivers, but every combination of outcomes stays possible and nothing is netted.' : g.cls === 'mutex' ? 'Verified: they can’t both resolve YES, so that combination is excluded.' : g.cls === 'equivalent' ? 'Verified: they settle the same way.' : 'No constraint.'}{' '}
+                    <button type="button" className="link" onClick={() => nav(handoffPath(g.events.flatMap((e) => e.positions.map((p) => p.id)), `Risk · ${g.title} · all platforms`))} title="Choose a scenario and which of these holdings to add">Model them together in Scenario Lab…</button></p></div>
+              ))}
+              <p className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>Only verified constraints change which joint outcomes are possible; notes never do. Pairs without a recorded relationship keep every combination possible, which is not an assumption that they’re independent. To explore a hypothetical constraint, add it to a scenario in Scenario Lab.</p>
             </div>
           </Card>
           <Card id="calendar">
@@ -245,7 +253,6 @@ export default function Risk() {
           <Callout>{exps.filter((e) => shareOf(e.cost) > editLimit).length} event(s) would be over this limit. Guardrails only flag; Scevia never trades.</Callout>
         </Modal>
       )}
-      {classify && <RelationshipModal current={crypto} onClose={() => setClassify(false)} />}
     </div>
   )
 }

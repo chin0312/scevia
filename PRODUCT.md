@@ -93,7 +93,7 @@ The long-term product is a privacy-first **cloud workspace**: continuity across 
 
 Scenario Lab is a **portfolio construction and simulation workspace**. It follows the workflow below, without forcing a wizard: users move freely between inputs and results.
 1. Choose or create a scenario.
-2. Set it up: the starting portfolio (current or empty), optional added capital, fee treatment and relationship assumptions.
+2. Set it up: the starting portfolio (current or empty), optional added capital, fee treatment, and (optionally) hypothetical settlement constraints.
 3. Build the hypothetical portfolio.
 4. Review the impact: before/after, allocation, settlement outcomes.
 5. Compare scenarios.
@@ -127,7 +127,12 @@ Scenario Lab is a **portfolio construction and simulation workspace**. It follow
 - **Inspect, explore, navigate.** *Inspect* opens a detail panel (position, event, group of holdings, trades) on top of the current page. *Explore* changes a local view (grouping, period, a selected allocation segment) without changing portfolio-wide figures. *Navigate* moves to another module and is always an explicit, labelled action (“Analyze in Risk →”, “Simulate in Scenario Lab”).
 - **No navigation just to see data.** Anything shown in one module that is defined in another (an event's exposure, a position's fills) is inspectable in place.
 - **Scenario state only changes on purpose.** Nothing outside Scenario Lab edits a scenario. Hand-offs ask which scenario and which holdings to add; new positions start at the current holding and mark; Cancel changes nothing; reloading never repeats a hand-off.
-- **One copy of every assumption.** Relationship classifications and guardrails are shared state, editable wherever they are used.
+- **One copy of every assumption.** Shared assumptions (the guardrail) are editable wherever they are used.
+- **Facts vs. hypotheses.**
+  - Verified relationships and market fee parameters are source facts. Risk only ever uses facts.
+  - A scenario may add hypothetical constraints and its own fee treatment. These never change Risk or other scenarios, and an unsupported assumption never removes a possible loss from a factual view.
+  - Relationships are settlement logic (which joint outcomes can happen), never statistical correlation.
+- **Missing isn't zero.** Unavailable prices, fees or ranges are labelled as unavailable, never shown as $0.
 - **Drill-downs keep scope.** A panel opened from a filtered view starts in that view's period and platform scope. It says so, and it offers the wider (e.g. all-platform) view explicitly. A metric never silently changes meaning between an aggregate and its details.
 - **Hand-offs carry exact holdings.** "Simulate in Scenario Lab" sends the specific positions in the current scope, plus a note of where they came from. The Lab shows platforms and lets the user confirm.
 
@@ -140,7 +145,9 @@ Scenario Lab is a **portfolio construction and simulation workspace**. It follow
 | Realized / unrealized P&L | From closed trades after their fees / from open positions at mark, before fees. |
 | Net P&L | Realized + unrealized − fees on open fills. Never includes deposits. |
 | Settlement payoff | $1 per share if your side wins, $0 otherwise. |
-| Feasible outcome | A combination of event results that can actually happen given confirmed relationships. |
+| Feasible outcome | A combination of event results that can actually happen given verified relationships (and, inside a scenario, its hypothetical constraints). Not a probability. |
+| Settlement constraint | A logical rule between events: equivalent (resolve the same way) or mutually exclusive (not both YES). Related and unknown impose none. |
+| Provider fee estimate | A fee for a hypothetical trade from the market's published parameters and an assumed maker/taker role. Not a fee charged. |
 | Assumed fill price | The price a scenario assumes a trade executes at. Not a quote. |
 | Funding shortfall | Extra cash a scenario needs beyond the platform's balance. |
 

@@ -4,14 +4,14 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { PLATFORM_NAME } from '../data/labels'
-import { REL_TEXT, useRelations } from '../data/relations'
+import { PROVENANCE_TEXT, REL_TEXT } from '../data/relations'
 import type { ClosedTrade } from '../data/types'
-import { POS_BY_ID, coverage, eventRelations, exposures, fmtDate, outcomeLabel, sourceOf, tradeNet, type EventExposure, type PlatformFilter, type Position } from '../lib/finance'
+import { POS_BY_ID, coverage, eventRelations, sourceRelations, exposures, fmtDate, outcomeLabel, sourceOf, tradeNet, type EventExposure, type PlatformFilter, type Position } from '../lib/finance'
 import { handoffPath } from '../lib/handoff'
 import { fmt, int, pct, sfmt } from '../lib/format'
 import { Icon } from './Icon'
 import { Drawer, focusTopLayer } from './overlays'
-import { RelationshipModal } from './relationships'
+import { useConnect } from './ConnectSources'
 import { Button, Callout, Chip, PlatformBadge, Seg, SideChip, cx } from './ui'
 
 export type Detail =
@@ -112,8 +112,8 @@ const tone = (v: number) => (v > 0.005 ? 'gain' : v < -0.005 ? 'loss' : undefine
 function EventBody({ id, scope, open, close }: { id: string; scope: PlatformFilter; open: (d: Detail) => void; close: () => void }) {
   const sim = useSimulate(close)
   const nav = useNavigate(), { pathname } = useLocation()
-  const { rels, crypto } = useRelations()
-  const [classify, setClassify] = useState(false)
+  const rels = sourceRelations()
+  const connect = useConnect()
   const full = exposures('all').find((x) => x.event.id === id)
   // Start in the scope the user came from; the full cross-platform event is one switch away and labelled as such.
   const [view, setView] = useState<PlatformFilter>(scope)
@@ -136,19 +136,17 @@ function EventBody({ id, scope, open, close }: { id: string; scope: PlatformFilt
     )}
     {!e ? <div className="empty"><p>No {SCOPE_LABEL[view].replace(' only', '')} holdings on this event.</p></div> : <EventFigures e={e} committed={committed} scopeLabel={view === 'all' ? 'all platforms' : SCOPE_LABEL[view].replace(' only', '')} open={open} />}
     <h5 className="caps">Relationships</h5>
-    {related.length === 0 && <p className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>Not classified against other events: every combination with them is treated as possible.</p>}
+    {related.length === 0 && <p className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>No relationship recorded with other events: every combination with them is treated as possible (that’s not an assumption that they’re independent).</p>}
     {related.map((r) => (
-      <div className="list-row" key={r.other.id}><span>{r.other.name}</span><span className="r row"><Chip tone={REL_TEXT[r.cls].tone}>{REL_TEXT[r.cls].label}</Chip>
-        {((id === 'btc' && r.other.id === 'eth') || (id === 'eth' && r.other.id === 'btc')) && <button type="button" className="link" onClick={() => setClassify(true)}>Change</button>}</span></div>
+      <div className="list-row" key={r.other.id}><span>{r.other.name}{r.note && <small className="t3"> · {r.note}</small>}</span><span className="r row"><Chip tone={REL_TEXT[r.cls].tone}>{REL_TEXT[r.cls].label}</Chip><small className="t3">{PROVENANCE_TEXT[r.provenance]}</small></span></div>
     ))}
-    <h5 className="caps">Data</h5>
+    <h5 className="caps">Data <button type="button" className="link" style={{ textTransform: 'none', letterSpacing: 0, marginLeft: 'var(--space-2)' }} onClick={() => connect()}>Data sources…</button></h5>
     {(e?.platforms ?? []).map((pl) => { const src = sourceOf(pl), c = coverage(pl); return <div className="cov" key={pl}><PlatformBadge p={pl} /><span>{c.fills} fills · {c.settlements} settlements</span><span className={src.stale ? 'stale' : 't3'}>as of {fmtDate(src.asOf)}{src.stale ? ' · stale' : ''}</span></div> })}
     <div className="drawer-actions">
       {!pathname.startsWith('/risk') && <Button icon="shield" onClick={() => { close(); nav(`/risk?event=${id}#payoffs`) }}>Analyze in Risk</Button>}
       {e && <Button variant="primary" icon="flask" title={`Choose a scenario for these ${e.positions.length} position${e.positions.length > 1 ? 's' : ''}`}
         onClick={() => sim.go(e.positions.map((p) => p.id), `${full.event.name} · ${SCOPE_LABEL[view]}`)}>{sim.label}{e.positions.length > 1 ? ` (${e.positions.length})` : ''}</Button>}
     </div>
-    {classify && <RelationshipModal current={crypto} onClose={() => setClassify(false)} />}
   </>)
 }
 

@@ -6,6 +6,7 @@
    Public market data is independent of the user's private portfolio. */
 import type { Category, Platform } from '../data/types'
 import type { InstrumentRef, Outcome } from './finance'
+import type { FeeSchedule } from './fees'
 
 export type MarketStatus = 'open' | 'closed' | 'resolved'
 export interface CatalogOutcome { outcome: Outcome; refPrice: number | null }
@@ -23,6 +24,8 @@ export interface CatalogMarket {
   outcomes: CatalogOutcome[]
   /** When the reference prices were observed (UTC date); null when unknown. */
   refAsOf: string | null
+  /** Fee parameters for this market (Phase 2: from the provider, e.g. Polymarket `feeRateBps`); null = unavailable. */
+  fee: FeeSchedule | null
 }
 export interface CatalogEvent { provider: Platform; eventId: string; eventTitle: string; url: string; markets: CatalogMarket[]; available: boolean }
 
@@ -58,7 +61,7 @@ export function parseMarketLink(raw: string): { ok: true; provider: Platform; pa
 export function instrumentFrom(ev: CatalogEvent, m: CatalogMarket, o: CatalogOutcome, source: InstrumentRef['source']): InstrumentRef {
   return {
     provider: m.provider, eventId: m.settlementGroup, eventTitle: ev.eventTitle, marketId: m.marketId, marketTitle: m.marketTitle,
-    outcome: o.outcome, category: m.category, resolves: m.resolves, refPrice: o.refPrice, refAsOf: m.refAsOf, source,
+    outcome: o.outcome, category: m.category, resolves: m.resolves, refPrice: o.refPrice, refAsOf: m.refAsOf, source, fee: m.fee,
   }
 }
 
