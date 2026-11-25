@@ -7,9 +7,20 @@ const fresh = async (page: Page, path: string) => {
   await page.evaluate(() => sessionStorage.clear())
   await page.goto(path)
 }
+/** Scenario Lab starts empty; examples are created only when the user picks one. */
+const startExample = async (page: Page, name: string) => {
+  if (!page.url().includes('/scenario-lab')) await page.goto('/scenario-lab')
+  await page.getByRole('button', { name: 'New scenario' }).click()
+  await page.getByRole('menuitem', { name }).click()
+  await expect(page.getByRole('heading', { level: 1 })).toContainText(name)
+}
+const target = (page: Page, market: string) => page.getByLabel(`Target shares of ${market}`)
+const rows = (page: Page) => page.locator('.builder .brow:not(.brow-h)')
 
 test('1 · view a position in Overview, then add it to a scenario only after choosing where', async ({ page }) => {
-  await fresh(page, '/overview')
+  await fresh(page, '/scenario-lab')
+  await startExample(page, 'Exit sports longshots')
+  await page.goto('/overview')
   const p = POS_BY_ID.shut
   await page.getByRole('row', { name: `${p.market}: open details` }).click()
   const drawer = page.getByRole('dialog', { name: p.market })
@@ -20,43 +31,45 @@ test('1 · view a position in Overview, then add it to a scenario only after cho
   await expect(page).toHaveURL(/\/scenario-lab$/) // the request is consumed, so reload/Back can't re-add
   const add = page.getByRole('dialog', { name: 'Add to a scenario' })
   await expect(add).toContainText(p.market)
-  await add.getByLabel('Target scenario').selectOption({ label: 'Exit sports longshots · 2 changes' })
+  await add.getByLabel('Target scenario').selectOption({ label: 'Exit sports longshots · 2 positions' })
   await add.getByRole('button', { name: 'Add 1 position' }).click()
   await expect(page.getByRole('heading', { level: 1 })).toContainText('Exit sports longshots')
   // starts at the current holding and mark: nothing changes until the user edits it
-  await expect(page.getByRole('slider', { name: `Target shares of ${p.market}` })).toHaveValue(String(p.shares))
-  await expect(page.locator('.adj', { hasText: p.market }).getByText('No change')).toBeVisible()
+  await expect(target(page, p.market)).toHaveValue(String(p.shares))
+  await expect(page.locator('.brow', { hasText: p.market }).getByText('No change')).toBeVisible()
   await expect(page.getByRole('status')).toContainText(p.market)
 })
 
 test('1b · cancelling an incoming add changes no scenario; already-included positions are skipped', async ({ page }) => {
   await fresh(page, '/scenario-lab')
+  await startExample(page, 'Trim crypto, add to Fed')
   await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
-  await expect.poll(() => page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v3'))).not.toBeNull()
-  const before = await page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v3'))
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v4'))).not.toBeNull()
+  const before = await page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v4'))
   await page.goto('/scenario-lab?addEvent=fed')
   const add = page.getByRole('dialog', { name: 'Add to a scenario' })
   await expect(add.getByRole('checkbox')).toHaveCount(2) // both Fed contracts, across platforms
   await add.getByRole('button', { name: 'Cancel' }).click()
   await expect(add).toHaveCount(0)
-  expect(await page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v3'))).toBe(before)
+  expect(await page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v4'))).toBe(before)
 
   await page.goto('/scenario-lab?add=fedk') // the draft already adjusts this contract
-  await page.getByRole('dialog', { name: 'Add to a scenario' }).getByLabel('Target scenario').selectOption({ label: 'Trim crypto, add to Fed · 3 changes' })
+  await page.getByRole('dialog', { name: 'Add to a scenario' }).getByLabel('Target scenario').selectOption({ label: 'Trim crypto, add to Fed · 3 positions' })
   await expect(page.getByText('Already in this scenario: left as it is')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Nothing to add' })).toBeDisabled()
 })
 
 test('2 · adjusting a scenario updates results; invalid input is caught', async ({ page }) => {
   await fresh(page, '/scenario-lab')
+  await startExample(page, 'Trim crypto, add to Fed')
   const cashRow = page.locator('#ba .ba-row', { hasText: /^Cash/ })
   const before = await cashRow.locator('.after').innerText()
-  const shares = page.getByLabel('Target shares', { exact: true }).first()
+  const shares = target(page, POS_BY_ID.btc.market)
   await shares.fill('0') // first adjustment: BTC → full exit
   await expect(cashRow.locator('.after')).not.toHaveText(before)
   await expect(page.getByText('Exit', { exact: true }).first()).toBeVisible()
 
-  const price = page.getByLabel('Assumed fill price ($)').first()
+  const price = page.getByLabel(`Assumed price for ${POS_BY_ID.btc.market}`)
   await price.fill('1.5')
   await expect(page.getByRole('alert').first()).toContainText('between $0.01 and $0.99')
   await expect(page.getByRole('button', { name: /Save scenario|Saved/ })).toBeDisabled()
@@ -68,16 +81,22 @@ test('2 · adjusting a scenario updates results; invalid input is caught', async
 
 test('2b · a purchase beyond available cash is explored as a funded hypothetical, with the gap shown', async ({ page }) => {
   await fresh(page, '/scenario-lab')
-  await page.getByRole('button', { name: 'Add position' }).click()
-  await page.getByRole('menuitem', { name: /2026 hottest year on record/ }).click()
-  const hot = POS_BY_ID.hot, target = hot.shares + 5000
-  expect((target - hot.shares) * hot.mark).toBeGreaterThan(account('ks').cash)
-  await page.locator('#sh-hot').fill(String(target))
-  await expect(page.getByText(/Needs \$[\d,.]+ more cash than you hold/)).toBeVisible()
+  await page.getByRole('button', { name: 'Start from current portfolio' }).click()
+  await page.keyboard.press('Enter') // accept the default name
+  await page.getByRole('button', { name: 'Add position…' }).first().click()
+  await page.getByRole('button', { name: 'Add 2026 hottest year on record YES' }).click()
+  const hot = POS_BY_ID.hot, to = hot.shares + 5000
+  expect((to - hot.shares) * hot.mark).toBeGreaterThan(account('ks').cash)
+  await target(page, hot.market).fill(String(to))
+  await expect(page.getByText(/Needs \$[\d,.]+ more cash than this scenario has/)).toBeVisible()
   await expect(page.getByText('Kalshi purchases in this scenario exceed available cash; included as if funded.').first()).toBeVisible()
   await expect(page.getByRole('alert')).toHaveCount(0) // not an input error
   await expect(page.locator('#ba .ba-row', { hasText: /^Positions at mark/ }).locator('.after')).toContainText('$') // trade is in the results
   await expect(page.getByRole('button', { name: 'Save scenario' })).toBeEnabled()
+  // explicitly funding Kalshi removes the gap without counting the capital as a gain
+  await page.getByLabel('Added capital on Kalshi').fill('10000')
+  await expect(page.getByText(/Needs \$[\d,.]+ more cash/)).toHaveCount(0)
+  await expect(page.locator('#ba .ba-row', { hasText: /^Added capital/ })).toContainText('$10,000')
 })
 
 test('2c · scenario create, rename, save and revert behave predictably', async ({ page }) => {
@@ -215,7 +234,7 @@ test('section rail: one active entry; an explicit choice survives reaching the b
 
 test('inspecting stays in place: Overview schedule, Risk payoffs and search open panels, not other modules', async ({ page }) => {
   await fresh(page, '/overview')
-  const scenarios = await page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v3'))
+  const scenarios = await page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v4'))
   const fed = exposures('all').find((e) => e.event.id === 'fed')!
   await page.getByRole('row', { name: `${POS_BY_ID.shut.market}: open details` }).focus()
   await page.keyboard.press('Enter') // keyboard opening must not also activate the panel's Close button
@@ -238,16 +257,18 @@ test('inspecting stays in place: Overview schedule, Risk payoffs and search open
   await page.keyboard.press('Enter')
   await expect(page.getByRole('dialog', { name: POS_BY_ID.shut.market })).toBeVisible()
   await expect(page).toHaveURL(/\/risk$/)
-  expect(await page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v3'))).toBe(scenarios)
+  expect(await page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v4'))).toBe(scenarios)
 })
 
 test('relationship edited in Scenario Lab is the same one Risk uses', async ({ page }) => {
   await fresh(page, '/scenario-lab')
-  await page.locator('#assume').getByRole('button', { name: 'Change' }).click()
+  await page.getByRole('button', { name: 'Start from current portfolio' }).click()
+  await page.keyboard.press('Enter') // accept the default name
+  await page.locator('#setup').getByRole('button', { name: 'Edit shared…' }).click()
   const dialog = page.getByRole('dialog', { name: 'Classify relationship' })
   await dialog.getByText('Mutually exclusive outcomes').click()
   await dialog.getByRole('button', { name: 'Save' }).click()
-  await expect(page.locator('#assume')).toContainText('Mutually exclusive')
+  await expect(page.locator('#setup')).toContainText('Shared: Mutually exclusive outcomes')
   await page.getByRole('link', { name: 'Risk' }).click()
   await expect(page.locator('#rel')).toContainText('Mutually exclusive outcomes')
   await expect(page.locator('#payoffs .foot')).toContainText('combinations excluded')
@@ -274,7 +295,7 @@ test('platform badges use the official marks and keep their names for assistive 
   expect(await badge.getAttribute('aria-label')).toMatch(/^(Polymarket|Kalshi)$/)
 })
 
-const scenariosIn = (page: Page) => page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v3'))
+const scenariosIn = (page: Page) => page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v4'))
 const settle = async (page: Page) => { await expect(page.locator('main h1')).toBeVisible(); await expect.poll(() => scenariosIn(page)).not.toBeNull() }
 
 test('hand-offs: the same deliberate request can be repeated; cancel, Back and reload never mutate', async ({ page }) => {
@@ -309,15 +330,16 @@ test('hand-offs: the same deliberate request can be repeated; cancel, Back and r
 
 test('hand-offs keep existing adjustments untouched', async ({ page }) => {
   await fresh(page, '/scenario-lab')
+  await startExample(page, 'Trim crypto, add to Fed')
   await settle(page)
-  const slider = page.getByRole('slider', { name: `Target shares of ${POS_BY_ID.fedk.market}` })
+  const slider = target(page, POS_BY_ID.fedk.market)
   await expect(slider).toHaveValue('6200')
   await page.goto('/overview')
   const row = page.getByRole('row', { name: `${POS_BY_ID.fedk.market}: open details` })
   await row.hover()
   await row.getByRole('button', { name: 'Simulate' }).click()
   const add = page.getByRole('dialog', { name: 'Add to a scenario' })
-  await add.getByLabel('Target scenario').selectOption({ label: 'Trim crypto, add to Fed · 3 changes' })
+  await add.getByLabel('Target scenario').selectOption({ label: 'Trim crypto, add to Fed · 3 positions' })
   await expect(add.getByText('Already in this scenario: left as it is')).toBeVisible()
   await expect(add.getByRole('button', { name: 'Nothing to add' })).toBeDisabled()
   await add.getByRole('button', { name: 'Cancel' }).click()
@@ -412,7 +434,7 @@ test('stored state: invalid data falls back safely; clearing removes only Scevia
   await page.reload()
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Current portfolio') // unknown active → current portfolio
   await page.getByRole('option', { name: /Restored/ }).click()
-  await expect(page.getByRole('slider')).toHaveCount(1) // dangling "ghost" reference dropped
+  await expect(rows(page)).toHaveCount(1) // dangling "ghost" reference dropped; older scenario migrated, not discarded
   await page.getByRole('button', { name: 'Help' }).click()
   await page.getByRole('menuitem', { name: 'Data & privacy' }).click()
   const dlg = page.getByRole('dialog', { name: 'Data & privacy' })
@@ -426,11 +448,149 @@ test('stored state: invalid data falls back safely; clearing removes only Scevia
 
 test('duplicate then reset returns to the duplicated adjustments, not an empty scenario', async ({ page }) => {
   await fresh(page, '/scenario-lab')
+  await startExample(page, 'Trim crypto, add to Fed')
   await page.getByRole('button', { name: 'Duplicate' }).click()
   await expect(page.getByRole('heading', { level: 1 })).toContainText('(copy)')
-  const first = page.getByLabel('Target shares', { exact: true }).first()
-  await first.fill('0')
+  await target(page, POS_BY_ID.btc.market).fill('0')
   await page.getByRole('button', { name: 'Reset' }).click()
-  await expect(page.getByRole('slider')).toHaveCount(3)
-  await expect(page.getByRole('slider').first()).toHaveValue('4000')
+  await expect(rows(page)).toHaveCount(3)
+  await expect(target(page, POS_BY_ID.btc.market)).toHaveValue('4000')
 })
+
+test('Scenario Lab starts neutral: no pre-filled scenarios, setup before results', async ({ page }) => {
+  await fresh(page, '/scenario-lab')
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Current portfolio')
+  await expect(page.getByRole('listbox', { name: 'Scenarios' }).getByRole('option')).toHaveCount(1)
+  await expect(page.locator('#cmp')).toContainText('No scenarios yet')
+  const order = await page.evaluate(() => ['setup', 'builder', 'impact', 'settlement', 'cmp'].map((id) => document.getElementById(id)!.getBoundingClientRect().top))
+  expect(order).toEqual([...order].sort((a, b) => a - b))
+  const rail = page.getByRole('complementary', { name: 'Sections on this page' })
+  await expect(rail.getByRole('link').first()).toHaveText('Setup & assumptions')
+})
+
+test('scratch portfolio: added capital, a searched new market, results, removal; actual portfolio untouched', async ({ page }) => {
+  await fresh(page, '/scenario-lab')
+  await page.getByRole('button', { name: 'Start from scratch' }).click()
+  await page.keyboard.press('Enter') // keep the default name
+  await page.getByLabel('Added capital on Polymarket').fill('5000')
+  await page.getByRole('button', { name: 'Add position…' }).first().click()
+  await page.getByRole('tab', { name: 'Search markets' }).click()
+  await page.getByLabel('Search markets').fill('Ethereum')
+  const dlg = page.getByRole('dialog', { name: 'Add a position' })
+  await expect(dlg).toContainText('Sample market data')
+  await dlg.getByRole('button', { name: /Add Ethereum above \$5,000 on Dec 31 YES/ }).click()
+  await expect(rows(page)).toHaveCount(1)
+  await expect(page.locator('.brow', { hasText: 'Ethereum' })).toContainText('Enter a target quantity') // nothing filled in silently
+  await target(page, 'Ethereum above $5,000 on Dec 31').fill('10000')
+  await page.getByRole('button', { name: /Use reference 0.18/ }).click()
+  const ba = (label: RegExp) => page.locator('#ba .ba-row', { hasText: label })
+  await expect(ba(/^Cash/).locator('.after')).toHaveText('$3,200')
+  await expect(ba(/^Value at mark/).locator('.after')).toHaveText('$5,000') // capital isn't profit; buying at the reference moves cash into contracts
+  await expect(ba(/^Added capital/)).toContainText('$5,000')
+  await expect(page.locator('#alloc')).toContainText('Crypto')
+  await expect(page.locator('#alloc')).toContainText('New')
+  await page.getByRole('button', { name: 'Save scenario' }).click()
+  await expect(page.locator('#cmp')).toContainText('Empty portfolio')
+  await expect(page.locator('#cmp')).toContainText('$5,000')
+  await page.getByRole('button', { name: /Remove Ethereum above/ }).click()
+  await expect(rows(page)).toHaveCount(0)
+  await page.goto('/overview')
+  const a = account('all'), [i] = a.totalValue.toFixed(2).split('.')
+  await expect(page.locator('.hero-fig')).toContainText(`$${Number(i).toLocaleString('en-US')}`)
+})
+
+test('paste link: only supported links resolve, against sample data, and the user picks the market', async ({ page }) => {
+  await fresh(page, '/scenario-lab')
+  await page.getByRole('button', { name: 'Start from current portfolio' }).click()
+  await page.keyboard.press('Enter') // accept the default name
+  await page.getByRole('button', { name: 'Add position…' }).first().click()
+  const dlg = page.getByRole('dialog', { name: 'Add a position' })
+  await dlg.getByRole('tab', { name: 'Paste link' }).click()
+  const box = dlg.getByLabel('Market link'), find = dlg.getByRole('button', { name: 'Find market' })
+  await expect(find).toBeDisabled()
+  for (const [url, text] of [
+    ['not a link', 'doesn’t look like a link'],
+    ['https://example.com/event/x', 'aren’t supported'],
+    ['https://polymarket.com/event/some-real-market', 'Live link lookup isn’t connected'],
+    ['https://kalshi.com/markets/kxdelisted-26', 'market data is unavailable'],
+  ] as const) {
+    await box.fill(url); await find.click()
+    await expect(dlg).toContainText(text)
+    await expect(dlg.locator('.outcome-btn')).toHaveCount(0)
+  }
+  await box.fill('https://kalshi.com/markets/kxfeddecision-27jan'); await find.click()
+  await expect(dlg).toContainText('This link covers 2 markets')
+  await dlg.getByRole('button', { name: /Add Fed holds rates at Jan 2027 FOMC NO/ }).click()
+  await expect(page.locator('.brow', { hasText: 'Fed holds rates at Jan 2027 FOMC' })).toContainText('New')
+})
+
+test('existing holdings, duplicates and opposing positions in the builder', async ({ page }) => {
+  await fresh(page, '/scenario-lab')
+  await page.getByRole('button', { name: 'Start from current portfolio' }).click()
+  await page.keyboard.press('Enter') // accept the default name
+  await page.getByRole('button', { name: 'Add position…' }).first().click()
+  await page.getByRole('button', { name: `Add ${POS_BY_ID.btc.market} YES` }).click()
+  await expect(target(page, POS_BY_ID.btc.market)).toHaveValue(String(POS_BY_ID.btc.shares)) // starts at the current holding: no trade
+  await expect(page.locator('.brow', { hasText: POS_BY_ID.btc.market }).getByText('No change')).toBeVisible()
+  await page.getByRole('button', { name: 'Add position…' }).first().click()
+  await page.getByRole('tab', { name: 'Search markets' }).click()
+  await page.getByLabel('Search markets').fill('Bitcoin')
+  const dlg = page.getByRole('dialog', { name: 'Add a position' })
+  await expect(dlg.getByRole('button', { name: /Add Bitcoin above \$150k on Dec 31 YES/ })).toBeDisabled() // already in scenario
+  await dlg.getByRole('button', { name: /Add Bitcoin above \$150k on Dec 31 NO/ }).click()
+  await expect(rows(page)).toHaveCount(2)
+  await page.getByLabel('Target shares of Bitcoin above $150k on Dec 31').last().fill(String(POS_BY_ID.btc.shares))
+  await page.getByLabel('Assumed price for Bitcoin above $150k on Dec 31').last().fill('0.72')
+  await expect(page.locator('#payoff')).toContainText('if YES') // both sides held: labelled by outcome, not for/against
+})
+
+test('scenario relationship override stays in that scenario; Risk and other scenarios keep the shared setting', async ({ page }) => {
+  await fresh(page, '/scenario-lab')
+  await page.getByRole('button', { name: 'Start from current portfolio' }).click()
+  await page.keyboard.press('Enter')
+  await page.getByLabel('BTC × ETH relationship for this scenario').selectOption('mutex')
+  await page.getByRole('button', { name: 'New scenario' }).click()
+  await page.getByRole('menuitem', { name: /Current portfolio/ }).click()
+  await page.keyboard.press('Enter')
+  await expect(page.getByLabel('BTC × ETH relationship for this scenario')).toHaveValue('inherit')
+  await expect(page.locator('#cmp')).toContainText('Mutually exclusive*')
+  await page.goto('/risk')
+  await expect(page.locator('#rel')).toContainText('Unknown')
+  await expect(page.locator('#payoffs .foot')).not.toContainText('combinations excluded')
+})
+
+test('unavailable values stay unavailable: beyond the event limit and without a reference price', async ({ page }) => {
+  await page.goto('/scenario-lab')
+  await page.evaluate(() => sessionStorage.clear())
+  const markets = ['pm-eth-5k', 'ks-fedjan-cut', 'ks-fedjan-hold', 'pm-gdp-q4', 'ks-nyc-jan-warm', 'pm-lakers-2027', 'pm-sol-500', 'ks-unemp-45']
+  await page.evaluate((ids) => {
+    const inst = (m: string, refPrice: number | null) => ({ provider: m.startsWith('pm') ? 'pm' : 'ks', eventId: m, eventTitle: m, marketId: m, marketTitle: m, outcome: 'YES', category: 'Economics', resolves: '2027-01-31', refPrice, refAsOf: refPrice == null ? null : '2026-11-24', source: 'sample' })
+    const adjs = ids.map((m) => ({ id: `x:${m}:YES`, to: 10, price: 0.3, instrument: inst(m, 0.3) }))
+    adjs.push({ id: 'x:ks-wti-90:YES', to: 10, price: 0.4, instrument: inst('ks-wti-90', null) })
+    sessionStorage.setItem('scevia-scenarios-v4', JSON.stringify([{ key: 'big', name: 'Many events', baseline: 'portfolio', funding: {}, assumptions: {}, adjs, saved: null, savedAt: null, color: '' }]))
+    sessionStorage.setItem('scevia-active-v4', JSON.stringify('big'))
+  }, markets)
+  await page.reload()
+  const ba = (label: RegExp) => page.locator('#ba .ba-row', { hasText: label })
+  await expect(ba(/^Value if worst feasible outcome/).locator('.after')).toHaveText('Unavailable')
+  await expect(ba(/^Value if worst feasible outcome/)).toContainText('n/a')
+  await expect(ba(/^Positions at mark/).locator('.after')).toHaveText('Unavailable')
+  await expect(page.locator('#cmp')).toContainText('change unavailable')
+  await expect(page.locator('#cmp')).not.toContainText('NaN')
+  await expect(page.locator('#alloc')).toContainText('Allocation is unavailable')
+})
+
+for (const vp of [{ width: 1920, height: 1080 }, { width: 2560, height: 1440 }]) {
+  test(`wide desktop ${vp.width}px: the workspace uses the width and keeps text readable`, async ({ page }) => {
+    await page.setViewportSize(vp)
+    for (const path of ['/overview', '/scenario-lab']) {
+      await page.goto(path)
+      await expect(page.locator('main h1')).toBeVisible()
+      const r = await page.evaluate(() => ({ main: document.querySelector('main')!.getBoundingClientRect().width, vw: innerWidth, overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth }))
+      expect(r.overflow).toBeLessThanOrEqual(1)
+      expect(r.main / r.vw).toBeGreaterThan(0.78)
+    }
+    await page.goto('/overview')
+    expect(await page.locator('.summary').first().evaluate((el) => el.getBoundingClientRect().width)).toBeLessThanOrEqual(761)
+  })
+}

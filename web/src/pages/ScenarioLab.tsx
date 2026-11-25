@@ -1,88 +1,79 @@
+/* Scenario Lab: construct and compare hypothetical prediction-market portfolios.
+   Workflow (not a wizard): choose a scenario → set it up (starting portfolio, added capital, assumptions) → build its
+   portfolio (held positions, searched markets, pasted links) → review impact and settlement → compare scenarios.
+   Everything is hypothetical: actual holdings, cash and history are never changed. */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Icon } from '../components/Icon'
 import { Menu, Modal, useToast } from '../components/overlays'
-import { useWidth } from '../components/charts'
 import { RelationshipModal } from '../components/relationships'
-import { SectionRail, useHashScroll, type RailSection } from '../components/shell'
-import { Button, Callout, Card, CardHeader, Chip, PlatformBadge, SideChip, Tabs, cx } from '../components/ui'
-import { EVENTS, FEE_RATE } from '../data/portfolio'
+import { SectionRail, scrollToSection, useHashScroll, type RailSection } from '../components/shell'
+import { Button, Callout, Card, CardHeader, PlatformBadge, Seg, SideChip, cx } from '../components/ui'
+import { FEE_RATE, TODAY } from '../data/portfolio'
 import { PLATFORM_NAME } from '../data/labels'
-import type { RiskEvent } from '../data/types'
 import { REL_TEXT, useRelations } from '../data/relations'
-import {
-  MAX_PRICE, MIN_PRICE, POSITIONS, POS_BY_ID, exposures, fmtDate, groupPnl, isFeasible, pairRelation, scenarioMetrics, simulate, validatePrice,
-  type Adjustment, type Outcome, type ScenarioMetrics, type Simulation,
-} from '../lib/finance'
-import { fmt, int, kfmt, sfmt } from '../lib/format'
+import type { Platform, RelClass } from '../data/types'
+import { MAX_FUNDING, MAX_JOINT_EVENTS, POSITIONS, POS_BY_ID, account, fmtDate, instrumentOfPosition, validFunding, type Adjustment, type Baseline } from '../lib/finance'
+import { fmt, int, sfmt } from '../lib/format'
 import { claimHandoff, readHandoff } from '../lib/handoff'
 import * as SC from '../lib/scenarios'
+import { readStored } from '../lib/storage'
 import { useSessionState, useStorageHealthy } from '../lib/useSessionState'
 import type { Scenario } from '../lib/scenarios'
-
+import { AddPositionModal } from './lab/AddPosition'
+import { PositionRow } from './lab/Builder'
+import { AllocationImpact, Dumbbell, OutcomeMatrix } from './lab/Impact'
+import { COLORS, EXAMPLES, ROWS, diff, evaluate, evaluateActual, eventsHeld, rowValue, type Evaluation, type Row } from './lab/model'
 
 const RAIL: RailSection[] = [
-  { id: 'workspace', label: 'Adjust & impact', icon: 'sliders', children: [{ id: 'adjust', label: 'Adjustments' }, { id: 'ba', label: 'Before / after' }, { id: 'matrix', label: 'Outcome matrix' }] },
-  { id: 'payoff', label: 'Payoff by event', icon: 'bars' },
-  { id: 'cmp', label: 'Compare scenarios', icon: 'table' },
-  { id: 'assume', label: 'Assumptions', icon: 'info' },
+  { id: 'setup', label: 'Setup & assumptions', icon: 'sliders' },
+  { id: 'builder', label: 'Portfolio', icon: 'layers' },
+  { id: 'impact', label: 'Impact', icon: 'compare', children: [{ id: 'ba', label: 'Before / after' }, { id: 'alloc', label: 'Allocation' }] },
+  { id: 'settlement', label: 'Settlement', icon: 'grid', children: [{ id: 'matrix', label: 'Outcome matrix' }, { id: 'payoff', label: 'Payoff by event' }] },
+  { id: 'cmp', label: 'Compare', icon: 'table' },
 ]
-const COLORS = ['var(--color-accent-solid)', 'var(--color-data-1)', 'var(--color-data-3)', 'var(--color-data-4)', 'var(--color-data-5)', 'var(--color-data-6)']
-const TEMPLATE: Record<string, Adjustment[]> = {
-  draft: [{ id: 'btc', to: 4000, price: 0.29 }, { id: 'fedk', to: 6200, price: 0.65 }, { id: 'chf', to: 0, price: 0.12 }],
-  sports: [{ id: 'cel', to: 0, price: 0.26 }, { id: 'chf', to: 0, price: 0.12 }],
-  shut: [{ id: 'shut', to: 3500, price: 0.47 }],
-}
-const INITIAL: Scenario[] = [
-  { key: 'draft', name: 'Trim crypto, add to Fed', adjs: TEMPLATE.draft, saved: null, savedAt: null, color: COLORS[0], start: TEMPLATE.draft },
-  { key: 'sports', name: 'Exit sports longshots', adjs: TEMPLATE.sports, saved: { name: 'Exit sports longshots', adjs: TEMPLATE.sports }, savedAt: '2026-11-21', color: COLORS[1], start: TEMPLATE.sports },
-  { key: 'shut', name: 'Hedge the shutdown', adjs: TEMPLATE.shut, saved: { name: 'Hedge the shutdown', adjs: TEMPLATE.shut }, savedAt: '2026-11-18', color: COLORS[2], start: TEMPLATE.shut },
-]
+const KEY = 'scevia-scenarios-v4', LEGACY_KEY = 'scevia-scenarios-v3'
+const known = (id: string) => !!POS_BY_ID[id]
 const NO_ADJ: Adjustment[] = []
-const maxFor = (sh: number) => Math.max(1000, Math.ceil((sh * 1.5) / 1000) * 1000)
-
-
-type Row = { label: string; key: keyof ScenarioMetrics; tone: 'up' | 'down' | 'neutral'; info: string }
-const ROWS: Row[] = [
-  { label: 'Cash', key: 'cash', tone: 'neutral', info: 'Buying spends cash; selling returns it. A transfer, not a gain. Negative means the scenario needs more cash than you hold.' },
-  { label: 'Positions at mark', key: 'positionsValue', tone: 'neutral', info: 'Shares × mark (the last traded price).' },
-  { label: 'Value at mark', key: 'totalValue', tone: 'up', info: 'Cash + positions at mark. A trade at your assumed fill price changes this only by the gap between that price and the mark, plus fees.' },
-  { label: 'Capital committed', key: 'committed', tone: 'neutral', info: 'Cost basis of open positions after the scenario.' },
-  { label: 'Locked-in from sales', key: 'realized', tone: 'up', info: 'Realized P&L of hypothetical sales after their fees. Purchases never create realized P&L.' },
-  { label: 'Est. fees on these trades', key: 'fees', tone: 'down', info: 'Estimated at each platform’s fee rate when “Trading fees” is on. Fees already paid on existing positions aren’t included.' },
-  { label: 'Value if worst feasible outcome', key: 'worstValue', tone: 'up', info: 'Cash + $1 per winning share in the worst joint outcome that’s possible given confirmed relationships. Any extra funding the scenario needs is subtracted (cash can be negative).' },
-  { label: 'Value if best feasible outcome', key: 'bestValue', tone: 'up', info: 'Cash + $1 per winning share in the best possible joint outcome, net of any extra funding needed.' },
-  { label: 'Largest single-event loss', key: 'largestEventLoss', tone: 'down', info: 'Largest settlement loss of a single event. Holdings on opposite sides of the same event offset each other.' },
-]
 
 export default function ScenarioLab() {
   useHashScroll()
   const toast = useToast()
   const [params, setParams] = useSearchParams()
-  const { crypto, rels } = useRelations()
-  const [scenarios, setScenarios] = useSessionState<Scenario[]>('scevia-scenarios-v3', INITIAL, (raw) => {
-    const r = SC.sanitize(raw, (id) => !!POS_BY_ID[id])
-    return r ? r.scenarios.map((x) => ({ ...x, color: x.color || COLORS[0], start: x.start ?? TEMPLATE[x.key] ?? [] })) : null
+  const { crypto: sharedCrypto } = useRelations()
+  // A new workspace is empty. Scenarios saved in an earlier format are migrated, never discarded.
+  const [legacy] = useState(() => readStored<Scenario[] | null>(LEGACY_KEY, null, (raw) => SC.sanitize(raw, known)?.scenarios ?? null))
+  const [scenarios, setScenarios] = useSessionState<Scenario[]>(KEY, legacy ?? [], (raw) => {
+    const r = SC.sanitize(raw, known)
+    return r ? r.scenarios.map((x, i) => ({ ...x, color: x.color || COLORS[i % COLORS.length] })) : null
   })
-  const [storedActive, setActiveKey] = useSessionState<string>('scevia-active-v3', 'draft', (v) => (typeof v === 'string' ? v : null))
-  // A stored selection that no longer exists falls back to the current portfolio instead of a blank page.
+  const [storedActive, setActiveKey] = useSessionState<string>('scevia-active-v4', 'base', (v) => (typeof v === 'string' ? v : null))
   const activeKey = storedActive === 'base' || scenarios.some((x) => x.key === storedActive) ? storedActive : 'base'
   const storageOk = useStorageHealthy()
-  const [includeFees, setIncludeFees] = useSessionState('scevia-fees', true)
   const [renaming, setRenaming] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
-  const [view, setView] = useState<'Portfolio impact' | 'Position impact'>('Portfolio impact')
-  const [mxA, setMxA] = useState('fed')
-  const [mxB, setMxB] = useState('btc')
+  const [editShared, setEditShared] = useState(false)
+  const [adding, setAdding] = useState(false)
 
   const isBase = activeKey === 'base'
   const active = scenarios.find((s) => s.key === activeKey)
   const adjs = active?.adjs ?? NO_ADJ
 
-  // Hand-offs from other modules (see lib/handoff.ts): ask before changing anything. Each request id is handled once,
-  // so StrictMode, reload and Back/Forward never repeat it, while a new deliberate request (new id) always opens the dialog.
+  // Every scenario is evaluated once per change of scenarios or the shared relationship (memoized for the comparison).
+  const actual = useMemo(() => evaluateActual(sharedCrypto), [sharedCrypto])
+  const evals = useMemo(() => Object.fromEntries(scenarios.map((s) => [s.key, evaluate(s, sharedCrypto)])) as Record<string, Evaluation>, [scenarios, sharedCrypto])
+  const E = isBase || !active ? actual : evals[active.key]
+  const { start, sim: S, A, B } = E
+  const errors = S.errors, errorCount = Object.keys(errors).length
+  const fundingErr = active && (['pm', 'ks'] as Platform[]).some((p) => active.funding[p] != null && !validFunding(active.funding[p]))
+
+  const update = (fn: (s: Scenario) => Scenario) => { if (active) setScenarios((ss) => ss.map((s) => (s.key === active.key ? fn(s) : s))) }
+  const setAdjs = (fn: (a: Adjustment[]) => Adjustment[]) => update((s) => ({ ...s, adjs: fn(s.adjs) }))
+  const nextKey = () => `s${Date.now().toString(36)}`
+  const nextColor = () => COLORS[scenarios.length % COLORS.length]
+
+  // Hand-offs from other modules (lib/handoff.ts): confirm first; each request id is processed once.
   const [pending, setPending] = useState<{ ids: string[]; from: string | null } | null>(null)
-  const [editRel, setEditRel] = useState(false)
   const handled = useRef<string | null>(null)
   useEffect(() => {
     const h = readHandoff(params)
@@ -97,83 +88,45 @@ export default function ScenarioLab() {
     setPending({ ids, from: h.from ?? (h.events.length ? 'Event link · all platforms' : null) })
   }, [params, setParams, toast])
   const confirmAdd = (target: string, ids: string[]) => {
-    const adds = ids.map((id) => ({ id, to: POS_BY_ID[id].shares, price: POS_BY_ID[id].mark }))
+    const adds = ids.map((id) => ({ id, to: POS_BY_ID[id].shares, price: POS_BY_ID[id].mark, instrument: instrumentOfPosition(POS_BY_ID[id]) }))
     let key = target, name = scenarios.find((x) => x.key === target)?.name ?? 'New scenario'
     if (target === 'new') {
-      key = `s${Date.now()}`; name = 'New scenario'
-      setScenarios((ss) => [...ss, SC.addPositions(SC.create(key, COLORS[ss.length % COLORS.length]), adds).scenario])
-    } else {
-      setScenarios((ss) => ss.map((x) => (x.key === target ? SC.addPositions(x, adds).scenario : x)))
-    }
+      key = nextKey(); name = 'New scenario'
+      setScenarios((ss) => [...ss, SC.addPositions(SC.create(key, COLORS[ss.length % COLORS.length], name), adds).scenario])
+    } else setScenarios((ss) => ss.map((x) => (x.key === target ? SC.addPositions(x, adds).scenario : x)))
     setActiveKey(key); setPending(null)
-    const ev = POS_BY_ID[ids[0]].eventId
-    if (ev !== mxA) setMxB(ev)
     toast(`Added ${ids.length > 1 ? `${ids.length} positions` : `“${POS_BY_ID[ids[0]].market}”`} to “${name}” at current size and mark: no change until you edit ${ids.length > 1 ? 'them' : 'it'}`, 'info')
-    window.setTimeout(() => document.getElementById('adjust')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50)
+    window.setTimeout(() => scrollToSection('builder'), 50)
   }
 
-  const update = (fn: (a: Adjustment[]) => Adjustment[]) => {
-    if (!active) return
-    setScenarios((ss) => ss.map((s) => (s.key === active.key ? { ...s, adjs: fn(s.adjs) } : s)))
-  }
-  const sims = useMemo(() => Object.fromEntries(scenarios.map((s) => [s.key, simulate(s.adjs, { includeFees })])) as Record<string, Simulation>, [scenarios, includeFees])
-  const base = useMemo(() => simulate([], { includeFees }), [includeFees])
-  const S = isBase ? base : sims[activeKey] ?? base
-  const B = useMemo(() => scenarioMetrics(base, rels), [base, rels])
-  const A = useMemo(() => scenarioMetrics(S, rels), [S, rels])
-  const metricsOf = (key: string) => (key === activeKey ? A : scenarioMetrics(sims[key], rels))
-  const errors = S.errors
-  const errorCount = Object.keys(errors).length
-
-  const heldEvents = exposures('all').map((e) => e.event)
-  const evA = EVENTS.find((e) => e.id === mxA)!, evB = EVENTS.find((e) => e.id === mxB)!
-  const rel = pairRelation(mxA, mxB, rels)
-  const sideOf = heldSide
-  const cells = (['YES', 'NO'] as Outcome[]).flatMap((oa) => (['YES', 'NO'] as Outcome[]).map((ob) => {
-    const o = { [mxA]: oa, [mxB]: ob }
-    return { oa, ob, before: groupPnl(base, [mxA, mxB], o), after: groupPnl(S, [mxA, mxB], o), impossible: !isFeasible(o, rels) }
-  }))
-  const feasible = cells.filter((c) => !c.impossible)
-  const best = [...feasible].sort((x, y) => (y.after - y.before) - (x.after - x.before))[0]
-  const worst = [...feasible].sort((x, y) => (x.after - x.before) - (y.after - y.before))[0]
-  const touched = EVENTS.filter((e) => adjs.some((a) => POS_BY_ID[a.id]?.eventId === e.id))
-
-  const save = () => {
-    if (!active || errorCount) return
-    setScenarios((ss) => ss.map((s) => (s.key === active.key ? SC.save(s, 'this session') : s)))
-    toast(`Saved “${active.name}”`)
-  }
-  const nextColor = () => COLORS[scenarios.length % COLORS.length]
-  const duplicate = () => {
-    if (!active) return
-    const key = `s${Date.now()}`
-    setScenarios((ss) => [...ss, SC.duplicate(active, key, nextColor())])
-    setActiveKey(key); toast('Scenario duplicated (not saved yet)')
-  }
-  const create = () => {
-    const key = `s${Date.now()}`
-    setScenarios((ss) => [...ss, SC.create(key, nextColor())])
+  const create = (baseline: Baseline) => {
+    const key = nextKey()
+    setScenarios((ss) => [...ss, SC.create(key, nextColor(), baseline === 'scratch' ? 'From scratch' : 'Untitled scenario', baseline)])
     setActiveKey(key); setRenaming(true)
   }
-  const revert = () => {
-    if (!active) return
-    setScenarios((ss) => ss.map((s) => (s.key === active.key ? SC.revert(s) : s)))
-    toast(active.saved ? 'Reverted to the saved version' : 'Reset to the starting adjustments', 'info')
+  const startExample = (i: number) => {
+    const key = nextKey(), ex = EXAMPLES[i]
+    setScenarios((ss) => [...ss, SC.fromExample(key, nextColor(), { name: ex.name, adjs: ex.adjs(), baseline: 'portfolio' })])
+    setActiveKey(key); toast(`Started from the example “${ex.name}” (not saved yet)`, 'info')
   }
-  const remove = () => {
-    if (!active) return
-    setScenarios((ss) => ss.filter((s) => s.key !== active.key)); setActiveKey('base'); setConfirmDelete(false)
-    toast(`Deleted “${active.name}”`, 'info')
-  }
+  const save = () => { if (!active || errorCount || fundingErr) return; update((s) => SC.save(s, 'this session')); toast(`Saved “${active.name}”`) }
+  const duplicate = () => { if (!active) return; const key = nextKey(); setScenarios((ss) => [...ss, SC.duplicate(active, key, nextColor())]); setActiveKey(key); toast('Scenario duplicated (not saved yet)') }
+  const revert = () => { if (!active) return; update(SC.revert); toast(active.saved ? 'Reverted to the saved version' : 'Reset to where this scenario started', 'info') }
+  const remove = () => { if (!active) return; setScenarios((ss) => ss.filter((s) => s.key !== active.key)); setActiveKey('base'); setConfirmDelete(false); toast(`Deleted “${active.name}”`, 'info') }
 
-  const change = (r: Row, a: number | null, b: number | null) => {
-    if (a == null || b == null) return <span className="delta flat">—</span>
-    const d = a - b
-    if (Math.abs(d) < 0.5) return <span className="delta flat">—</span>
-    const good = r.tone === 'neutral' ? null : r.tone === 'up' ? d > 0 : d < 0
-    return <span className={cx('delta', good == null ? 'flat' : good ? 'good' : 'bad')}>{sfmt(d)}</span>
-  }
-  const value = (r: Row, m: ScenarioMetrics) => (m[r.key] == null ? 'Unavailable' : r.key === 'largestEventLoss' ? sfmt(-m.largestEventLoss) : r.key === 'realized' || r.key === 'fees' ? (Math.abs(m[r.key] as number) < 0.005 ? '$0' : r.key === 'fees' ? fmt(m.fees, 2) : sfmt(m.realized, 2)) : fmt(m[r.key] as number))
+  const newMenu = (
+    <Menu label="New scenario" width={300} trigger={(t) => <button type="button" className="btn btn-sm" {...t}><Icon name="plus" size={15} />New scenario</button>}>
+      {(close) => (<>
+        <div className="menu-h">Start from</div>
+        <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); create('portfolio') }}><Icon name="layers" />Current portfolio<small className="t3" style={{ marginLeft: 'auto' }}>no changes</small></button>
+        <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); create('scratch') }}><Icon name="plus" />Empty portfolio<small className="t3" style={{ marginLeft: 'auto' }}>from scratch</small></button>
+        <div className="menu-h">Examples</div>
+        {EXAMPLES.map((ex, i) => <button type="button" role="menuitem" key={ex.name} className="menu-i" onClick={() => { close(); startExample(i) }}><Icon name="flask" />{ex.name}</button>)}
+      </>)}
+    </Menu>
+  )
+
+  const touchedEvents = useMemo(() => [...new Set(adjs.map((a) => S.holdings[a.id]?.eventId).filter((x): x is string => !!x))], [adjs, S])
 
   return (
     <div className="shell">
@@ -181,298 +134,264 @@ export default function ScenarioLab() {
         <div className="rail-keep">
           <h6 className="caps" style={{ paddingLeft: 'var(--space-3)', marginBottom: 'var(--space-2)' }}>Scenarios</h6>
           <div className="scn" role="listbox" aria-label="Scenarios">
-            <a href="#adjust" role="option" aria-selected={isBase} className={cx(isBase && 'on')} onClick={(e) => { e.preventDefault(); setActiveKey('base'); setRenaming(false) }}><i style={{ background: 'var(--color-text-tertiary)' }} />Current portfolio<small>base</small></a>
+            <a href="#setup" role="option" aria-selected={isBase} className={cx(isBase && 'on')} onClick={(e) => { e.preventDefault(); setActiveKey('base'); setRenaming(false) }}><i style={{ background: 'var(--color-text-tertiary)' }} />Current portfolio<small>actual</small></a>
             {scenarios.map((s) => (
-              <a key={s.key} href="#adjust" role="option" aria-selected={activeKey === s.key} className={cx(activeKey === s.key && 'on')} onClick={(e) => { e.preventDefault(); setActiveKey(s.key); setRenaming(false) }}>
-                <i style={{ background: s.color }} />{s.name}<small>{SC.status(s) === 'saved' ? (s.savedAt === 'this session' ? 'saved' : `saved ${fmtDate(s.savedAt!)}`) : SC.status(s) === 'new' ? 'not saved' : 'edited'}</small>
+              <a key={s.key} href="#setup" role="option" aria-selected={activeKey === s.key} className={cx(activeKey === s.key && 'on')} onClick={(e) => { e.preventDefault(); setActiveKey(s.key); setRenaming(false) }}>
+                <i style={{ background: s.color }} /><span className="scn-n">{s.name}</span><small>{SC.status(s) === 'saved' ? (s.savedAt === 'this session' ? 'saved' : `saved ${fmtDate(s.savedAt!)}`) : SC.status(s) === 'new' ? 'not saved' : 'edited'}</small>
               </a>
             ))}
-            <a href="#adjust" className="t3" onClick={(e) => { e.preventDefault(); create() }}>+ New scenario</a>
+            <a href="#setup" className="t3" onClick={(e) => { e.preventDefault(); create('portfolio') }}>+ New scenario</a>
           </div>
         </div>
       </SectionRail>
 
-      <main>
+      <main className="lab-main">
         <section className="page-head anchor" id="summary">
-          <div>
-            <div className="caps"><span className="accent">Scenario Lab</span> · {isBase ? 'Your current portfolio, unchanged' : active ? SC.statusLabel(active) : ''}</div>
+          <div style={{ minWidth: 0 }}>
+            <div className="caps"><span className="accent">Scenario Lab</span> · {isBase ? 'Your actual portfolio, unchanged' : active ? `${SC.statusLabel(active)} · ${active.baseline === 'scratch' ? 'starts from an empty portfolio' : 'starts from your current portfolio'}` : ''}</div>
             {isBase ? <h1>Current portfolio</h1> : renaming
-              ? <input className="inline-edit" aria-label="Scenario name" autoFocus defaultValue={active?.name} onBlur={(e) => { const v = e.target.value; setScenarios((ss) => ss.map((s) => (s.key === activeKey ? SC.rename(s, v) : s))); setRenaming(false) }} onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') setRenaming(false) }} />
-              : <h1>{active?.name}<button type="button" className="edit-btn" aria-label="Rename scenario" onClick={() => setRenaming(true)}><Icon name="edit" size={16} /></button></h1>}
+              ? <input className="inline-edit" aria-label="Scenario name" autoFocus defaultValue={active?.name} onBlur={(e) => { const v = e.target.value; update((s) => SC.rename(s, v)); setRenaming(false) }} onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') setRenaming(false) }} />
+              : <h1 className="scn-title">{active?.name}<button type="button" className="edit-btn" aria-label="Rename scenario" onClick={() => setRenaming(true)}><Icon name="edit" size={16} /></button></h1>}
           </div>
           <div className="actions">
+            {newMenu}
             {!isBase && <Button variant="ghost" icon="trash" onClick={() => setConfirmDelete(true)}>Delete</Button>}
-            <Button variant="ghost" icon="reset" onClick={revert} disabled={isBase || !active || !SC.canRevert(active)}>{active?.saved ? 'Revert' : 'Reset'}</Button>
-            <Button icon="copy" onClick={duplicate} disabled={isBase}>Duplicate</Button>
-            <Button variant="primary" icon="save" onClick={save} disabled={isBase || !active || !SC.isDirty(active) || errorCount > 0} title={errorCount ? 'Fix the highlighted inputs first' : undefined}>{!isBase && active && !SC.isDirty(active) ? 'Saved' : 'Save scenario'}</Button>
+            {!isBase && <Button variant="ghost" icon="reset" onClick={revert} disabled={!active || !SC.canRevert(active)}>{active?.saved ? 'Revert' : 'Reset'}</Button>}
+            {!isBase && <Button icon="copy" onClick={duplicate}>Duplicate</Button>}
+            {!isBase && <Button variant="primary" icon="save" onClick={save} disabled={!active || !SC.isDirty(active) || errorCount > 0 || !!fundingErr} title={errorCount || fundingErr ? 'Fix the highlighted inputs first' : undefined}>{active && !SC.isDirty(active) ? 'Saved' : 'Save scenario'}</Button>}
           </div>
         </section>
-        <Callout icon="shield"><b>Hypothetical only.</b> No orders are placed. Prices are what <i>you</i> assume you could trade at, not guaranteed fills. Outcomes are shown without probabilities.</Callout>
-        {!storageOk && <Callout tone="warn" icon="alert">This browser isn’t letting Scevia keep data in this tab, so scenarios and settings will be lost when you reload or leave the page.</Callout>}
-        {errorCount > 0 && <Callout tone="warn"><b>{errorCount} adjustment{errorCount > 1 ? 's have' : ' has'} invalid input</b> and {errorCount > 1 ? 'are' : 'is'} left out of the results below. Fix the highlighted fields to include {errorCount > 1 ? 'them' : 'it'}.</Callout>}
-        {A.shortfall > 0 && <Callout tone="warn" icon="alert"><b>Needs {fmt(A.shortfall, 2)} more cash than you hold</b> ({(['pm', 'ks'] as const).filter((p) => S.shortfall[p] > 0).map((p) => `${p === 'pm' ? 'Polymarket' : 'Kalshi'} ${fmt(S.shortfall[p], 2)}`).join(', ')}). Results show the purchases as if funded; the extra funding is subtracted from cash, so values stay comparable. With current balances this allocation isn’t reachable without a deposit or selling something else.</Callout>}
+        <Callout icon="shield"><b>Hypothetical only.</b> No orders are placed and your actual holdings don’t change. Prices are what <i>you</i> assume you could trade at, not quotes. Outcomes are shown without probabilities.</Callout>
+        {!storageOk && <Callout tone="warn" icon="alert">This browser isn’t letting Scevia keep data in this tab, so scenarios will be lost when you reload or leave the page.</Callout>}
 
-        <div className="lab anchor" id="workspace">
-          <Card id="adjust">
-            <CardHeader pad title="Adjustments" sub={isBase ? 'Pick or create a scenario to adjust positions' : 'Set a target size and the price you assume you’d trade at'}
-              right={!isBase && (
-                <Menu label="Add a position" width={360} trigger={(t) => <button type="button" className="btn btn-sm" {...t}><Icon name="plus" size={15} />Add position</button>}>
-                  {(close) => (<>
-                    <div className="menu-h">Add an open position</div>
-                    {POSITIONS.filter((p) => !adjs.some((a) => a.id === p.id)).map((p) => (
-                      <button type="button" role="menuitem" key={p.id} className="menu-i" onClick={() => { update((a) => [...a, { id: p.id, to: p.shares, price: p.mark }]); close() }}>
-                        <PlatformBadge p={p.platform} /><span style={{ flex: 1 }}>{p.market}</span><SideChip side={p.side} />
-                      </button>
-                    ))}
-                    {POSITIONS.every((p) => adjs.some((a) => a.id === p.id)) && <div className="menu-h">Every position is already in this scenario.</div>}
-                  </>)}
-                </Menu>
-              )} />
-            {adjs.length === 0 && (
-              <div className="empty" style={{ borderTop: '1px solid var(--color-border-subtle)' }}>
-                <p>{isBase ? 'This is your portfolio as it is today.' : 'No adjustments yet. Add a position to start.'}</p>
-                {isBase && scenarios[0] && <Button size="sm" onClick={() => setActiveKey(scenarios[0].key)}>Open “{scenarios[0].name}”</Button>}
+        {/* 1 · Setup and assumptions: before any results */}
+        <Card id="setup">
+          <CardHeader title="Setup & assumptions" sub={isBase ? 'Your actual portfolio is the reference point. Create a scenario to explore changes.' : 'What this scenario starts from and assumes. Results below update as you change these.'} />
+          <div className="card-b setup">
+            {isBase || !active ? (
+              <div className="setup-empty">
+                <p className="t2">Scenarios are hypothetical portfolios. Start from what you hold now, or from an empty portfolio with capital you choose. Nothing is pre-filled.</p>
+                <div className="row" style={{ flexWrap: 'wrap' }}>
+                  <Button variant="primary" icon="layers" onClick={() => create('portfolio')}>Start from current portfolio</Button>
+                  <Button icon="plus" onClick={() => create('scratch')}>Start from scratch</Button>
+                </div>
+                <Facts />
               </div>
-            )}
-            {adjs.map((a, k) => <AdjustmentRow key={`${activeKey}:${a.id}`} a={a} error={errors[a.id]} shortfall={S.shortfall[POS_BY_ID[a.id]?.platform ?? 'pm']} includeFees={includeFees}
-              onChange={(next) => update((list) => list.map((x, i) => (i === k ? next : x)))} onRemove={() => update((list) => list.filter((_, i) => i !== k))} />)}
-            <div className="sumbar">
-              <div><div className="l">Net cash change</div><div className={cx('v', A.cash - B.cash >= 0 ? 'gain' : 'loss')}>{sfmt(A.cash - B.cash, 2)}</div></div>
-              <div><div className="l">Cash after trades · Poly / Kalshi</div><div className="v" style={{ fontSize: 'var(--font-size-md)' }}><span className={cx(S.cash.pm < 0 && 'loss')}>{fmt(S.cash.pm)}</span> / <span className={cx(S.cash.ks < 0 && 'loss')}>{fmt(S.cash.ks)}</span></div></div>
-            </div>
-          </Card>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', minWidth: 0 }}>
-            <Card id="ba" flush>
-              <CardHeader pad title="Before / after" sub={`Whole portfolio · fees ${includeFees ? 'estimated' : 'excluded'} · worst/best respect event relationships`}
-                right={<Tabs label="Impact view" options={['Portfolio impact', 'Position impact'] as const} value={view} onChange={setView} />} />
-              {view === 'Portfolio impact' ? (<>
-                <div className="ba-row h"><span>Metric</span><span>Current</span><span>Scenario</span><span>Change</span></div>
-                {ROWS.map((r) => (
-                  <div className="ba-row" key={r.key} title={r.info}><span>{r.label}</span><span className="t3">{value(r, B)}</span><span className="after">{value(r, A)}</span><span>{change(r, r.key === 'largestEventLoss' ? -A.largestEventLoss : (A[r.key] as number), r.key === 'largestEventLoss' ? -B.largestEventLoss : (B[r.key] as number))}</span></div>
-                ))}
-                <div className="foot"><span>Buying moves cash into contracts: at today’s marks it can only cost the gap to the mark and fees. What changes is the range you could end with at settlement.{A.excluded ? ` ${A.excluded} impossible joint outcomes excluded.` : ''}</span></div>
-              </>) : (<>
-                <div className="ba-row h"><span>Position</span><span>Shares</span><span>If for / against</span><span>Change if against</span></div>
-                {adjs.length === 0 && <div className="empty"><p>No positions changed.</p></div>}
-                {adjs.map((a) => {
-                  const h = S.holdings[a.id], p = POS_BY_ID[a.id]
-                  if (!h || !p) return null
-                  const forV = groupPnlFor(S, a.id, p.side), againstV = groupPnlFor(S, a.id, p.side === 'YES' ? 'NO' : 'YES')
-                  return <div className="ba-row" key={a.id}><span>{p.market}</span><span><span className="t3">{int(p.shares)} → </span>{int(h.shares)}</span>
-                    <span><span className="gain">{sfmt(forV)}</span> / <span className="loss">{sfmt(againstV)}</span></span>
-                    <span>{change(ROWS[2], againstV, p.ifLose)}</span></div>
-                })}
-              </>)}
-            </Card>
-
-            <Card id="matrix">
-              <CardHeader title="Outcome matrix" sub="P&L of two events’ positions in each joint outcome, including this scenario’s trades" />
-              <div className="card-b">
-                <div className="row" style={{ marginBottom: 'var(--space-2)', flexWrap: 'wrap' }}>
-                  <select className="select" value={mxA} onChange={(e) => setMxA(e.target.value)} aria-label="First event">{heldEvents.filter((e) => e.id !== mxB).map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}</select>
-                  <span className="t3">×</span>
-                  <select className="select" value={mxB} onChange={(e) => setMxB(e.target.value)} aria-label="Second event">{heldEvents.filter((e) => e.id !== mxA).map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}</select>
-                  <span className="spacer" />
-                  {rel ? <Chip tone={REL_TEXT[rel].tone}>{REL_TEXT[rel].label}</Chip> : <Chip tone="warn">? Unclassified</Chip>}
-                  {[mxA, mxB].sort().join() === 'btc,eth' && <button type="button" className="link" onClick={() => setEditRel(true)}>Change</button>}
-                </div>
-                <p className="t3" style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--space-3)' }}>{
-                  rel === 'mutex' ? 'Both can’t resolve YES, so that combination is excluded.'
-                    : rel === 'related' ? 'They share drivers but settle on different rules: all four combinations are possible and nothing is netted.'
-                      : rel === 'unknown' ? 'Marked unknown: all four combinations are shown as possible (unmodeled dependency).'
-                        : 'Nobody has classified this pair: all four combinations are shown as possible (unmodeled dependency).'}</p>
-                <div className="matrix">
-                  <div />
-                  {(['YES', 'NO'] as Outcome[]).map((ob) => <div className="mh" key={ob}><span><b>{evB.short}</b> resolves {ob}<br /><small>{sideOf(evB) ? (ob === sideOf(evB) ? 'for you' : 'against you') : 'both sides held'}</small></span></div>)}
-                  {(['YES', 'NO'] as Outcome[]).map((oa) => (
-                    <MatrixRow key={oa} label={<><b>{evA.short}</b> resolves {oa}<br /><small>{sideOf(evA) ? (oa === sideOf(evA) ? 'for you' : 'against you') : 'both sides held'}</small></>} cells={cells.filter((c) => c.oa === oa)} />
-                  ))}
-                </div>
-                <div style={{ marginTop: 'var(--space-4)' }}>
-                  <Callout icon="spark">{!best || (Math.abs(best.after - best.before) < 1 && Math.abs(worst.after - worst.before) < 1)
-                    ? <>This scenario doesn’t change these two events. Pick events you adjusted, or add a position.</>
-                    : <>Biggest improvement: <b>{evA.short} {best.oa}, {evB.short} {best.ob}</b> <b className={best.after - best.before >= 0 ? 'gain' : 'loss'}>{sfmt(best.after - best.before)}</b>. Biggest deterioration: <b>{evA.short} {worst.oa}, {evB.short} {worst.ob}</b> <b className={worst.after - worst.before < 0 ? 'loss' : 'gain'}>{sfmt(worst.after - worst.before)}</b>, ending at <b className={worst.after < 0 ? 'loss' : 'gain'}>{sfmt(worst.after)}</b>.</>}</Callout>
-                </div>
-              </div>
-            </Card>
+            ) : <Setup s={active} E={E} sharedCrypto={sharedCrypto} onChange={(patch) => update((s) => SC.configure(s, patch))} onEditShared={() => setEditShared(true)} />}
           </div>
+        </Card>
+
+        {/* 2 · Portfolio construction */}
+        <Card id="builder" flush>
+          <CardHeader pad title="Portfolio" sub={isBase ? 'Your current holdings. Create a scenario to change them or add markets.' : `${adjs.length} position${adjs.length === 1 ? '' : 's'} in this scenario · target shares at the price you assume you’d trade at`}
+            right={!isBase && active && <Button size="sm" icon="plus" onClick={() => setAdding(true)}>Add position…</Button>} />
+          {isBase ? <HoldingsList /> : <>
+            <div role="table" aria-label="Scenario positions" className="builder">
+              {adjs.length > 0 && <div className="brow brow-h" role="row"><span role="columnheader">Position</span><span role="columnheader" className="r">Current</span><span role="columnheader">Target shares</span><span role="columnheader">Trade</span><span role="columnheader">Assumed price</span><span role="columnheader" className="r">Notional</span><span role="columnheader" className="r">Est. fee</span><span role="columnheader"><span className="sr-only">Remove</span></span></div>}
+              {adjs.map((a, k) => <PositionRow key={`${activeKey}:${a.id}`} a={a} start={start.holdings[a.id]} after={S.holdings[a.id]} error={errors[a.id]} includeFees={E.includeFees}
+                shortfall={S.shortfall[S.holdings[a.id]?.platform ?? a.instrument?.provider ?? 'pm']}
+                onChange={(next) => setAdjs((list) => list.map((x, i) => (i === k ? next : x)))} onRemove={() => setAdjs((list) => list.filter((_, i) => i !== k))} />)}
+            </div>
+            {adjs.length === 0 && <div className="empty" style={{ borderTop: '1px solid var(--color-border-subtle)' }}>
+              <p>{active?.baseline === 'scratch' ? 'An empty portfolio. Add markets to build one.' : 'No changes yet: this scenario equals your current portfolio.'}</p>
+              <Button size="sm" icon="plus" onClick={() => setAdding(true)}>Add position…</Button></div>}
+            <div className="sumbar sumbar-3">
+              <div><div className="l">Net cash from trades</div><div className={cx('v', A.cash - B.cash >= 0 ? 'gain' : 'loss')}>{sfmt(A.cash - B.cash, 2)}</div></div>
+              <div><div className="l">Cash after trades · Polymarket / Kalshi</div><div className="v" style={{ fontSize: 'var(--font-size-md)' }}><span className={cx(S.cash.pm < 0 && 'loss')}>{fmt(S.cash.pm)}</span> / <span className={cx(S.cash.ks < 0 && 'loss')}>{fmt(S.cash.ks)}</span></div></div>
+              <div><div className="l">Funding needed</div><div className={cx('v', A.shortfall > 0 && 'stale')} style={{ fontSize: 'var(--font-size-md)' }}>{A.shortfall > 0 ? (['pm', 'ks'] as Platform[]).filter((p) => S.shortfall[p] > 0).map((p) => `${PLATFORM_NAME[p]} ${fmt(S.shortfall[p], 2)}`).join(' · ') : 'None'}</div></div>
+            </div>
+          </>}
+        </Card>
+        {errorCount > 0 && <Callout tone="warn"><b>{errorCount} position{errorCount > 1 ? 's are' : ' is'} incomplete or invalid</b> and left out of the results below. Fix the highlighted fields to include {errorCount > 1 ? 'them' : 'it'}.</Callout>}
+        {A.shortfall > 0 && <Callout tone="warn" icon="alert"><b>Needs {fmt(A.shortfall, 2)} more cash than this scenario has</b> on {(['pm', 'ks'] as Platform[]).filter((p) => S.shortfall[p] > 0).map((p) => PLATFORM_NAME[p]).join(' and ')}. Results show the purchases as if funded (cash goes negative), so values stay comparable. Cash isn’t moved between platforms; add capital in Setup to fund it explicitly.</Callout>}
+
+        {/* 3 · Impact */}
+        <div className="grid g-lab anchor" id="impact">
+          <Card id="ba" flush>
+            <CardHeader pad title="Before / after" sub={isBase ? 'Your actual portfolio' : `Starting point → scenario · fees ${E.includeFees ? 'estimated' : 'excluded'} · BTC × ETH ${REL_TEXT[E.crypto].short.toLowerCase()}`} />
+            <div className="ba-row h"><span>Metric</span><span>Start</span><span>Scenario</span><span>Change</span></div>
+            {E.funding > 0 && <div className="ba-row"><span title="Added in Setup. Contributed capital: part of the starting point, never counted as gain.">Added capital</span><span className="t3">{fmt(E.funding)}</span><span className="after">{fmt(E.funding)}</span><span><span className="delta flat">—</span></span></div>}
+            {ROWS.map((r) => {
+              const b = rowValue(r, B, start), a = rowValue(r, A, S)
+              return <div className="ba-row" key={r.key} title={r.info}><span>{r.label}</span><span className="t3">{show(r, b)}</span><span className="after">{show(r, a)}</span><span>{change(r, a, b)}</span></div>
+            })}
+            <div className="foot"><span>Buying moves cash into contracts: at reference prices it costs only the gap to the mark and fees. What changes is the range you could end with at settlement.{A.excluded ? ` ${A.excluded} impossible joint outcomes excluded.` : ''}{A.worstValue == null ? ` Best/worst values are unavailable above ${MAX_JOINT_EVENTS} events (exact enumeration only).` : ''}</span></div>
+          </Card>
+          <Card id="alloc">
+            <CardHeader title="Allocation impact" sub="How the portfolio’s market value is spread, before and after" />
+            <div className="card-b"><AllocationImpact start={start} after={S} /></div>
+          </Card>
         </div>
 
-        <Card id="payoff">
-          <CardHeader title="Payoff by event" sub="P&L if each adjusted event resolves for or against you · ○ current → ● scenario" />
-          <div className="card-b"><div style={{ maxWidth: 860 }}>{touched.length ? <Dumbbell events={touched} base={base} S={S} /> : <div className="empty"><p>Adjust a position to see payoffs move.</p></div>}</div></div>
-        </Card>
+        {/* 4 · Settlement */}
+        <div className="grid g-lab anchor" id="settlement">
+          <Card id="matrix">
+            <CardHeader title="Outcome matrix" sub="P&L of two events’ positions in each joint outcome, including this scenario’s trades" />
+            <div className="card-b"><OutcomeMatrix key={activeKey} start={start} after={S} rels={E.rels} onRelations={() => scrollToSection('setup')} /></div>
+          </Card>
+          <Card id="payoff">
+            <CardHeader title="Payoff by event" sub="Settlement P&L for each event this scenario changes · ○ start → ● scenario" />
+            <div className="card-b"><Dumbbell eventIds={touchedEvents} start={start} after={S} /></div>
+          </Card>
+        </div>
 
-        <Card id="cmp" flush>
-          <CardHeader pad title="Compare scenarios" sub="Calculated live for every scenario · the line under each value is the change vs. your current portfolio · click a column to open it" />
-          <div className="dt-wrap">
-            <table className="dt cmp-table">
-              <thead><tr>
-                <th scope="col" className="sticky">Metric</th>
-                <th scope="col" className="r">Current portfolio<small>base</small></th>
-                {scenarios.map((s) => (
-                  <th scope="col" key={s.key} className={cx('r', s.key === activeKey && 'is-active')}>
-                    <button type="button" className="col-btn" aria-pressed={s.key === activeKey} onClick={() => { setActiveKey(s.key); setRenaming(false); document.getElementById('summary')?.scrollIntoView({ behavior: 'smooth' }) }}>
-                      <i style={{ background: s.color }} />{s.name}
-                    </button>
-                    <small>{s.adjs.length} change{s.adjs.length === 1 ? '' : 's'} · {SC.statusLabel(s).toLowerCase()}{Object.keys(sims[s.key].errors).length ? ' · invalid input' : ''}{sims[s.key].shortfall.pm + sims[s.key].shortfall.ks > 0 ? ` · needs ${fmt(sims[s.key].shortfall.pm + sims[s.key].shortfall.ks)} more cash` : ''}</small>
-                  </th>
-                ))}
-              </tr></thead>
-              <tbody>
-                {ROWS.map((r) => (
-                  <tr key={r.key}>
-                    <th scope="row" className="sticky" style={{ fontWeight: 'var(--font-weight-regular)' }}>{r.label}</th>
-                    <td className="r t2">{value(r, B)}</td>
-                    {scenarios.map((s) => {
-                      const m = metricsOf(s.key)
-                      const a = r.key === 'largestEventLoss' ? -m.largestEventLoss : (m[r.key] as number), b = r.key === 'largestEventLoss' ? -B.largestEventLoss : (B[r.key] as number)
-                      const d = a - b, good = r.tone === 'neutral' ? null : r.tone === 'up' ? d > 0 : d < 0
-                      return (
-                        <td key={s.key} className={cx('r', s.key === activeKey && 'is-active')}>
-                          <span style={s.key === activeKey ? { fontWeight: 'var(--font-weight-semibold)' } : undefined}>{value(r, m)}</span>
-                          <small className={cx(Math.abs(d) < 0.5 || good == null ? 't3' : good ? 'gain' : 'loss')}>{Math.abs(d) < 0.5 ? 'no change' : sfmt(d)}</small>
-                        </td>
-                      )
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <div className="foot"><span>All scenarios use the current assumptions: fees {includeFees ? 'estimated' : 'excluded'}, BTC × ETH {REL_TEXT[crypto].short.toLowerCase()}. Green = better for you, red = worse, grey = a transfer (e.g. cash into contracts).</span><span>{scenarios.length} scenarios</span></div>
-        </Card>
+        {/* 5 · Compare */}
+        <Compare scenarios={scenarios} evals={evals} actual={actual} activeKey={activeKey} sharedCrypto={sharedCrypto} onOpen={(k) => { setActiveKey(k); setRenaming(false); scrollToSection('setup') }} />
 
-        <section className="card assume anchor" id="assume" aria-label="Assumptions">
-          <div><div className="l">Fill prices</div><div className="v">Your assumed prices ({MIN_PRICE.toFixed(2)}–{MAX_PRICE.toFixed(2)})</div></div>
-          <div><div className="l">Trading fees</div><div className="v">
-            <button type="button" role="switch" aria-checked={includeFees} aria-label="Include estimated fees" className={cx('switch', includeFees && 'on')} onClick={() => setIncludeFees((x) => !x)}><span /></button>
-            {includeFees ? `Estimated: Kalshi ${(FEE_RATE.ks * 100).toFixed(1)}% · Polymarket ${(FEE_RATE.pm * 100).toFixed(0)}% of notional` : 'Excluded'}</div></div>
-          <div><div className="l">Slippage / depth</div><div className="v">Not modeled</div></div>
-          <div><div className="l">Event relationships</div><div className="v">BTC × ETH: {REL_TEXT[crypto].short} · macro: related <button type="button" className="link" onClick={() => setEditRel(true)} title="Shared with Risk">Change</button></div></div>
-        </section>
-
-        <div className="footer-note"><span>Scenario results show what happens under the outcomes and prices you choose. They aren’t forecasts or recommendations.</span><span>Sample portfolio · fictional data</span></div>
+        <div className="footer-note"><span>Scenario results show what happens under the outcomes and prices you choose. They aren’t forecasts or recommendations.</span><span>Sample portfolio · sample market data</span></div>
       </main>
 
-      {editRel && <RelationshipModal current={crypto} onClose={() => setEditRel(false)} />}
-      {pending && <AddToScenarioModal ids={pending.ids} from={pending.from} scenarios={scenarios} defaultTarget={!isBase && active ? active.key : scenarios[0]?.key ?? 'new'} onCancel={() => setPending(null)} onConfirm={confirmAdd} />}
+      {editShared && <RelationshipModal current={sharedCrypto} onClose={() => setEditShared(false)} />}
+      {adding && active && <AddPositionModal baseline={active.baseline} present={new Set(adjs.map((a) => a.id))} onClose={() => setAdding(false)}
+        onAdd={(a) => { setAdjs((list) => (list.some((x) => x.id === a.id) ? list : [...list, a])); toast(a.to == null ? 'Added. Enter a target quantity and price to include it.' : 'Added at its current size: no change until you edit it.', 'info') }} />}
+      {pending && <AddToScenarioModal ids={pending.ids} from={pending.from} scenarios={scenarios.filter((s) => s.baseline === 'portfolio')} defaultTarget={!isBase && active?.baseline === 'portfolio' ? active.key : scenarios.find((s) => s.baseline === 'portfolio')?.key ?? 'new'} onCancel={() => setPending(null)} onConfirm={confirmAdd} />}
       {confirmDelete && active && (
         <Modal title={`Delete “${active.name}”?`} sub="This can’t be undone" onClose={() => setConfirmDelete(false)}
           footer={<><Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancel</Button><Button variant="primary" onClick={remove}>Delete scenario</Button></>}>
-          <p className="t2">This removes the scenario and its {active.adjs.length} adjustment{active.adjs.length === 1 ? '' : 's'}. Your current portfolio isn’t affected.</p>
+          <p className="t2">This removes the scenario and its {active.adjs.length} position{active.adjs.length === 1 ? '' : 's'}. Your actual portfolio isn’t affected.</p>
         </Modal>
       )}
     </div>
   )
 }
 
-/** The one side an event is held on, or null when it is held on both sides. */
-function heldSide(e: RiskEvent): Outcome | null {
-  const sides = new Set(POSITIONS.filter((p) => p.eventId === e.id).map((p) => p.side))
-  return sides.size === 1 ? [...sides][0] : null
+function show(r: Row, v: number | null) {
+  if (v == null) return 'Unavailable'
+  if (r.key === 'events') return String(v)
+  if (r.key === 'largestEventLoss') return sfmt(v)
+  if (r.key === 'realized' || r.key === 'fees') return Math.abs(v) < 0.005 ? '$0' : r.key === 'fees' ? fmt(v, 2) : sfmt(v, 2)
+  return fmt(v)
+}
+function change(r: Row, a: number | null, b: number | null) {
+  const d = diff(a, b)
+  if (d == null) return <span className="delta flat" title="Unavailable">n/a</span>
+  if (Math.abs(d) < 0.5) return <span className="delta flat">—</span>
+  const good = r.tone === 'neutral' ? null : r.tone === 'up' ? d > 0 : d < 0
+  return <span className={cx('delta', good == null ? 'flat' : good ? 'good' : 'bad')}>{r.key === 'events' ? `${d > 0 ? '+' : '−'}${Math.abs(d)}` : sfmt(d)}</span>
 }
 
-/** P&L of one position's event for an outcome, including the scenario's own trades on that position. */
-function groupPnlFor(S: Simulation, id: string, o: Outcome) {
-  const h = S.holdings[id]
-  return (h.shares > 0 ? (h.side === o ? h.shares : 0) - h.cost : 0) + (S.realizedBy[id] ?? 0) - (id in S.realizedBy ? 0 : S.feesBy[id] ?? 0)
-}
-
-function AdjustmentRow({ a, error, shortfall, includeFees, onChange, onRemove }: { a: Adjustment; error?: string; shortfall: number; includeFees: boolean; onChange: (a: Adjustment) => void; onRemove: () => void }) {
-  const p = POS_BY_ID[a.id]
-  const valid = !validatePrice(a.price)
-  const [priceText, setPriceText] = useState(valid ? a.price.toFixed(2) : '')
-  const [priceErr, setPriceErr] = useState<string | null>(null)
-  useEffect(() => { if (!validatePrice(a.price)) { setPriceText(a.price.toFixed(2)); setPriceErr(null) } }, [a.price])
-  if (!p) return null
-  const d = a.to - p.shares, max = maxFor(p.shares)
-  const act = d < 0 ? (a.to === 0 ? ['Exit', 'exit'] : [`Sell ${int(-d)}`, 'sell']) : d > 0 ? [`Buy ${int(d)}`, 'buy'] : ['No change', 'none']
-  const setTo = (v: number) => onChange({ ...a, to: Math.max(0, Math.min(max, Math.round(v / 100) * 100)) })
-  const notional = valid ? Math.abs(d) * a.price : 0, fee = includeFees ? notional * FEE_RATE[p.platform] : 0
-  const commitPrice = (txt: string) => {
-    const t = txt.replace('$', '').trim()
-    if (t === '' || /^0?\.?0?$/.test(t)) { setPriceErr(null); return } // still typing ("", "0", "0.", ".0")
-    const v = Number(t), err = validatePrice(v)
-    setPriceErr(err)
-    // Invalid prices are passed on too, so the scenario knows: the adjustment is excluded and Save is blocked.
-    onChange({ ...a, price: err ? (Number.isFinite(v) ? v : -1) : Math.round(v * 100) / 100 })
-  }
-  const msg = priceErr ?? error
+/** Facts from sources (not editable in a scenario) and fixed methodology. */
+function Facts({ baseline = 'portfolio' as Baseline }) {
+  const pm = account('pm'), ks = account('ks')
   return (
-    <div className={cx('adj', msg && 'has-error')}>
-      <div className="adj-h"><PlatformBadge p={p.platform} /><div><b>{p.market}</b><small><SideChip side={p.side} /> avg {p.avg.toFixed(2)} · mark {p.mark.toFixed(2)} · {fmtDate(p.resolves)}</small></div>
-        <button type="button" className="x icon-btn" aria-label={`Remove ${p.market} from scenario`} onClick={onRemove}><Icon name="x" size={14} /></button></div>
-      <div className="qty"><span className={cx('act', act[1])}>{act[0]}</span><span>{d !== 0 && <span className="from">{int(p.shares)}</span>}<span className="to">{int(a.to)}</span> <span className="t3">shares</span></span></div>
-      <input className="slider" type="range" min={0} max={max} step={100} value={a.to} aria-label={`Target shares of ${p.market}`} aria-valuetext={`${int(a.to)} shares`} onChange={(e) => setTo(Number(e.target.value))} />
-      <div className="scale"><button type="button" className="link" onClick={() => setTo(0)}>Exit (0)</button><button type="button" className="link" onClick={() => setTo(p.shares)}>current {int(p.shares)}</button><span>{int(max)}</span></div>
-      <div className="f2">
-        <div className="field"><label htmlFor={`sh-${a.id}`}>Target shares</label>
-          <input id={`sh-${a.id}`} inputMode="numeric" value={a.to} onChange={(e) => { const v = Number(e.target.value.replace(/[^0-9]/g, '')); if (Number.isFinite(v)) onChange({ ...a, to: Math.min(max, v) }) }} /></div>
-        <div className="field" style={priceErr ? { borderColor: 'var(--color-loss-fg)' } : undefined}><label htmlFor={`px-${a.id}`}>Assumed fill price ($)</label>
-          <input id={`px-${a.id}`} inputMode="decimal" value={priceText} aria-invalid={!!priceErr} aria-describedby={msg ? `err-${a.id}` : undefined}
-            onChange={(e) => { setPriceText(e.target.value); commitPrice(e.target.value) }} onBlur={(e) => { const t = e.target.value.replace('$', '').trim(); const err = t === '' ? 'Enter a price' : validatePrice(Number(t)); setPriceErr(err); if (err) onChange({ ...a, price: -1 }); else setPriceText(a.price.toFixed(2)) }} /></div>
-      </div>
-      <div className="t3" style={{ fontSize: 'var(--font-size-xs)', marginTop: 'var(--space-2)' }}>
-        {!valid ? 'Waiting for a valid price' : d === 0 ? 'No trade' : d > 0 ? `Spends ${fmt(notional + fee, 2)}${fee ? ` incl. ${fmt(fee, 2)} est. fee` : ''} · worth ${fmt(Math.abs(d) * p.mark, 2)} at the mark · pays ${fmt(Math.abs(d), 0)} if it resolves for you` : `Returns ${fmt(notional - fee, 2)}${fee ? ` after ${fmt(fee, 2)} est. fee` : ''} · realizes ${sfmt(-d * (a.price - p.avg) - fee, 2)} vs. average cost`}
-      </div>
-      {msg && <div id={`err-${a.id}`} role="alert" className="loss" style={{ fontSize: 'var(--font-size-xs)', marginTop: 'var(--space-1)' }}>{msg}. Left out of the results until fixed.</div>}
-      {!msg && d > 0 && shortfall > 0 && <div role="status" className="stale" style={{ marginTop: 'var(--space-1)' }}>{p.platform === 'pm' ? 'Polymarket' : 'Kalshi'} purchases in this scenario exceed available cash; included as if funded.</div>}
+    <div className="facts">
+      <div><h5 className="caps">From your sources</h5>
+        {baseline === 'portfolio'
+          ? <p className="t2">{POSITIONS.length} holdings · cash Polymarket {fmt(pm.cash)} · Kalshi {fmt(ks.cash)} · marks as of {fmtDate(TODAY)} <span className="t3">(sample portfolio)</span></p>
+          : <p className="t2">Not used: this scenario starts empty, with no holdings, cash or history from your accounts.</p>}</div>
+      <div><h5 className="caps">Methodology</h5>
+        <p className="t2">Contracts settle at $1 or $0. Your assumed price applies to the whole quantity; slippage and order-book depth aren’t modelled. Cash stays on its platform. Fee estimate: Kalshi {(FEE_RATE.ks * 100).toFixed(1)}% · Polymarket {(FEE_RATE.pm * 100).toFixed(0)}% of notional (sample rates).</p></div>
     </div>
   )
 }
 
-function MatrixRow({ label, cells }: { label: React.ReactNode; cells: { before: number; after: number; impossible: boolean }[] }) {
+function Setup({ s, E, sharedCrypto, onChange, onEditShared }: { s: Scenario; E: Evaluation; sharedCrypto: RelClass; onChange: (p: Partial<Pick<Scenario, 'baseline' | 'funding' | 'assumptions'>>) => void; onEditShared: () => void }) {
+  const heldRows = s.adjs.filter((a) => !a.instrument).length
+  const relValue = s.assumptions.crypto ?? 'inherit'
   return (<>
-    <div className="mh row"><span>{label}</span></div>
-    {cells.map((v, i) => v.impossible ? (
-      <div key={i} className="cell impossible"><div className="caps">Not possible</div><div className="was">Mutually exclusive: both can’t resolve YES</div></div>
-    ) : (
-      <div key={i} className={cx('cell', v.after >= 0 ? 'pos' : 'neg')}>
-        {Math.abs(v.after - v.before) < 0.5 ? <span className="delta flat">—</span> : <span className={cx('delta', v.after > v.before ? 'good' : 'bad')}>{sfmt(v.after - v.before)}</span>}
-        <div className="caps">Scenario</div><div className={cx('v', v.after >= 0 ? 'gain' : 'loss')}>{sfmt(v.after)}</div><div className="was">was {sfmt(v.before)}</div></div>
-    ))}
+    <div className="setup-grid">
+      <fieldset className="setup-f"><legend className="l">Starting portfolio</legend>
+        <Seg label="Starting portfolio" options={['Current portfolio', 'Empty portfolio'] as const} value={s.baseline === 'scratch' ? 'Empty portfolio' : 'Current portfolio'} onChange={(v) => onChange({ baseline: v === 'Empty portfolio' ? 'scratch' : 'portfolio' })} />
+        <small className="t3">{s.baseline === 'scratch' ? 'No holdings, cash or history. Positions are bought from zero.' : 'Your holdings and cash, unchanged until you add positions.'}{heldRows > 0 && s.baseline === 'scratch' ? ` ${heldRows} older position${heldRows > 1 ? 's' : ''} can’t be used from scratch.` : ''}</small>
+      </fieldset>
+      <fieldset className="setup-f"><legend className="l">Added capital <span className="t3">(optional, not profit)</span></legend>
+        <div className="row" style={{ gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+          {(['pm', 'ks'] as Platform[]).map((p) => <FundingInput key={p} p={p} value={s.funding[p]} onChange={(v) => onChange({ funding: { ...s.funding, [p]: v } })} />)}
+        </div>
+        <small className="t3">Contributed capital per platform. It raises cash and the starting value; it’s never counted as a gain.{E.funding > 0 ? ` Total added: ${fmt(E.funding)}.` : ''}</small>
+      </fieldset>
+      <fieldset className="setup-f"><legend className="l">Trading fees</legend>
+        <Seg label="Trading fees" options={['Estimated', 'Excluded'] as const} value={s.assumptions.includeFees === false ? 'Excluded' : 'Estimated'} onChange={(v) => onChange({ assumptions: { ...s.assumptions, includeFees: v === 'Excluded' ? false : undefined } })} />
+        <small className="t3">Applies to this scenario’s hypothetical trades only.</small>
+      </fieldset>
+      <fieldset className="setup-f"><legend className="l">BTC × ETH relationship</legend>
+        <select className="select" aria-label="BTC × ETH relationship for this scenario" value={relValue} onChange={(e) => onChange({ assumptions: { ...s.assumptions, crypto: e.target.value === 'inherit' ? undefined : (e.target.value as RelClass) } })}>
+          <option value="inherit">Shared: {REL_TEXT[sharedCrypto].label}</option>
+          {(['related', 'mutex', 'unknown'] as RelClass[]).map((c) => <option key={c} value={c}>This scenario only: {REL_TEXT[c].label}</option>)}
+        </select>
+        <small className="t3">{s.assumptions.crypto ? <>Overrides the shared setting for this scenario only; Risk and other scenarios keep {REL_TEXT[sharedCrypto].label.toLowerCase()}. <button type="button" className="link" onClick={() => onChange({ assumptions: { ...s.assumptions, crypto: undefined } })}>Use shared</button></> : <>Shared with Risk and every scenario that doesn’t override it. <button type="button" className="link" onClick={onEditShared}>Edit shared…</button></>}</small>
+      </fieldset>
+    </div>
+    <Facts baseline={s.baseline} />
   </>)
 }
 
-function Dumbbell({ events, base, S }: { events: RiskEvent[]; base: Simulation; S: Simulation }) {
-  // Rows are settlement outcomes. Single-sided events are labelled for/against the user; events held on both sides as YES/NO.
-  const rowsOf = (e: RiskEvent): [Outcome, string][] => { const s = heldSide(e); return s ? [[s, 'if for you'], [s === 'YES' ? 'NO' : 'YES', 'if against']] : [['YES', 'if YES'], ['NO', 'if NO']] }
-  const val = (sim: Simulation, e: RiskEvent, o: Outcome) => groupPnl(sim, [e.id], { [e.id]: o })
-  const vals = events.flatMap((e) => (['YES', 'NO'] as Outcome[]).flatMap((o) => [val(base, e, o), val(S, e, o)]))
-  const lim = Math.ceil(Math.max(3000, ...vals.map(Math.abs)) / 1000) * 1000
-  const [wrap, W] = useWidth<HTMLDivElement>(600)
-  // Narrow: event names sit above their rows instead of in a left column.
-  const compact = W < 480, left = compact ? 84 : 220, top = compact ? 24 : 0
-  const rowH = 76 + top, H = events.length * rowH + 30, X = (v: number) => left + ((v + lim) / (2 * lim)) * (W - left - 20)
-  const maxName = compact ? Math.floor(W / 8) : 26
+function FundingInput({ p, value, onChange }: { p: Platform; value?: number; onChange: (v: number | undefined) => void }) {
+  const [text, setText] = useState(value == null ? '' : String(value))
+  useEffect(() => { setText(value == null ? '' : String(value)) }, [value])
+  const invalid = value != null && !validFunding(value)
   return (
-    <div className="chart" ref={wrap}>
-      <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ overflow: 'visible' }} role="img" aria-label={events.map((e) => `${e.short}: ${rowsOf(e).map(([o, lab]) => `${lab} ${sfmt(val(base, e, o))} → ${sfmt(val(S, e, o))}`).join('; ')}`).join('. ')}>
-        <g className="axis">{[-lim, -lim / 2, 0, lim / 2, lim].map((t) => <g key={t}><line className={t ? 'grid-l' : 'zero'} x1={X(t)} x2={X(t)} y1={4} y2={H - 26} strokeDasharray={t ? '2 4' : undefined} /><text x={X(t)} y={H - 8} textAnchor="middle">{t ? `${t > 0 ? '+' : ''}${kfmt(t)}` : '$0'}</text></g>)}</g>
-        {events.map((e, i) => {
-          const y0 = 20 + i * rowH + top
-          return (
-            <g key={e.id}>
-              <text className="name" x={0} y={compact ? y0 - 14 : y0 + 18}>{e.name.length > maxName ? `${e.name.slice(0, maxName - 1)}…` : e.name}</text>
-              {rowsOf(e).map(([o, lab], k) => {
-                const yy = y0 + k * 28, b = val(base, e, o), a = val(S, e, o)
-                return (
-                  <g key={lab}>
-                    <text className="ax" x={X(-lim) - 14} y={yy + 4} textAnchor="end">{lab}</text>
-                    <line x1={X(b)} x2={X(a)} y1={yy} y2={yy} style={{ stroke: 'var(--color-accent-solid)' }} strokeWidth={3} opacity={0.55} />
-                    <circle cx={X(b)} cy={yy} r={5} style={{ fill: 'var(--color-bg-surface)', stroke: 'var(--color-text-secondary)' }} strokeWidth={1.6} />
-                    <circle cx={X(a)} cy={yy} r={6} style={{ fill: 'var(--color-accent-fg)' }} />
-                    {(() => { const r = Math.max(X(a), X(b)) + 11, flip = r > W - 56; return <text className="lbl" x={flip ? Math.min(X(a), X(b)) - 11 : r} textAnchor={flip ? 'end' : 'start'} y={yy + 4} style={{ fill: a >= 0 ? 'var(--color-gain-fg)' : 'var(--color-loss-fg)' }}>{sfmt(a)}</text> })()}
-                  </g>
-                )
-              })}
-            </g>
-          )
-        })}
-      </svg>
+    <label className={cx('fund', invalid && 'has-error')}><PlatformBadge p={p} size={18} />
+      <span className="sr-only">Added capital on {PLATFORM_NAME[p]}</span>
+      <input className="num-input" inputMode="decimal" placeholder={`${PLATFORM_NAME[p]} $`} aria-label={`Added capital on ${PLATFORM_NAME[p]}`} aria-invalid={invalid} value={text}
+        onChange={(e) => { const t = e.target.value; setText(t); const c = t.replace(/[$,\s]/g, ''); onChange(c === '' ? undefined : /^\d+(\.\d+)?$/.test(c) ? Number(c) : NaN) }} />
+      {invalid && <span role="alert" className="loss" style={{ fontSize: 'var(--font-size-xs)' }}>0–{fmt(MAX_FUNDING)}</span>}
+    </label>
+  )
+}
+
+function HoldingsList() {
+  return (
+    <div role="table" aria-label="Current holdings" className="builder">
+      {POSITIONS.map((p) => (
+        <div className="brow brow-ro" role="row" key={p.id}>
+          <div className="brow-i" role="cell"><PlatformBadge p={p.platform} /><span className="brow-t"><b>{p.market}</b><small className="t3"><SideChip side={p.side} />mark {p.mark.toFixed(2)} · resolves {fmtDate(p.resolves)}</small></span></div>
+          <div className="brow-n r" role="cell"><span className="brow-l">Shares</span>{int(p.shares)}</div>
+          <div className="brow-n r" role="cell"><span className="brow-l">Value</span>{fmt(p.value)}</div>
+        </div>
+      ))}
     </div>
+  )
+}
+
+/** Side-by-side comparison. Each scenario's change is measured from its own starting point (baseline + added capital),
+ *  so scenarios with different starts can be compared on what their positions did, not on how much capital they had. */
+function Compare({ scenarios, evals, actual, activeKey, sharedCrypto, onOpen }: { scenarios: Scenario[]; evals: Record<string, Evaluation>; actual: Evaluation; activeKey: string; sharedCrypto: RelClass; onOpen: (k: string) => void }) {
+  const differs = scenarios.length > 1 && new Set(scenarios.map((s) => JSON.stringify([s.baseline, evals[s.key].funding, evals[s.key].includeFees, evals[s.key].crypto]))).size > 1
+  return (
+    <Card id="cmp" flush>
+      <CardHeader pad title="Compare scenarios" sub="Each value with its change from that scenario’s own starting point · select a column to open it" />
+      {scenarios.length === 0 ? <div className="empty"><p>No scenarios yet. Create one to compare it with your current portfolio.</p></div> : (<>
+        {differs && <div className="cmp-note"><Callout icon="info">These scenarios start from different portfolios, capital or assumptions. Compare each one’s <b>change from its start</b>; a larger absolute value can simply mean more starting capital.</Callout></div>}
+        <div className="dt-wrap">
+          <table className="dt cmp-table">
+            <thead><tr>
+              <th scope="col" className="sticky">Metric</th>
+              <th scope="col" className="r">Current portfolio<small>actual</small></th>
+              {scenarios.map((s) => (
+                <th scope="col" key={s.key} className={cx('r', s.key === activeKey && 'is-active')}>
+                  <button type="button" className="col-btn" aria-pressed={s.key === activeKey} onClick={() => onOpen(s.key)}><i style={{ background: s.color }} />{s.name}</button>
+                  <small>{s.adjs.length} position{s.adjs.length === 1 ? '' : 's'} · {SC.statusLabel(s).toLowerCase()}{Object.keys(evals[s.key].sim.errors).length ? ' · incomplete' : ''}{evals[s.key].A.shortfall > 0 ? ` · needs ${fmt(evals[s.key].A.shortfall)} more cash` : ''}</small>
+                </th>
+              ))}
+            </tr></thead>
+            <tbody>
+              <tr className="cmp-setup"><th scope="row" className="sticky">Starts from</th><td className="r t2">—</td>{scenarios.map((s) => <td key={s.key} className={cx('r', s.key === activeKey && 'is-active')}>{s.baseline === 'scratch' ? 'Empty portfolio' : 'Current portfolio'}</td>)}</tr>
+              <tr className="cmp-setup"><th scope="row" className="sticky">Added capital</th><td className="r t2">—</td>{scenarios.map((s) => <td key={s.key} className={cx('r', s.key === activeKey && 'is-active')}>{evals[s.key].funding ? fmt(evals[s.key].funding) : 'None'}</td>)}</tr>
+              <tr className="cmp-setup"><th scope="row" className="sticky">Fees · BTC × ETH</th><td className="r t2">— · {REL_TEXT[sharedCrypto].short}</td>{scenarios.map((s) => <td key={s.key} className={cx('r', s.key === activeKey && 'is-active')}>{evals[s.key].includeFees ? 'Estimated' : 'Excluded'} · {REL_TEXT[evals[s.key].crypto].short}{s.assumptions.crypto ? '*' : ''}</td>)}</tr>
+              {ROWS.map((r) => (
+                <tr key={r.key}>
+                  <th scope="row" className="sticky" style={{ fontWeight: 'var(--font-weight-regular)' }}>{r.label}</th>
+                  <td className="r t2">{show(r, rowValue(r, actual.A, actual.sim))}</td>
+                  {scenarios.map((s) => {
+                    const e = evals[s.key], a = rowValue(r, e.A, e.sim), b = rowValue(r, e.B, e.start), d = diff(a, b)
+                    const good = d == null || r.tone === 'neutral' ? null : r.tone === 'up' ? d > 0 : d < 0
+                    return (
+                      <td key={s.key} className={cx('r', s.key === activeKey && 'is-active')}>
+                        <span style={s.key === activeKey ? { fontWeight: 'var(--font-weight-semibold)' } : undefined}>{show(r, a)}</span>
+                        <small className={cx(d == null || Math.abs(d) < 0.5 || good == null ? 't3' : good ? 'gain' : 'loss')}>{d == null ? 'change unavailable' : Math.abs(d) < 0.5 ? 'no change' : `${r.key === 'events' ? `${d > 0 ? '+' : '−'}${Math.abs(d)}` : sfmt(d)} vs. start`}</small>
+                      </td>
+                    )
+                  })}
+                </tr>
+              ))}
+              <tr><th scope="row" className="sticky" style={{ fontWeight: 'var(--font-weight-regular)' }}>Events held</th><td className="r t2">{eventsHeld(actual.sim)}</td>{scenarios.map((s) => <td key={s.key} className={cx('r', s.key === activeKey && 'is-active')}>{eventsHeld(evals[s.key].sim)}</td>)}</tr>
+            </tbody>
+          </table>
+        </div>
+        <div className="foot"><span>Changes exclude added capital: each scenario is measured against its own start. * = relationship overridden for that scenario only. Green = better for you, red = worse, grey = a transfer (e.g. cash into contracts).</span><span>{scenarios.length} scenario{scenarios.length === 1 ? '' : 's'}</span></div>
+      </>)}
+    </Card>
   )
 }
 
@@ -489,8 +408,8 @@ function AddToScenarioModal({ ids, from, scenarios, defaultTarget, onCancel, onC
       footer={<><Button variant="ghost" onClick={onCancel}>Cancel</Button><Button variant="primary" disabled={addable.length === 0} onClick={() => onConfirm(target, addable)}>{addable.length ? `Add ${addable.length} position${addable.length > 1 ? 's' : ''}` : 'Nothing to add'}</Button></>}>
       <label className="add-field"><span className="l">Scenario</span>
         <select data-autofocus className="select" value={target} onChange={(e) => setTarget(e.target.value)} aria-label="Target scenario">
-          {scenarios.map((x) => <option key={x.key} value={x.key}>{x.name} · {x.adjs.length} change{x.adjs.length === 1 ? '' : 's'}</option>)}
-          <option value="new">New scenario</option>
+          {scenarios.map((x) => <option key={x.key} value={x.key}>{x.name} · {x.adjs.length} position{x.adjs.length === 1 ? '' : 's'}</option>)}
+          <option value="new">New scenario (current portfolio)</option>
         </select>
       </label>
       {from && <p className="t2" style={{ fontSize: 'var(--font-size-sm)' }}><span className="t3">From </span>{from}</p>}
@@ -509,3 +428,4 @@ function AddToScenarioModal({ ids, from, scenarios, defaultTarget, onCancel, onC
     </Modal>
   )
 }
+

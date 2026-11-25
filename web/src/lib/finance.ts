@@ -266,9 +266,17 @@ export function outcomeRange(ids: string[], rels: Relation[], fn: (o: Record<str
 }
 
 /* ───────────── Holdings (base portfolio or a scenario) ───────────── */
-export interface Holding { id: string; eventId: string; platform: Platform; side: Side; shares: number; cost: number; mark: number }
+/** One holding in a portfolio being evaluated (the actual portfolio or a hypothetical one).
+ *  `mark` is the valuation price; null when no reference price is available (value is then unavailable, never 0). */
+export interface Holding {
+  id: string; eventId: string; platform: Platform; side: Side; shares: number; cost: number; mark: number | null
+  category: Category; title: string; eventTitle: string
+  /** True for an instrument that isn't in the starting portfolio (a hypothetical new position). */
+  isNew?: boolean
+}
+const eventName = (id: string) => EVENTS.find((e) => e.id === id)?.name ?? id
 export const baseHoldings = (): Record<string, Holding> =>
-  Object.fromEntries(POSITIONS.map((p) => [p.id, { id: p.id, eventId: p.eventId, platform: p.platform, side: p.side, shares: p.shares, cost: p.cost, mark: p.mark }]))
+  Object.fromEntries(POSITIONS.map((p) => [p.id, { id: p.id, eventId: p.eventId, platform: p.platform, side: p.side, shares: p.shares, cost: p.cost, mark: p.mark, category: p.category, title: p.market, eventTitle: eventName(p.eventId) }]))
 const payout = (h: Holding, o: Outcome) => (h.side === o ? h.shares : 0)
 /** P&L of an event's holdings vs. their cost basis if the event resolves `o` (excludes fees already paid). */
 export const eventPnl = (hs: Holding[], eventId: string, o: Outcome) => sum(hs.filter((h) => h.eventId === eventId), (h) => payout(h, o) - h.cost)
@@ -326,7 +334,50 @@ export function settlementRangeFor(eventIds: string[], rels: Relation[]) {
 }
 
 /* ───────────── Scenario simulation ───────────── */
-export interface Adjustment { id: string; to: number; price: number }
+/** Provider-native reference to one outcome of a binary market. Mirrors the backend's canonical identity
+ *  (provider + external event / market / outcome ids) without copying its schema. Reference prices are
+ *  snapshots with a timestamp; they are never quotes. */
+export interface InstrumentRef {
+  provider: Platform; eventId: string; eventTitle: string; marketId: string; marketTitle: string
+  outcome: Outcome; category: Category; resolves: string
+  refPrice: number | null; refAsOf: string | null
+  /** Where the market data came from: the bundled sample catalog, or (later) a live provider lookup. */
+  source: 'sample' | 'provider'
+}
+export const instrumentKey = (i: Pick<InstrumentRef, 'provider' | 'marketId' | 'outcome'>) => `${i.provider}:${i.marketId}:${i.outcome}`
+/** Instrument reference for a position the user actually holds (so it can also be used from scratch). */
+export const instrumentOfPosition = (p: Position): InstrumentRef => ({
+  provider: p.platform, eventId: p.eventId, eventTitle: eventName(p.eventId), marketId: p.id, marketTitle: p.market, outcome: p.side,
+  category: p.category, resolves: p.resolves, refPrice: p.mark, refAsOf: sourceOf(p.platform).asOf, source: 'sample',
+})
+/** A hypothetical change: hold `to` shares of an instrument, trading at the assumed `price`.
+ *  `id` is the actual position id when the instrument is held, otherwise its instrument key.
+ *  null `to` / `price` mean "not entered yet": the row is excluded from results and blocks Save. */
+export interface Adjustment { id: string; to: number | null; price: number | null; instrument?: InstrumentRef }
+/** Where a scenario starts: the user's current portfolio (holdings + cash from sources), or an empty portfolio. */
+export type Baseline = 'portfolio' | 'scratch'
+export interface SimOptions {
+  includeFees: boolean
+  baseline?: Baseline
+  /** Hypothetical capital added per platform. Contributed capital, never profit; cash isn't moved between platforms. */
+  funding?: Partial<Record<Platform, number>>
+}
+/** Safety limits for hypothetical inputs (calculation reliability, not provider rules). */
+export const MAX_SHARES = 10_000_000, MAX_FUNDING = 100_000_000
+export function validateQty(v: number | null) {
+  if (v == null || !Number.isFinite(v)) return 'Enter a target quantity'
+  if (v < 0 || v > MAX_SHARES) return `Quantity must be between 0 and ${MAX_SHARES.toLocaleString('en-US')}`
+  if (!Number.isInteger(v)) return 'Use whole shares'
+  return null
+}
+export const validFunding = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= MAX_FUNDING
+/** Starting holdings and cash for a baseline, plus any added capital. */
+export function startingPoint(baseline: Baseline = 'portfolio', funding: Partial<Record<Platform, number>> = {}) {
+  const holdings: Record<string, Holding> = baseline === 'scratch' ? {} : baseHoldings()
+  const cash: Record<Platform, number> = baseline === 'scratch' ? { pm: 0, ks: 0 } : { pm: account('pm').cash, ks: account('ks').cash }
+  for (const p of ['pm', 'ks'] as Platform[]) if (validFunding(funding[p])) cash[p] += funding[p]!
+  return { holdings, cash }
+}
 export interface Simulation {
   holdings: Record<string, Holding>; cash: Record<Platform, number>
   /** Realized P&L locked in by hypothetical sales (after their fees). Purchases never create realized P&L. */
@@ -345,17 +396,24 @@ export function validatePrice(v: number) {
   if (v < MIN_PRICE || v > MAX_PRICE) return 'Price must be between $0.01 and $0.99'
   return null
 }
-export function simulate(adjs: Adjustment[], opts: { includeFees: boolean }): Simulation {
-  const holdings = baseHoldings()
-  const cash: Record<Platform, number> = { pm: account('pm').cash, ks: account('ks').cash }
+export function simulate(adjs: Adjustment[], opts: SimOptions): Simulation {
+  const { holdings, cash } = startingPoint(opts.baseline, opts.funding)
   let realized = 0, fees = 0
   const errors: Record<string, string> = {}, realizedBy: Record<string, number> = {}, feesBy: Record<string, number> = {}
   for (const a of adjs) {
-    const h = holdings[a.id]
-    if (!h) { errors[a.id] = 'Unknown position'; continue }
+    const qtyErr = validateQty(a.to)
+    if (qtyErr) { errors[a.id] = qtyErr; continue }
+    if (a.price == null) { errors[a.id] = 'Enter an assumed price'; continue }
     const priceErr = validatePrice(a.price)
     if (priceErr) { errors[a.id] = priceErr; continue }
-    const to = Math.max(0, Math.round(a.to))
+    let h = holdings[a.id]
+    if (!h) {
+      // Not in the starting portfolio: a hypothetical new holding from zero, valued at its reference price.
+      const i = a.instrument
+      if (!i) { errors[a.id] = 'Not in this starting portfolio'; continue }
+      h = holdings[a.id] = { id: a.id, eventId: i.eventId, platform: i.provider, side: i.outcome, shares: 0, cost: 0, mark: i.refPrice, category: i.category, title: i.marketTitle, eventTitle: i.eventTitle, isNew: true }
+    }
+    const to = a.to!
     const d = to - h.shares
     if (d === 0) continue
     const notional = Math.abs(d) * a.price, fee = opts.includeFees ? notional * FEE_RATE[h.platform] : 0
@@ -375,7 +433,8 @@ export function simulate(adjs: Adjustment[], opts: { includeFees: boolean }): Si
 }
 
 export interface ScenarioMetrics {
-  cash: number; positionsValue: number; totalValue: number; committed: number; realized: number; fees: number
+  /** positionsValue / totalValue are null when a held instrument has no reference price. */
+  cash: number; positionsValue: number | null; totalValue: number | null; committed: number; realized: number; fees: number
   /** null when the joint-outcome range can't be computed exactly (too many events). */
   worstValue: number | null; bestValue: number | null; worst: Record<string, Outcome>; best: Record<string, Outcome>; excluded: number
   /** Largest settlement loss of a single event, with opposing holdings netted. */
@@ -390,14 +449,14 @@ export interface ScenarioMetrics {
 export function scenarioMetrics(sim: Simulation, rels: Relation[]): ScenarioMetrics {
   const hs = Object.values(sim.holdings).filter((h) => h.shares > 0)
   const cash = sim.cash.pm + sim.cash.ks
-  const positionsValue = sum(hs, (h) => h.shares * h.mark)
+  const positionsValue = hs.some((h) => h.mark == null) ? null : sum(hs, (h) => h.shares * h.mark!)
   const committed = sum(hs, (h) => h.cost)
   const ids = [...new Set(hs.map((h) => h.eventId))]
   const range = ids.length ? outcomeRange(ids, rels, (o) => sum(hs, (h) => payout(h, o[h.eventId]))) : { min: 0, max: 0, argmin: {}, argmax: {}, feasible: 1, excluded: 0 }
   // Worst settlement of each event on its own, using each holding's side (opposing holdings offset).
   const largestEventLoss = Math.max(0, ...ids.map((id) => -Math.min(eventPnl(hs, id, 'YES'), eventPnl(hs, id, 'NO'))))
   return {
-    cash, positionsValue, totalValue: cash + positionsValue, committed, realized: sim.realized, fees: sim.fees,
+    cash, positionsValue, totalValue: positionsValue == null ? null : cash + positionsValue, committed, realized: sim.realized, fees: sim.fees,
     worstValue: range ? cash + range.min : null, bestValue: range ? cash + range.max : null, worst: range?.argmin ?? {}, best: range?.argmax ?? {},
     excluded: range?.excluded ?? 0, largestEventLoss, valid: Object.keys(sim.errors).length === 0, shortfall: sim.shortfall.pm + sim.shortfall.ks,
   }
@@ -414,6 +473,29 @@ export function groupPnl(sim: Simulation, eventIds: string[], o: Record<string, 
     if (!(h.id in sim.realizedBy)) v -= sim.feesBy[h.id] ?? 0
   }
   return v
+}
+
+/* ───────────── Allocation of any holdings (actual or hypothetical) ───────────── */
+export type AllocationBy = 'category' | 'platform' | 'event'
+export interface HoldingsAllocation {
+  /** Open-position market value (cash excluded); null when a held instrument has no reference price. */
+  total: number | null
+  segments: { key: string; label: string; value: number; share: number | null; ids: string[] }[]
+}
+/** Market-value allocation of holdings with shares, grouped by category, platform or event. Denominator: open-position
+ *  market value of these holdings (cash excluded). Different from capital committed and from settlement loss. */
+export function holdingsAllocation(hs: Holding[], by: AllocationBy): HoldingsAllocation {
+  const live = hs.filter((h) => h.shares > 0)
+  if (live.some((h) => h.mark == null)) return { total: null, segments: [] }
+  const total = sum(live, (h) => h.shares * h.mark!)
+  const groups = new Map<string, { label: string; value: number; ids: string[] }>()
+  for (const h of live) {
+    const key = by === 'category' ? h.category : by === 'platform' ? h.platform : h.eventId
+    const label = by === 'category' ? h.category : by === 'platform' ? (h.platform === 'pm' ? 'Polymarket' : 'Kalshi') : h.eventTitle
+    const g = groups.get(key) ?? { label, value: 0, ids: [] }
+    g.value += h.shares * h.mark!; g.ids.push(h.id); groups.set(key, g)
+  }
+  return { total, segments: [...groups.entries()].map(([key, g]) => ({ key, ...g, share: total > 0 ? g.value / total : null })).sort((a, b) => b.value - a.value) }
 }
 
 /* ───────────── Allocation ───────────── */

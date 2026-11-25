@@ -33,7 +33,7 @@ Net P&L by period and platform, reconciled into realized results, changes in ope
 Exposure grouped by the event that decides the payoff, so the same outcome held on two platforms counts once. It also covers concentration against your own guardrail, a downside ladder, settlement payoffs, and best and worst cases over outcome combinations that can actually happen.
 
 **Scenario Lab — what happens if you change something.**
-Resize positions at the prices you assume you could trade at. Compare portfolio value and settlement range before and after, see two events' joint outcomes side by side, and compare saved scenarios. Funding gaps are flagged, and no orders are ever placed.
+Build hypothetical portfolios from your current holdings or from scratch: resize what you hold, add markets you don't hold yet, set added capital and assumptions, and use the prices you assume you could trade at. See the effect on portfolio value, allocation and settlement range, explore two events' joint outcomes, and compare scenarios, each measured from its own starting point. Funding gaps are flagged, and no orders are ever placed.
 
 Every figure explains how it is calculated. Positions, events and the trades behind a figure open in a side panel on the page you're on; moving to another module or into a scenario is always an explicit step. Scevia shows payoffs if an event resolves one way or the other. It never presents a probability as its own forecast.
 

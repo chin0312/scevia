@@ -20,7 +20,7 @@
 
 **Accessibility:** WCAG 2.1 AA. Colour never carries meaning alone (YES/NO and gain/loss always have a sign, label, or icon). Fully keyboard operable. Respect reduced motion.
 
-**Platform:** Desktop web first (1280–1600). Tablet and phone widths must stay fully usable (no clipped content or sideways scrolling); a dedicated mobile design comes later, with Overview and single-event What-if first.
+**Platform:** Desktop web first, with a fluid workspace: it keeps using width up to ultrawide (2560px), and running text keeps a readable line length. Tablet and phone widths must stay fully usable (no clipped content or sideways scrolling); a dedicated mobile design comes later, with Overview and single-event What-if first.
 
 ## Scope
 
@@ -89,22 +89,37 @@ The long-term product is a privacy-first **cloud workspace**: continuity across 
 - Don't claim encryption, export, deletion or cloud controls before they exist.
 - Future policies and the data lifecycle live in internal docs.
 
-## Scenario Lab (direction)
+## Scenario Lab
 
-Scenario Lab is for **portfolio construction and comparison**, not only resizing. Hypothetical positions can come from three places:
-1. an existing holding;
-2. a market or outcome found through supported provider data (lookup serves scenario construction; it is not a browsing module);
-3. a pasted link to a supported market or event, resolved by the backend through trusted provider endpoints, never by scraping. When a link covers several markets or outcomes, the user picks one.
+Scenario Lab is a **portfolio construction and simulation workspace**. It follows the workflow below, without forcing a wizard: users move freely between inputs and results.
+1. Choose or create a scenario.
+2. Set it up: the starting portfolio (current or empty), optional added capital, fee treatment and relationship assumptions.
+3. Build the hypothetical portfolio.
+4. Review the impact: before/after, allocation, settlement outcomes.
+5. Compare scenarios.
 
-**Hypothetical vs. actual:**
-- Hypothetical positions never enter actual holdings or transaction history.
-- A scenario records, for each position:
-  - the instrument reference;
-  - quantity;
-  - the assumed execution price;
-  - a reference mark and its timestamp;
-  - funding and fee assumptions.
-- The current build supports existing holdings only. The model's extension path is in `docs/DEVELOPMENT.md`.
+- **A new workspace is neutral.**
+  - No scenarios and no pre-filled trades.
+  - Unknown relationships stay unknown, and no added capital is assumed.
+  - Examples exist, but only when the user picks one.
+- **Positions come from three places:**
+  - the user's holdings;
+  - a market search;
+  - a pasted link to a supported market.
+
+  Lookup serves construction; it is not a browsing module. Links are resolved by the backend through trusted provider endpoints, never by fetching the URL in the browser. When a link covers several markets or outcomes, the user picks one.
+- **Hypothetical vs. actual.**
+  - Hypothetical positions never enter actual holdings, history or the other modules' figures.
+  - A scenario stores, per position:
+    - instrument identity;
+    - quantity;
+    - assumed price;
+    - reference price and its timestamp.
+  - It also stores its funding and assumptions.
+- **Useful without an account.** An empty-portfolio scenario needs no connected source.
+- **Current build:**
+  - Market search and link resolution run against a small **sample market catalog**, labelled "Sample market data".
+  - Real lookup arrives with provider integration (Phase 2), and real-data scenarios with Phase 5.
 
 ## Interaction principles
 

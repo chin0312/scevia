@@ -190,7 +190,7 @@ describe('scenario simulation', () => {
     expect(sim.realized).toBe(0)
     close(m.cash, base.cash - d * px - fee)
     close(m.committed, base.committed + d * px)
-    close(m.totalValue - base.totalValue, d * (p.mark - px) - fee)
+    close(m.totalValue! - base.totalValue!, d * (p.mark - px) - fee)
     close(m.bestValue! - base.bestValue!, d * (1 - px) - fee) // only settlement can pay out
   })
   it('buying at the mark with fees off leaves portfolio value unchanged', () => {
@@ -313,7 +313,7 @@ describe('event exposure with each holding’s own side', () => {
   const ev = { id: 'x', name: 'Binary event', short: 'X', category: 'Economics' as const }
   const pos = (id: string, side: 'YES' | 'NO', shares: number, price: number, platform: 'pm' | 'ks' = 'pm') =>
     derivePosition({ id, market: id, eventId: 'x', category: 'Economics', platform, side, mark: price, markAtLastVisit: price, resolves: '2026-12-31', fills: [{ date: '2026-11-01', shares, price, fee: 0 }] })
-  const holdings = (ps: ReturnType<typeof pos>[]) => ps.map((p) => ({ id: p.id, eventId: p.eventId, platform: p.platform, side: p.side, shares: p.shares, cost: p.cost, mark: p.mark }))
+  const holdings = (ps: ReturnType<typeof pos>[]) => ps.map((p) => ({ id: p.id, eventId: p.eventId, platform: p.platform, side: p.side, shares: p.shares, cost: p.cost, mark: p.mark as number | null, category: p.category, title: p.market, eventTitle: 'Binary event' }))
 
   it('opposing YES and NO holdings offset at settlement; committed capital stays gross', () => {
     const e = eventExposureOf(ev, [pos('y', 'YES', 100, 0.6), pos('n', 'NO', 60, 0.4, 'ks')], 84)

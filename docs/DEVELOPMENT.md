@@ -44,9 +44,16 @@ _Last updated: 2026-11-25_
   - capped at 16 events; above that, ranges are unavailable;
   - needs a bounded method before unrestricted real portfolios.
 - **Persistence:** browser tab only (no accounts, no cloud). The guardrail is a single per-event limit.
-- **Scenario positions are keyed by an existing position id** (`Adjustment.id`). New-market positions need the extension below.
+- **Scenario positions:**
+  - Held positions are keyed by position id.
+  - New instruments are keyed by `provider:marketId:outcome` and carry an `InstrumentRef`.
+  - Market search and link resolution use the **sample market catalog** (`data/sampleMarkets.ts`), behind the `MarketCatalog` interface (`lib/markets.ts`).
+- **Platforms:** sample instruments are limited to the `pm`/`ks` platform union.
 - **Detail panels** aren't URL-addressable; a reload closes them.
-- **Layout:** designed for desktop (1280–1600 px). Tablet and phone widths reflow and are covered by e2e overflow checks, but have no dedicated mobile design yet.
+- **Layout:**
+  - fluid desktop up to 2560px;
+  - tablet and phone widths reflow and are covered by e2e overflow checks;
+  - no dedicated mobile design yet.
 - **Lint:** remaining oxlint warnings are React Compiler advisories (fast-refresh boundaries; setState in effects for URL/input sync).
 
 ## Technical debt
@@ -66,13 +73,42 @@ These are separate concepts today and must stay separate when persisted:
 
 A future authorized workspace persists the last three per user. Portfolio records stay owned by sources and imports.
 
-## Scenario Lab extension path (Phase 5)
+## Scenario Lab: what exists, what Phase 2/5 replace
 
-Today an `Adjustment` is `{ id, to, price }`, where `id` must be an existing position. To support new markets and pasted links without touching actual holdings:
-1. **Extend the adjustment shape.** Add `instrument: { provider, marketId, outcomeId }`, plus `referenceMark` and `markAsOf`, alongside `to` and `price`. Existing-holding adjustments keep their `positionId` and gain the instrument reference.
-2. **Bind new positions to the scenario.** `simulate()` treats an adjustment with no `positionId` as a new holding with zero base shares. Its cash comes from the chosen funding assumption, and it goes into `simulation.holdings` only, never into `PortfolioData`.
-3. **Add backend market lookup and link resolution.** The Lab confirms the instrument: provider, title, outcomes, status, reference price and freshness, resolution date and rules, fee assumptions. Then it adds the instrument through the existing confirmation dialog, using a `HandoffRequest` variant carrying instrument refs.
-4. **Disable or qualify missing marks.** A missing mark disables or qualifies any action that needs a current price, as PR #3 also notes.
+**Built (Phase 0):**
+- current-portfolio and empty-portfolio starting points;
+- per-platform added capital;
+- per-scenario fees and relationship override;
+- held and new instruments (`Adjustment.instrument`);
+- the Add position dialog (holdings / search / paste link);
+- allocation impact;
+- comparison against each scenario's own start;
+- migration from older stored scenarios (`scevia-scenarios-v3` → `-v4`).
+
+**Data boundary:**
+- `MarketCatalog` (`lib/markets.ts`), with `search(query, {provider})` and `resolveLink(url)` returning a `LinkResolution`.
+- `data/markets.ts` picks the implementation; today `fixtureCatalog(SAMPLE_MARKET_EVENTS)`.
+- The UI never imports the fixture directly and never fetches a pasted URL. `parseMarketLink` only recognises supported hosts.
+
+**Frontend expectations for Phase 2 (market lookup + link resolution).** These are not a finalized API; verify against Polymarket's documentation and responses first.
+
+| Need | Expectation |
+|---|---|
+| Search | Server-side search over public market metadata. Optional provider filter. Paginated. Returns events with markets and outcomes. |
+| Link resolution | A backend endpoint takes the pasted URL and returns `resolved` / `not-found` / `unsupported` / `unavailable` (same states as `LinkResolution`). The browser sends the URL only to Scevia's backend. |
+| Identity | Provider-native `externalEventId`, `externalMarketId`, outcome `externalId` (backend `NormalizedMarket`). The frontend's `marketId` / `outcome` map to these. |
+| Prices | Reference price per outcome as a **decimal string**, with `observedAt` (UTC) and `priceKind`. It may be null; the UI then requires a typed price and shows value as unavailable. |
+| Lifecycle | Market and event lifecycle (open / closed / resolved) and resolution rules or settlement terms. Closed or resolved markets can't be added. |
+| Outcomes | Binary YES/NO today. The response should list all outcomes, so multi-outcome markets can be shown and, later, modelled. |
+| Fees | The provider's fee schedule or an explicit "estimated / unavailable" status, not a flat sample rate. |
+| Settlement groups | Which contracts settle together comes from **reviewed** relationships, never title matching. |
+
+**Phase 5 (real-data scenario construction):**
+- load the user's portfolio asynchronously as the "current portfolio" start;
+- persist scenarios per user (workspace), including instrument refs and the reference price/time used;
+- replace fixed `pm`/`ks` with provider ids;
+- use real fees;
+- replace the 16-event cap with a bounded exact method.
 
 ## Adding sources (CSV, providers)
 

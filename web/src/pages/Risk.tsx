@@ -69,8 +69,10 @@ export default function Risk() {
     }).filter((g) => g.cost > 0).sort((a, b) => b.cost - a.cost)
   }, [groupBy, exps])
   const groupLimit = groupBy === 'By event' ? limit : groupBy === 'By category' ? 40 : 100
-  const shareOf = (c: number) => (c / committed) * 100
-  const scale = Math.max(32, Math.ceil(shareOf(groups[0].cost) / 10) * 10 + 4)
+  // Shares of committed capital; only shown when something is committed (an empty portfolio has no shares, not 0%).
+  const shareOf = (c: number) => (committed > 0 ? (c / committed) * 100 : 0)
+  const scale = Math.max(32, Math.ceil(shareOf(groups[0]?.cost ?? 0) / 10) * 10 + 4)
+  const top = exps[0]
   const over = exps.filter((e) => shareOf(e.cost) > limit)
   const top3 = exps.slice(0, 3).reduce((a, e) => a + e.cost, 0)
   // Downside uses each event's worst settlement (opposing holdings offset), ordered by that loss.
@@ -113,14 +115,15 @@ export default function Risk() {
         <PageHead caption={`Risk · ${acct.openCount} positions across ${exps.length} events`} title="What you’re exposed to"
           actions={<><Seg label="Group by" options={['By event', 'By category', 'By platform'] as const} value={groupBy} onChange={setGroupBy} /><Button variant="primary" onClick={stressTest} disabled={stressIds.length === 0} title={`Choose a scenario and which of the ${stressIds.length} positions behind the payoff table to add`}><Icon name="flask" size={15} />Stress-test in Lab…</Button></>} />
 
+        {exps.length === 0 && <Callout icon="info">No open positions in the selected sources, so there is no event exposure to analyse. This is an empty portfolio, not missing data.</Callout>}
         <p className="summary">You have <b>{fmt(committed)}</b> committed across {exps.length} events. {over.length > 0
           ? <><b>{over.length === 1 ? 'One event' : `${over.length} events`}</b> ({over.map((e) => e.event.short).join(', ')}) {over.length === 1 ? 'is' : 'are'} above your <button type="button" className="link" onClick={() => setEditLimit(limit)}>{limit}% guardrail</button>.</>
-          : <>No event is above your <button type="button" className="link" onClick={() => setEditLimit(limit)}>{limit}% guardrail</button>.</>} If your three most exposed events all settled against you, you’d lose <b className="loss">{sfmt(-top3Loss)}</b> ({pct((top3Loss / acct.totalValue) * 100, 0)} of portfolio value).{week.n > 1 && <> <b>{fmt(week.cost)}</b> resolves within one week ({fmtDate(week.from)}–{fmtDate(week.to)}).</>}</p>
+          : <>No event is above your <button type="button" className="link" onClick={() => setEditLimit(limit)}>{limit}% guardrail</button>.</>} If your three most exposed events all settled against you, you’d lose <b className="loss">{sfmt(-top3Loss)}</b> {acct.totalValue > 0 && <> ({pct((top3Loss / acct.totalValue) * 100, 0)} of portfolio value)</>}.{week.n > 1 && <> <b>{fmt(week.cost)}</b> resolves within one week ({fmtDate(week.from)}–{fmtDate(week.to)}).</>}</p>
 
         <div className="tiles">
-          <Tile label="Capital committed" info="Cost basis of open positions." value={fmt(committed)} foot={`${pct((committed / acct.totalValue) * 100, 0)} of portfolio value`} />
+          <Tile label="Capital committed" info="Cost basis of open positions." value={fmt(committed)} foot={acct.totalValue > 0 ? `${pct((committed / acct.totalValue) * 100, 0)} of portfolio value` : 'portfolio value is zero'} />
           <Tile label="Worst feasible outcome" info="Lowest settlement P&L of the whole portfolio across joint outcomes that are possible given confirmed relationships. Unclassified pairs can go either way. Not affected by the table filter below." value={portfolio ? sfmt(portfolio.min) : na} tone={portfolio ? 'loss' : undefined} foot={worstValue != null ? `You’d hold ${fmt(worstValue)} (cash + payouts)` : 'Too many events to evaluate every combination exactly'} />
-          <Tile label="Largest single event" info="Capital committed to one event (the same outcome across platforms counts once) ÷ total committed." value={pct(shareOf(exps[0].cost))} tone={shareOf(exps[0].cost) > limit ? 'warn' : undefined} foot={`${exps[0].event.short} · ${shareOf(exps[0].cost) > limit ? `over ${limit}% guardrail` : `within ${limit}%`}`} />
+          <Tile label="Largest single event" info="Capital committed to one event (the same outcome across platforms counts once) ÷ total committed." value={top ? pct(shareOf(top.cost)) : '—'} tone={top && shareOf(top.cost) > limit ? 'warn' : undefined} foot={top ? `${top.event.short} · ${shareOf(top.cost) > limit ? `over ${limit}% guardrail` : `within ${limit}%`}` : 'no open positions'} />
           <Tile label="Top-3 concentration" info="Share of committed capital in your three largest events." value={pct(shareOf(top3), 0)} foot={`${fmt(top3)} of committed`} />
           <Tile label="Resolving ≤ 30 days" info="Capital committed to events that resolve within 30 days." value={fmt(soon.reduce((a, e) => a + e.cost, 0))} foot={soon.length ? `${soon.length} events · first ${fmtDate([...soon].sort((a, b) => a.days - b.days)[0].resolves)}` : 'none'} />
         </div>

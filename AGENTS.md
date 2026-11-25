@@ -16,6 +16,9 @@ App: `web/` (Vite + React + TS). Run `npm run dev` in `web/`. Current state, lim
 - Detail panels start in the scope they were opened from (`scope`), and wider views are explicit.
 - Overlays use the shared layer stack in `overlays.tsx`. Don't add page-level Esc or scroll-lock handlers.
 - Browser storage goes through `lib/storage.ts` (`scevia-` keys only).
+- Hypothetical positions live only in scenarios (`simulate()` results). Never add them to `PortfolioData`, and never let them change Overview, Analytics or Risk.
+- Market lookup goes through the `MarketCatalog` interface (`data/markets.ts`). Never fetch user-supplied URLs, and always label sample market data as such.
+- A missing number (no price, too many events, invalid input) is unavailable, not zero. Use `diff()`-style null-safe arithmetic for changes.
 
 ## Numbers
 - Every figure comes from `web/src/lib/finance.ts`, which reads data only via `web/src/data/portfolio.ts`. Never hard-code a metric, summary sentence or insight in a page, and never import `data/sample.ts` directly.

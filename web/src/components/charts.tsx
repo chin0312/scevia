@@ -20,11 +20,13 @@ export function useWidth<T extends HTMLElement>(fallback: number) {
 
 export interface Series { data: number[]; color: string; area?: number; dash?: string; step?: boolean; width?: number }
 
-export function LineChart({ label = 'Line chart', series, w: wFallback = 820, h = 250, min, max, yTicks, yFmt, xTicks, events, tooltip, hoverSeries = series.length - 1, pad }: {
+export function LineChart({ label = 'Line chart', series, w: wFallback = 820, h: hMin = 250, min, max, yTicks, yFmt, xTicks, events, tooltip, hoverSeries = series.length - 1, pad }: {
   label?: string; series: Series[]; w?: number; h?: number; min: number; max: number; yTicks: number[]; yFmt: (v: number) => string
   xTicks: [number, string][]; events?: number[]; tooltip?: (i: number) => ReactNode; hoverSeries?: number; pad?: Partial<{ l: number; r: number; t: number; b: number }>
 }) {
   const [wrap, w] = useWidth<HTMLDivElement>(wFallback)
+  // Grows a little with width on wide screens so the line keeps a readable aspect ratio (up to 1.5× the minimum).
+  const h = Math.round(Math.min(hMin * 1.5, Math.max(hMin, w * 0.28)))
   const P = { l: 48, r: 12, t: 12, b: 26, ...pad }
   const n = series[0].data.length
   const x = (i: number) => P.l + (i / (n - 1)) * (w - P.l - P.r)

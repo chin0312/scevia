@@ -11,7 +11,13 @@ Required states for every interactive component: **default, hover, focus-visible
 - **SectionRail** `SectionRail` (`.rail`, `.rail-sub`): this page's sections as jump links. Cards that share a row are **one group** (the row container has the group id) with one child entry per card, so side-by-side cards never compete for the active state. Scroll-spy tracks groups only. A click (or a `#hash` link) scrolls to the target, focuses it (`tabindex=-1`) and flashes it (`.section-flash`), and keeps that entry active until the user scrolls themselves (wheel, touch, PageUp/Down, arrows, Home/End, Space); reaching the bottom of the page never overrides it. Exactly one entry has `aria-current="location"`. Programmatic jumps (“Show in Holdings”) call `scrollToSection(id)` so they behave like rail clicks; scrollbar drags and Back/Forward release the lock too. The spy offset is measured from whatever is sticky (top bar, and the rail when it is a horizontal bar). Also holds saved scenarios and one context card. One level of children at most.
 
 ## Responsive behaviour (`web/src/styles/responsive.css`)
-Designed for 1280–1600px; smaller screens reflow instead of shrinking.
+Desktop-first and **fluid**:
+- The shell grows with the viewport up to `--layout-content-max` (2560px, an ultrawide cap only).
+- Running text keeps `--layout-text-max`.
+- From 1680px, gutters and the rail grow; from 2200px, tiles get more room.
+- Charts draw at their measured width, and line charts grow a little in height on wide screens.
+
+Smaller screens reflow instead of shrinking.
 - **≤1400px:** three-card rows weight the first card (1.3fr).
 - **≤1100px:**
   - one column;
@@ -91,7 +97,7 @@ Designed for 1280–1600px; smaller screens reflow instead of shrinking.
 - **InfoModal** (Help menu): the shared definitions list, and Data & privacy, which describes only what the current build does. *Clear saved scenarios & settings* asks for confirmation, removes only `scevia-` keys (`lib/storage.ts`) and reports failure instead of claiming success.
 - **DataSources** `useConnect()` (`ConnectSources.tsx`): the active source (sample portfolio) and the user-selectable source types: Polymarket public wallet, Kalshi read-only account, File import (CSV, any provider). Actions that don't work in this build are disabled with a reason. Never simulate a connection, upload, sync or verification.
 - **Staleness** `.stale`: warn-coloured source age when data is older than 24h. Pair it with an explanation of what “stale” means for the numbers.
-- **AdjustmentRow** (Scenario Lab): slider + target-shares field + assumed-fill-price field. Invalid input shows inline (`role="alert"`); that row is excluded from results and blocks Save. A funding shortfall is a status note (`role="status"`), not an error: the trade stays in the results as if funded.
+- **AdjustmentRow**: replaced by `PositionRow`. Invalid input shows inline (`role="alert"`); that row is excluded from results and blocks Save. A funding shortfall is a status note (`role="status"`), not an error: the trade stays in the results as if funded.
 - **Scenario status** (`lib/scenarios.ts`): `Not saved` / `Saved` / `Unsaved changes`, based on name + adjustments vs. the saved snapshot. Revert restores the snapshot.
 
 ## Feedback
@@ -101,6 +107,30 @@ Designed for 1280–1600px; smaller screens reflow instead of shrinking.
 - **Toast** `.toast`: confirmations ("Scenario saved"). Auto-dismisses after 4 s. Never used for errors that need action.
 
 ## Scenario Lab specific
+- **Scenario setup** (`Setup` in `ScenarioLab.tsx`):
+  - starting portfolio (Seg);
+  - added capital per platform (`FundingInput`);
+  - fee treatment;
+  - BTC × ETH relationship: *Shared* or *This scenario only*, with “Use shared” and “Edit shared…”.
+
+  A read-only **Facts** block separates source facts and fixed methodology from user assumptions. It always comes before results.
+- **Portfolio builder row** `PositionRow` (`pages/lab/Builder.tsx`, `.brow`): one grid row per position.
+  - **Columns:** instrument (Held / New), current shares, target-shares input, trade chip, assumed-price input with “Use reference …”, notional, estimated fee, remove.
+  - **Layout:** a table on wide cards; at ≤1000px card width (container query) each row restacks into a two-column card.
+  - **States:** incomplete rows say what is missing, invalid rows are tinted with `role="alert"`, and shortfall rows carry a status note.
+- **AddPositionModal** (`pages/lab/AddPosition.tsx`), with tabs *Your holdings* / *Search markets* / *Paste link*.
+  - It talks only to the `MarketCatalog` interface (`lib/markets.ts`) and labels results with the catalog's label (“Sample market data”).
+  - Outcomes are buttons (`.outcome-btn`), disabled for closed or resolved markets and for instruments already in the scenario.
+  - Link states: invalid, unsupported provider, not found, unavailable, multiple markets, resolved.
+- **AllocationImpact** (`pages/lab/Impact.tsx`): before/after market-value table by category, platform or event, with % of open-position value, change in points, New/Exited chips, cash share, and paired bars (hidden on narrow cards).
+- **OutcomeMatrix / Dumbbell** (`pages/lab/Impact.tsx`):
+  - Events come from the scenario's own start and result, never from a fixed list.
+  - Two events are needed for the matrix; empty states otherwise.
+- **Compare** (`ScenarioLab.tsx`):
+  - setup rows (starts from, added capital, fees · relationship, with `*` marking an override);
+  - each value with its change *vs. its own start*;
+  - “change unavailable” when either side is unavailable;
+  - a callout when starts differ.
 - **AdjustmentRow** `.adj`: position + action chip (Buy / Sell / Exit / No change) + Slider + hypothetical price Field + cash impact.
 - **BeforeAfterTable** `.ba`: metric · current · scenario · change (DeltaBadge, colour by "better for the user", not by sign).
 - **OutcomeMatrix** `.matrix`: 2×2 (or 2×N) joint outcomes, each tile shows scenario P&L, "was" P&L, and the change. Unknown dependencies → `warn` chip on the card.

@@ -93,11 +93,11 @@ export function Callout({ tone = 'info', icon, children }: { tone?: 'info' | 'wa
   return <div className={cx('callout', tone)}><Icon name={icon ?? (tone === 'warn' ? 'alert' : 'info')} size={15} /><span>{children}</span></div>
 }
 
-export function Button({ variant, size, icon, children, onClick, disabled, title, type = 'button' }: {
-  variant?: 'primary' | 'ghost' | 'accent'; size?: 'sm'; icon?: IconName; children?: ReactNode; onClick?: () => void; disabled?: boolean; title?: string; type?: 'button' | 'submit'
+export function Button({ variant, size, icon, children, onClick, disabled, title, type = 'button', 'aria-label': ariaLabel }: {
+  variant?: 'primary' | 'ghost' | 'accent'; size?: 'sm'; icon?: IconName; children?: ReactNode; onClick?: () => void; disabled?: boolean; title?: string; type?: 'button' | 'submit'; 'aria-label'?: string
 }) {
   return (
-    <button type={type} title={title} disabled={disabled} onClick={onClick}
+    <button type={type} title={title} disabled={disabled} onClick={onClick} aria-label={ariaLabel}
       className={cx('btn', variant && `btn-${variant}`, size === 'sm' && 'btn-sm')}>
       {icon && <Icon name={icon} size={15} />}{children}
     </button>

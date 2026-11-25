@@ -104,17 +104,71 @@ Relationship classes:
 
 ## Scenarios
 
-A scenario is a list of adjustments: target shares for a position at an **assumed fill price** (0.01–0.99).
+A scenario is a **hypothetical portfolio**:
+- a starting point;
+- optional added capital;
+- scenario-level assumptions;
+- positions, each with a target quantity at an **assumed price** (0.01–0.99).
 
+It is evaluated by `simulate()`, the same engine for every mode. Actual holdings, cash and history never change.
+
+**Starting points.**
+- **Current portfolio:** the actual holdings and per-platform cash from the selected sources.
+- **Empty portfolio:** no holdings, no cash, no history.
+
+Each scenario is measured against **its own starting point**: the baseline plus added capital, with no trades.
+
+**Added capital** is per platform and explicit:
+- It is contributed capital: it raises cash and the starting value equally, and is never counted as a gain.
+- It is validated: 0 to 100,000,000. Invalid values are ignored by the engine, flagged in the UI and block Save.
+- Cash is never moved between platforms. A purchase beyond one platform's cash is that platform's shortfall.
+
+**Positions.**
+- **Held instrument:** an actual position, by its position id. It starts at its current quantity and mark ("No change").
+- **New instrument:** keyed by `provider:marketId:outcome` and carrying an instrument reference:
+  - provider, event, market and outcome;
+  - category and resolution date;
+  - reference price and timestamp;
+  - the source (sample or provider).
+
+  It starts at zero shares. It is valued at its reference price; if there is none, market value and allocation are **unavailable**, never 0.
+- **Quantities** are whole shares from 0 to 10,000,000. This is a temporary assumption: real providers may allow fractional shares.
+- **Incomplete or invalid rows are excluded from results and block Save.** A missing quantity or price is never read as 0.
+
+**Trades.**
 - **Buy:** cost basis += shares × price; cash −= shares × price + estimated fee. Realized P&L is unchanged.
 - **Sell / exit:** realized += shares × (price − average cost) − fee; cost basis falls in proportion; cash += proceeds − fee.
-- **Fees:** optional estimate at each platform's rate (`feeRates`, as a share of notional).
-- **Results are expressed as portfolio value:**
-  - "Value at mark" changes only by the gap between the assumed price and the mark, plus fees, so a purchase never shows as profit;
-  - "Value if worst/best feasible outcome" = cash + $1 per winning share.
-- **Invalid input** (price outside 0.01–0.99): that adjustment is left out of the results, and the scenario can't be saved until it's fixed.
-- **Funding shortfall:**
-  - when purchases exceed a platform's cash, the trades stay in the results as if funded;
-  - cash goes negative by the shortfall, so values remain comparable and net of the extra funding;
-  - the shortfall per platform is shown. Scenarios with a shortfall can be saved: it's an exploration, not an order.
-- **Saved scenario** = name + adjustments. It is always evaluated under the current global assumptions (fee estimate, relationships), so a comparison uses one set of assumptions.
+- **Fees:** per scenario, estimated (default) or excluded, at each platform's rate (`feeRates`, a share of notional). These are sample rates. Slippage and order-book depth are not modelled.
+
+**Results are expressed as portfolio value.**
+- "Value at mark" changes only by the gap between the assumed price and the reference price, plus fees.
+- "Value if worst/best feasible outcome" = cash + $1 per winning share. These are unavailable above 16 events.
+- Any change whose either side is unavailable is itself unavailable. It is never coerced to 0.
+
+**Funding shortfall.**
+- When purchases exceed a platform's cash, the trades stay in the results as if funded, and cash goes negative.
+- The shortfall is shown per platform.
+- It is a property of the scenario, not an input error, so the scenario can still be saved.
+
+**Assumptions.**
+- **Shared:** facts from sources (holdings, cash, marks) and the portfolio's relationship classification, used by Risk and by every scenario that doesn't override it.
+- **Per scenario:**
+  - starting point;
+  - added capital;
+  - fee treatment;
+  - an optional **BTC × ETH override**, which affects only that scenario and never Risk or other scenarios.
+
+**Allocation impact.**
+- Market value (shares × reference price) is grouped by category, platform or event, before and after.
+- **Denominator:** open-position market value, with cash excluded. Cash share = cash ÷ (cash + open-position value).
+- Allocation is not capital committed and not settlement loss.
+
+**Comparison.**
+- Each column shows its starting point, added capital and assumptions.
+- Each change is shown "vs. start", that is, against that scenario's own starting point, so added capital and different baselines are not read as performance.
+- Columns with different starts are flagged.
+
+**Saved state.**
+- A save snapshots name, positions, starting point, added capital and assumptions.
+- Revert restores the snapshot. Reset returns a never-saved scenario to its start: empty, the duplicate's source or the example.
+- Stored scenarios from older formats migrate to "current portfolio" with shared assumptions.

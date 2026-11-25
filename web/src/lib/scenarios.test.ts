@@ -13,7 +13,7 @@ describe('scenario lifecycle', () => {
   it('saving snapshots name and adjustments', () => {
     const s = SC.save({ ...SC.create('k', 'c', 'Plan A'), adjs: [adj('x', 10)] }, 'now')
     expect(SC.status(s)).toBe('saved')
-    expect(s.saved).toEqual({ name: 'Plan A', adjs: [adj('x', 10)] })
+    expect(s.saved).toEqual({ name: 'Plan A', adjs: [adj('x', 10)], baseline: 'portfolio', funding: {}, assumptions: {} })
   })
   it('renaming a saved scenario marks it modified; reverting restores the saved name', () => {
     const saved = SC.save(SC.create('k', 'c', 'Plan A'), 'now')
@@ -35,10 +35,11 @@ describe('scenario lifecycle', () => {
   })
   it('an unsaved scenario reverts to its starting adjustments', () => {
     const start = [adj('x', 10)]
-    const s = { ...SC.create('draft', 'c'), adjs: [adj('x', 99)] }
-    expect(SC.canRevert(s, start)).toBe(true)
-    expect(SC.revert(s, start).adjs).toEqual(start)
-    expect(SC.canRevert({ ...s, adjs: start }, start)).toBe(false)
+    const fresh = SC.fromExample('draft', 'c', { name: 'Example', adjs: start, baseline: 'portfolio' })
+    expect(SC.canRevert(fresh)).toBe(false)
+    const s = { ...fresh, adjs: [adj('x', 99)] }
+    expect(SC.canRevert(s)).toBe(true)
+    expect(SC.revert(s).adjs).toEqual(start)
   })
   it('duplicates are independent and unsaved', () => {
     const src = SC.save({ ...SC.create('a', 'c', 'Plan A'), adjs: [adj('x', 10)] }, 'now')

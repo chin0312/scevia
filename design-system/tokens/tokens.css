@@ -47,7 +47,8 @@
   --motion-easing-in: cubic-bezier(0.4, 0, 1, 1);
   --layout-topbar-height: 60px;
   --layout-rail-width: 220px;
-  --layout-content-max: 1440px;
+  --layout-content-max: 2560px;
+  --layout-text-max: 760px;
   --layout-control-height: 34px;
   --layout-control-height-sm: 28px;
   --z-base: 0;
