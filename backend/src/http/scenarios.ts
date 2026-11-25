@@ -7,7 +7,7 @@ import { z } from 'zod'
 import { digest } from '../accounting/decisions.js'
 import type { Database } from '../db/client.js'
 import { portfolioScenarios as scenarios, portfolios } from '../db/schema.js'
-import { evaluate, validateInstrumentIdentities, ScenarioError, type ScenarioBaseline, type ScenarioInput, type ScenarioInstrument } from '../scenarios/engine.js'
+import { evaluate, validateScenarioOperations, validateInstrumentIdentities, ScenarioError, type ScenarioBaseline, type ScenarioInput, type ScenarioInstrument } from '../scenarios/engine.js'
 
 const id = z.string().trim().min(1).max(200)
 const bucketId = z.string().min(1).max(450)
@@ -98,14 +98,14 @@ function comparisonDimensions(rows: Array<{ baseline: ScenarioBaseline; input: S
     sameValuationAssumptions: same(({ baseline, input }) => [baseline.asOf, baseline.instruments.map(({ id, mark, markAt, markSource }) => [id, mark, markAt, markSource]),
       input.marks]),
     sameCapitalBudget: rows.every((row) => row.result.weightBudget !== null && row.result.weightBudget === rows[0]!.result.weightBudget)
-      && same(({ result }) => [result.bridge.addedCapital, result.bridge.withdrawnCapital]),
+      && same(({ baseline, result }) => [baseline.asset, result.bridge.addedCapital, result.bridge.withdrawnCapital]),
     sameFundingAssumptions: same(({ input }) => [input.funding, input.hypotheticalBuckets ?? []]),
     sameFeeMethodology: same(({ baseline, input }) => [...new Set(input.operations.map(({ instrument, fee }) => {
       const id = baseline.instrumentAliases?.[instrument] ?? instrument
       const schedule = baseline.instruments.find((row) => row.id === id)?.feeSchedule
       return fee.mode === 'provider' ? digest([fee.mode, fee.role, schedule?.version ?? 'unavailable', schedule?.denomination]) : fee.mode
     }))].sort()),
-    sameSettlementScope: same(({ baseline, input, result }) => [baseline.rules, baseline.constraints, input.rules, input.constraints, input.outcomes,
+    sameSettlementScope: same(({ baseline, input, result }) => [baseline.asset, baseline.rules, baseline.constraints, input.rules, input.constraints, input.outcomes,
       result.settlement.verified.coverage, result.settlement.verified.unsupported, result.settlement.conditional.coverage,
       result.settlement.conditional.unsupported]),
   }
@@ -321,7 +321,7 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
         if (!(error instanceof ScenarioError)) throw error
         limitation = error.message
         changes.operations.forEach((operation, operationIndex) => {
-          try { run(candidate, { ...changes, operations: [operation] }) }
+          try { validateScenarioOperations(candidate, { ...changes, operations: [operation] }) }
           catch (conflict) {
             if (!(conflict instanceof ScenarioError)) throw conflict
             if (conflict.operationIndex !== undefined) conflicts.push({ operationIndex, bucket: operation.bucket,

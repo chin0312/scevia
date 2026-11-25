@@ -11,7 +11,7 @@ All paths below are under `/v1/portfolios/{portfolioId}/scenarios`.
 | Method and path | Operation |
 | --- | --- |
 | POST `/baseline` | Preview an actual or scratch source and obtain its baseline token |
-| POST `/` | Save name, source and input. An optional baseline token guards against changes since preview |
+| POST `/` | Save name, source and input. An optional baseline token saves the exact preview |
 | GET `/`, GET `/{id}` | List metadata or retrieve a saved scenario |
 | PATCH `/{id}` | Rename or replace hypothetical input using the current revision |
 | POST `/{id}/delete`, POST `/{id}/duplicate` | Delete using the current revision or copy with a new name |
@@ -30,7 +30,7 @@ Omit an operation to reset it. Use an explicit exit or zero target quantity to s
 - Custom rate fees round up to eight decimal places. Fixed fees use their supplied decimal values. An explicit exclusion gives zero. For selected eligible public Polymarket outcomes the engine can freeze a market-specific USDC schedule and estimate the supported unit-exponent, taker-only formula with five-decimal rounding. Unknown schedules and unsupported fee formulas stay unavailable. [Polymarket fee methodology](https://docs.polymarket.com/trading/fees)
 - The source can select stored catalog outcome UUIDs, explicit local outcomes, or up to six explicit provider outcome IDs via supported Polymarket links. The latter use the same restricted resolver as the public market API and require authorized provider access. Discovery and outcome choices remain at `/v1/market-data/search` and `/v1/market-data/resolve`. Latest public midpoints are retained with retrieval time. Values retrieved after the baseline cutoff cannot supply its historical mark. Local or user-assumed marks remain explicit.
 - Allocation uses Phase 4 concentration calculations. Market and event views report the identified subset and unmapped marked value. Available portfolio values and ratios use the selected reporting asset. Comparisons return a capital-adjusted normalized change only when an eligible positive budget exists.
-- Settlement runs the Phase 4 binary solver for baseline and hypothetical holdings. An independent conditional result applies local payout assumptions, additional logical constraints and explicit outcome selections. These inputs can restrict feasible outcomes and never write to reviewed rules. Unsupported holdings and components stay identified. A fixed payoff is a contractual result within the modeled scope.
+- Settlement runs the Phase 4 binary solver for baseline and hypothetical holdings. An independent conditional result applies declared payout assumptions, additional logical constraints and explicit outcome selections. These inputs can restrict feasible outcomes and never write to reviewed rules. Unsupported holdings and components stay identified. A fixed payoff is a contractual result within the modeled scope.
 
 ## Limits
 

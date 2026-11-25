@@ -216,6 +216,18 @@ describe('migrations and canonical persistence', () => {
       source: { mode: 'actual', asset: 'USDC', asOf, accounts: ['risk'], venue: 'isolated' }, input: {} } })
     expect(frozen.statusCode, frozen.body).toBe(201)
     const frozenId = frozen.json().id
+    const withIndependentCapital = await app.inject({ method: 'POST', url: scenarioUrl + '/evaluate', headers, payload: {
+      scenarioId: frozenId, input: {
+        hypotheticalBuckets: [{ id: 'hypothetical:new', account: 'new', venue: 'abstract', asset: 'USDC', startingCapital: '1000' }],
+        operations: [{ bucket: 'hypothetical:new', instrument: yes.id, kind: 'buy', amount: '10', price: '0.6', fee: { mode: 'excluded' } }],
+      },
+    } })
+    expect(withIndependentCapital.statusCode, withIndependentCapital.body).toBe(200)
+    expect(withIndependentCapital.json()).toMatchObject({ funding: [
+      { actualOrScratchStartingCash: '0', endingCash: '0' }, { hypotheticalStartingCapital: '1000', endingCash: '994' },
+    ] })
+    const unchangedScenario = await app.inject({ method: 'GET', url: scenarioUrl + '/' + frozenId, headers })
+    expect(unchangedScenario.json().baseline.buckets).toHaveLength(1)
     const mappedRows = await app.inject({ method: 'GET', url: prefix + '/accounting/records?search=open-y', headers })
     const mappedEdit = { changes: [{ key: mappedRows.json().items[0].key, action: 'correct', correction: { quantity: '110' } }] }
     const mappedPreview = await app.inject({ method: 'POST', url: prefix + '/accounting/adjustments/preview', headers, payload: mappedEdit })

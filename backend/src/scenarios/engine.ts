@@ -72,7 +72,12 @@ export function scopedReference(observations: Array<{ scope: string; price: stri
     referenceScopes: [...new Set(observations.map(({ scope }) => scope))].sort(), markSource: 'scoped_holding_consensus' as const }
 }
 
-export function evaluate(baseline: ScenarioBaseline, changes: ScenarioInput) {
+export const evaluate = (baseline: ScenarioBaseline, input: ScenarioInput) => evaluateInternal(baseline, input)!
+export function validateScenarioOperations(baseline: ScenarioBaseline, input: ScenarioInput) {
+  evaluateInternal(baseline, input, true)
+}
+
+function evaluateInternal(baseline: ScenarioBaseline, changes: ScenarioInput, operationsOnly = false) {
   const resolve = (id: string) => Object.hasOwn(baseline.instrumentAliases ?? {}, id) ? baseline.instrumentAliases![id]! : id
   const input = { ...changes, operations: changes.operations.map((op) => ({ ...op, instrument: resolve(op.instrument) })),
     marks: changes.marks.map((row) => ({ ...row, instrument: resolve(row.instrument) })),
@@ -221,11 +226,13 @@ export function evaluate(baseline: ScenarioBaseline, changes: ScenarioInput) {
       realized = add(realized, pnl)
     }
     holdings.set(id, { ...prior, quantity: nextQuantity, basis })
-    return { ...op, executionApplicability: abstract ? 'abstract' : instrument.lifecycle === 'open' ? 'open_market_assumption' : 'lifecycle_unverified',
+    return { ...op, executionApplicability: abstract ? 'abstract' : instrument.venue && !instrument.settlementAsset ? 'denomination_unverified'
+      : instrument.lifecycle === 'open' ? 'open_market_assumption' : 'lifecycle_unverified',
       initialQuantity: prior.quantity.toFixed(), proposedQuantity: nextQuantity.toFixed(),
       delta: delta.toFixed(), notional: notional.toFixed(), feeAmount: fixed(fee), feeStatus: delta.isZero() ? 'no_trade' : fee === null ? 'unavailable' : op.fee.mode, realized: fixed(pnl),
       remainingBasis: fixed(basis), netProceeds: delta.lt(0) ? fixed(fee === null ? null : notional.minus(fee)) : null }
   })
+  if (operationsOnly) return undefined
   const proposed = [...holdings.values()]
   for (const row of proposed) {
     const override = overrides.get(row.instrument)
