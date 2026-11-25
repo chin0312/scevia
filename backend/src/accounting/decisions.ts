@@ -69,4 +69,3 @@ export function potentialOverlaps(observations: Evidence[]) {
   }
   return matches
 }
-

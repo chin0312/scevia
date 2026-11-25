@@ -36,6 +36,13 @@ const adjustmentRequest = z.object({
   revision: z.string().regex(/^[0-9a-f]{64}$/).optional(),
 }).strict().refine((value) => !!value.changes !== !!value.selection)
 const missing = { error: { code: 'not_found' } }
+function concurrentWrite(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const pg = ('cause' in error && error.cause ? error.cause : error) as { code?: string; constraint?: string }
+  return pg.code === '40001' || pg.code === '40P01'
+    || (pg.code === '23505' && pg.constraint === 'accounting_decision_revision_unique')
+}
+
 
 export function registerAccountingRoutes(app: FastifyInstance, database: Database) {
   async function owned(portfolioId: string, ownerId: string) {
@@ -176,6 +183,9 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       }
       await tx.update(batches).set({ confirmedAt: now }).where(eq(batches.id, batchId))
       return { status: 'confirmed', confirmedAt: now } as const
+    }, { isolationLevel: 'serializable' }).catch((error: unknown) => {
+      if (concurrentWrite(error)) return { status: 'stale' } as const
+      throw error
     })
     if (result.status === 'missing') return reply.code(404).send(missing)
     if (result.status === 'stale') return reply.code(409).send({ error: { code: 'import_preview_stale' } })
@@ -417,14 +427,13 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
             portfolioId, recordKey, decision, revision: plan.input.decisionRevision + index + 1,
           })))
           return { applied: plan.changes.size }
-        }, { isolationLevel: 'repeatable read' })
+        }, { isolationLevel: 'serializable' })
         if (!committed) return reply.code(409).send({ error: { code: 'adjustment_preview_stale' } })
         return committed
       } catch (error) {
         const code = error instanceof Error ? error.message : ''
         if (/^[a-z_]+$/.test(code)) return reply.code(422).send({ error: { code } })
-        if (error && typeof error === 'object' && 'cause' in error
-          && (error.cause as { code?: string } | null)?.code === '40001') {
+        if (concurrentWrite(error)) {
           return reply.code(409).send({ error: { code: 'adjustment_preview_stale' } })
         }
         throw error
