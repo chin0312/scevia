@@ -6,7 +6,7 @@ import { z } from 'zod'
 import { digest } from '../accounting/decisions.js'
 import type { Database } from '../db/client.js'
 import { portfolioScenarios as scenarios, portfolios } from '../db/schema.js'
-import { evaluate, ScenarioError, type ScenarioBaseline, type ScenarioInput, type ScenarioInstrument } from '../scenarios/engine.js'
+import { evaluate, validateInstrumentIdentities, ScenarioError, type ScenarioBaseline, type ScenarioInput, type ScenarioInstrument } from '../scenarios/engine.js'
 
 const id = z.string().trim().min(1).max(200)
 const bucketId = z.string().min(1).max(450)
@@ -57,6 +57,8 @@ const create = z.object({ name, source, input, baselineToken: z.string().length(
 const update = z.object({ name: name.optional(), revision, input: input.optional() }).strict()
 const rebase = z.object({ revision, asOf: time, previewToken: z.string().length(64).optional(), copyName: name.optional() }).strict()
 const revisionOnly = z.object({ revision }).strict()
+const extend = z.object({ revision, catalog: sourceCommon.catalog, local: sourceCommon.local,
+  publicOutcomes: sourceCommon.publicOutcomes, input: input.optional() }).strict()
 const evaluation = z.union([z.object({ source, input }).strict(), z.object({ scenarioId: z.uuid(), input: input.optional() }).strict()])
 const ids = z.object({ scenarioIds: z.array(z.uuid()).min(2).max(8) }).strict()
 type Scope = { portfolioId: string; scenarioId?: string }
@@ -103,7 +105,11 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
       if (!pending.has(selection.url)) pending.set(selection.url, resolvePublic!(selection.url))
       return selectPublicOutcome(await pending.get(selection.url), selection, value.asset, new Date(value.asOf).toISOString())
     }))
-    return db.transaction((tx) => baseline(tx, portfolioId, value, resolved), { isolationLevel: 'repeatable read', accessMode: 'read only' })
+    return db.transaction(async (tx) => {
+      const frozen = await baseline(tx, portfolioId, value, resolved)
+      validateInstrumentIdentities(frozen.instruments)
+      return frozen
+    }, { isolationLevel: 'repeatable read', accessMode: 'read only' })
   }
   const find = async (portfolioId: string, scenarioId: string) => (await db.select().from(scenarios)
     .where(and(eq(scenarios.portfolioId, portfolioId), eq(scenarios.id, scenarioId))).limit(1))[0]
@@ -187,6 +193,39 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
     if (!current) return notFound(reply)
     return run(current.baseline, value.input ?? current.input)
   }, evaluationResponse)
+  route('POST', '/:scenarioId/instruments', extend, async ({ portfolioId, scenarioId }, value, reply) => {
+    const current = await find(portfolioId, scenarioId!)
+    if (!current) return notFound(reply)
+    if (current.revision !== value.revision) return stale(reply)
+    const { catalog, local, publicOutcomes } = value
+    if (!catalog.length && !local.length && !publicOutcomes.length) throw new ScenarioError('empty_instrument_extension')
+    const updatedSource = { ...current.source, catalog: [...current.source.catalog, ...catalog],
+      local: [...current.source.local, ...local], publicOutcomes: [...current.source.publicOutcomes, ...publicOutcomes] }
+    validateSource(updatedSource)
+    // Capture only new instrument evidence. Keep every original valuation, balance and rule pinned.
+    const added = await capture(portfolioId, { mode: 'scratch', asset: current.baseline.asset, asOf: current.baseline.asOf,
+      buckets: [{ id: 'catalog', account: 'catalog', venue: 'catalog', cash: '0' }], catalog, local, publicOutcomes })
+    const original = current.baseline
+    const instruments = [...original.instruments, ...added.instruments]
+    if (instruments.length > 250 || !unique(instruments.map((row) => row.id))) throw new ScenarioError('instrument_extension_conflict')
+    validateInstrumentIdentities(instruments)
+    const originalIds = new Set([...original.rules.map((rule) => rule.id), ...(original.missingRules ?? [])])
+    const newRules = added.rules.filter((rule) => !originalIds.has(rule.id))
+    const missingRules = [...new Set([...(original.missingRules ?? []), ...(added.missingRules ?? []).filter((id) => !originalIds.has(id))])]
+    const newIds = new Set([...newRules.map((rule) => rule.id), ...missingRules.filter((id) => !originalIds.has(id))])
+    const rules = [...original.rules, ...newRules]
+    const constraints = [...original.constraints, ...added.constraints.filter((edge) => newIds.has(edge.left) || newIds.has(edge.right))]
+    if (rules.length + missingRules.length > 256 || constraints.length > 1000) throw new ScenarioError('instrument_extension_graph_limit')
+    const expanded = { ...original, instruments, rules, constraints, missingRules,
+      settlementGraphLimited: original.settlementGraphLimited === true || added.settlementGraphLimited === true,
+      revisions: { ...original.revisions, instrumentExtensions: digest([original.revisions, added.revisions, added.instruments]) } }
+    const changes = value.input ?? current.input
+    run(expanded, changes)
+    const [row] = await db.update(scenarios).set({ source: updatedSource, baseline: expanded, input: changes,
+      revision: value.revision + 1, updatedAt: new Date() }).where(and(eq(scenarios.portfolioId, portfolioId),
+      eq(scenarios.id, current.id), eq(scenarios.revision, value.revision))).returning()
+    return row ?? stale(reply)
+  })
   route('POST', '/:scenarioId/rebase', rebase, async ({ portfolioId, scenarioId }, value, reply) => {
     const current = await find(portfolioId, scenarioId!)
     if (!current) return notFound(reply)

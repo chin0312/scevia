@@ -11,7 +11,7 @@ export const methodology = 'weighted-average-scenario-v1'
 export interface FundingBucket { id: string; venue: string; account: string; cash: string | null; pending: string | null }
 export interface ScenarioInstrument {
   id: string; mark: string | null; markAt?: string | null; market?: string; event?: string; resolvesAt?: string | null
-  venue?: string; settlementAsset?: string | null; outcome?: string | null; providerMarket?: string; lifecycle?: string
+  venue?: string; provider?: string; nativeMarket?: string; nativeInstrument?: string; settlementAsset?: string | null; outcome?: string | null; providerMarket?: string; lifecycle?: string
   latestPrice?: string | null; latestPriceAt?: string | null
   feeSchedule?: { version: 'polymarket-price-variance-v1'; rate: string; retrievedAt: string; source: 'gamma_market'; denomination: 'USDC' }
 }
@@ -44,6 +44,16 @@ const key = (bucket: string, instrument: string) => JSON.stringify([bucket, inst
 const amount = (input: string | null) => input === null ? null : new D(input)
 const fixed = (input: Decimal | null) => input?.toFixed() ?? null
 export class ScenarioError extends Error {}
+
+export function validateInstrumentIdentities(instruments: ScenarioInstrument[]) {
+  const nativeIdentities = new Set<string>()
+  for (const row of instruments) {
+    if (!row.provider || !row.nativeMarket || !row.nativeInstrument) continue
+    const id = JSON.stringify([row.provider, row.nativeMarket, row.nativeInstrument])
+    if (nativeIdentities.has(id)) throw new ScenarioError('duplicate_native_instrument')
+    nativeIdentities.add(id)
+  }
+}
 
 export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
   if (baseline.methodology !== methodology) throw new ScenarioError('unsupported_methodology')

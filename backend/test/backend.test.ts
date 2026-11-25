@@ -302,7 +302,12 @@ describe('migrations and canonical persistence', () => {
     expect(comparison.json()).toMatchObject({ compatibility: { sameAsset: true, sameBaseline: true } })
     const rejected = await app.inject({ method: 'GET', url: `/v1/portfolios/${OTHER_PORTFOLIO_ID}/scenarios/${id}`, headers })
     expect(rejected.statusCode).toBe(404)
-    const deleted = await app.inject({ method: 'POST', url: url + '/' + id + '/delete', headers, payload: { revision: 2 } })
+    const extended = await app.inject({ method: 'POST', url: url + '/' + id + '/instruments', headers,
+      payload: { revision: 2, local: [{ id: 'local:no', mark: '0.4' }] } })
+    expect(extended.statusCode, extended.body).toBe(200)
+    expect(extended.json()).toMatchObject({ revision: 3, baseline: { buckets: [{ cash: '100' }],
+      instruments: [{ id: 'local:yes' }, { id: 'local:no' }] } })
+    const deleted = await app.inject({ method: 'POST', url: url + '/' + id + '/delete', headers, payload: { revision: 3 } })
     expect(deleted.statusCode, deleted.body).toBe(204)
   })
 

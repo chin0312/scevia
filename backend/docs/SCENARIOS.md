@@ -16,6 +16,7 @@ All paths below are under `/v1/portfolios/{portfolioId}/scenarios`.
 | PATCH `/{id}` | Rename or replace hypothetical input using the current revision |
 | POST `/{id}/delete`, POST `/{id}/duplicate` | Delete using the current revision or copy with a new name |
 | POST `/evaluate` | Calculate from an unsaved source or saved ID with optional temporary input overrides |
+| POST `/{id}/instruments` | Append selected instruments while preserving the original accounting inputs and reviewed rules |
 | POST `/{id}/rebase` | Preview actual scope at an explicit cutoff, then confirm with the returned token and revision. Supply a copy name to retain the original |
 | POST `/compare` | Evaluate two to eight saved scenarios, with asset, baseline and assumptions compatibility |
 

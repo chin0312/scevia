@@ -703,7 +703,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
 
     const metadata = includedMarkets.length ? await tx.select({
       instrument: instruments.id, market: markets.id, event: events.id, outcome: instruments.outcomeName,
-      resolvesAt: events.resolvesAt, title: markets.title, lifecycle: markets.lifecycle, providerMarket: markets.externalId,
+      resolvesAt: events.resolvesAt, title: markets.title, lifecycle: markets.lifecycle, providerMarket: markets.externalId, provider: markets.providerCode, nativeInstrument: instruments.externalId,
       settlementAsset: instruments.settlementAssetCode, marketAsset: markets.settlementAssetCode,
     }).from(instruments).innerJoin(markets, eq(instruments.marketId, markets.id))
       .innerJoin(events, eq(markets.eventId, events.id)).where(inArray(markets.id, includedMarkets)) : []
@@ -766,7 +766,8 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       const entry = listings.get(id)!
       if ((entry.settlementAsset ?? entry.marketAsset) && (entry.settlementAsset ?? entry.marketAsset) !== asset) throw new ScenarioError('catalog_instrument_asset_mismatch')
       baselineInstruments.set(id, { id, mark: null, market: entry.market, event: entry.event, outcome: entry.outcome,
-        lifecycle: entry.lifecycle, providerMarket: entry.providerMarket, settlementAsset: entry.settlementAsset ?? entry.marketAsset,
+        lifecycle: entry.lifecycle, provider: entry.provider, nativeMarket: entry.providerMarket,
+        nativeInstrument: entry.nativeInstrument, providerMarket: entry.providerMarket, settlementAsset: entry.settlementAsset ?? entry.marketAsset,
         resolvesAt: entry.resolvesAt?.toISOString() ?? null })
     }
     for (const row of local) baselineInstruments.set(row.id, { id: row.id, mark: row.mark })
@@ -789,8 +790,8 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       const identity = isCanonical ? listings.get(row.instrument) : undefined
       const id = identity ? row.instrument : 'holding:' + digest([row.venue, row.account, row.instrument])
       const candidateMark = row.markStatus === 'estimated' ? row.mark : null
-      baselineInstruments.set(id, { ...baselineInstruments.get(id), id, mark: null, ...(identity ? { market: identity.market, event: identity.event,
-          resolvesAt: identity.resolvesAt?.toISOString() ?? null } : {}) })
+      baselineInstruments.set(id, { ...baselineInstruments.get(id), id, mark: null, ...(identity ? { market: identity.market, event: identity.event, provider: identity.provider, nativeMarket: identity.providerMarket,
+          nativeInstrument: identity.nativeInstrument, resolvesAt: identity.resolvesAt?.toISOString() ?? null } : {}) })
       return { bucket: bucketKey(row), instrument: id, quantity: row.quantity,
         quantityKnown: row.quantityStatus === 'reconstructed_from_declaration', basis: row.basisAvailability === 'selected_events_only' ? row.basis : null,
         originalInstrument: row.instrument, mark: candidateMark, markAt: row.markAt }

@@ -33,7 +33,7 @@ export function selectPublicOutcome(raw: unknown, selection: PublicSelection, as
   return { id: 'polymarket:' + selection.assetIdType + ':' + selection.assetId,
     mark: usable ? latest?.value ?? null : null, markAt: usable ? markAt : null, market: 'polymarket:' + market.conditionId,
     ...(parsed.data.item.eventId ? { event: 'polymarket:' + parsed.data.item.eventId } : {}),
-    venue: 'polymarket', outcome: outcome.name, providerMarket: market.providerMarketId, lifecycle: market.lifecycle,
+    venue: 'polymarket', provider: 'polymarket', nativeMarket: market.conditionId, nativeInstrument: selection.assetId, outcome: outcome.name, providerMarket: market.providerMarketId, lifecycle: market.lifecycle,
     settlementAsset: asset, latestPrice: latest?.value ?? null, latestPriceAt: markAt, resolvesAt: market.endDate,
     ...(feeSchedule ? { feeSchedule } : {}) }
 }
