@@ -1,3 +1,4 @@
+import { ScenarioError } from '../scenarios/engine.js'
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify'
 import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
@@ -530,7 +531,13 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       request.principalId = options.config.devPrincipalId
     })
 
-    registerAccountingRoutes(privateApi, options.database)
+    registerAccountingRoutes(privateApi, options.database, liveAllowed || options.marketData ? async (url) => {
+      try { return await marketData.resolve(url) }
+      catch (error) {
+        if (error instanceof PublicMarketError) throw new ScenarioError(error.code)
+        throw error
+      }
+    } : undefined)
 
     privateApi.get('/portfolios', {
       schema: {

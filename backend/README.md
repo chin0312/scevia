@@ -97,3 +97,5 @@ The accounting API supports independent imported accounts, manual records, trans
 [Phase 4 analytics](docs/ANALYTICS.md) documents portfolio performance, allocation and reviewed settlement risk endpoints.
 
 For return quality, chart-ready periods, settlement component coverage and baseline revisions, see [Phase 4 analytics](docs/ANALYTICS.md).
+
+[Phase 5 scenario methodology and endpoints](docs/SCENARIOS.md) cover frozen baselines, what-if calculation, and saved comparisons.

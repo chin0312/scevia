@@ -1,3 +1,5 @@
+import { registerScenarioRoutes } from './scenarios.js'
+import { methodology, ScenarioError, type ScenarioBaseline } from '../scenarios/engine.js'
 import { canonicalInstrumentKeys, instrumentKey } from '../analytics/scope.js'
 import { Decimal } from 'decimal.js'
 import { createHash, randomUUID } from 'node:crypto'
@@ -57,7 +59,7 @@ function concurrentWrite(error: unknown): boolean {
 }
 
 
-export function registerAccountingRoutes(app: FastifyInstance, database: Database) {
+export function registerAccountingRoutes(app: FastifyInstance, database: Database, resolvePublic?: (url: string) => Promise<unknown>) {
   async function owned(portfolioId: string, ownerId: string) {
     const [row] = await database.select({ id: portfolios.id }).from(portfolios)
       .where(and(eq(portfolios.id, portfolioId), eq(portfolios.ownerId, ownerId))).limit(1)
@@ -664,6 +666,155 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     }, { isolationLevel: 'repeatable read', accessMode: 'read only' })
   })
 
+  async function loadExposureCatalog(tx: AccountingRead, asOf: string, asset: string, ids: string[], held: string[],
+    recentSnapshotIds: string[], selected: string[] = []) {
+    const relevant = ids.length ? await tx.select({ instrument: instruments.id, market: instruments.marketId }).from(instruments)
+      .where(inArray(instruments.id, ids)) : []
+    if (selected.some((id) => !relevant.some((row) => row.instrument === id))) throw new ScenarioError('catalog_instrument_not_found')
+    const marketIds = [...new Set(relevant.map((item) => item.market))]
+    const loadGraph = async (seedInstruments: Set<string>) => {
+      const seedMarkets = [...new Set(relevant.filter((row) => seedInstruments.has(row.instrument)).map((row) => row.market))]
+      const graph = new Set((seedMarkets.length ? await tx.select({ market: reviewedBinaryRules.marketId })
+        .from(reviewedBinaryRules).where(and(inArray(reviewedBinaryRules.marketId, seedMarkets),
+          lte(reviewedBinaryRules.reviewedAt, new Date(asOf)), eq(reviewedBinaryRules.assetCode, asset))) : [])
+        .map((rule) => rule.market))
+      let graphLimit = graph.size > 256
+      let edges: Array<{ left: string; right: string; kind: 'equivalent' | 'exclusive' | 'implies'; evidence: string; reviewedAt: Date }> = []
+      let graphRounds = 0
+      while (graph.size && !graphLimit) {
+        if (++graphRounds > 256) { graphLimit = true; break }
+        const nodes = [...graph]
+        edges = await tx.select({ left: reviewedSettlementConstraints.leftMarketId, right: reviewedSettlementConstraints.rightMarketId,
+          kind: reviewedSettlementConstraints.kind, evidence: reviewedSettlementConstraints.evidence, reviewedAt: reviewedSettlementConstraints.reviewedAt,
+        }).from(reviewedSettlementConstraints).where(and(
+          or(inArray(reviewedSettlementConstraints.leftMarketId, nodes), inArray(reviewedSettlementConstraints.rightMarketId, nodes)),
+          lte(reviewedSettlementConstraints.reviewedAt, new Date(asOf)))).limit(1001)
+        if (edges.length > 1000) { graphLimit = true; break }
+        for (const edge of edges) { graph.add(edge.left); graph.add(edge.right) }
+        graphLimit = graph.size > 256
+        if (nodes.length === graph.size) break
+      }
+      return { graph, edges: graphLimit ? [] : edges, graphLimit }
+    }
+    const effective = await loadGraph(new Set([...held, ...selected]))
+    const reported = await loadGraph(new Set(recentSnapshotIds))
+    const includedMarkets = [...new Set([...marketIds,
+      ...(effective.graphLimit ? [] : effective.graph), ...(reported.graphLimit ? [] : reported.graph)])]
+
+    const metadata = includedMarkets.length ? await tx.select({
+      instrument: instruments.id, market: markets.id, event: events.id, outcome: instruments.outcomeName,
+      resolvesAt: events.resolvesAt, title: markets.title, lifecycle: markets.lifecycle, providerMarket: markets.externalId,
+      settlementAsset: instruments.settlementAssetCode, marketAsset: markets.settlementAssetCode,
+    }).from(instruments).innerJoin(markets, eq(instruments.marketId, markets.id))
+      .innerJoin(events, eq(markets.eventId, events.id)).where(inArray(markets.id, includedMarkets)) : []
+    const rules = includedMarkets.length ? await tx.select({
+      market: reviewedBinaryRules.marketId, event: markets.eventId, yes: reviewedBinaryRules.yesInstrumentId,
+      no: reviewedBinaryRules.noInstrumentId, asset: reviewedBinaryRules.assetCode, evidence: reviewedBinaryRules.evidence,
+      reviewedAt: reviewedBinaryRules.reviewedAt,
+    }).from(reviewedBinaryRules).innerJoin(markets, eq(reviewedBinaryRules.marketId, markets.id))
+      .where(inArray(reviewedBinaryRules.marketId, includedMarkets)) : []
+    return { metadata, rules, effective, reported }
+  }
+
+  async function loadExposureInputs(tx: AccountingRead, portfolioId: string, asOf: string, asset: string,
+    scope: Pick<z.infer<typeof analyticsQuery>, 'accounts' | 'venue'>, selected: string[] = []) {
+    const input = await loadEvidence(portfolioId, asOf, undefined, tx, undefined, scope.accounts?.split(','))
+    if (input.truncated) throw new ScenarioError('provider_evidence_limit')
+    const accounts = selectAccounts(input, scope.accounts, scope.venue)
+    if (!accounts) throw new ScenarioError('invalid_analytics_accounts')
+    const { context, evidence } = analyticalContext(input, accounts, asOf, asset, scope.venue)
+    const state = replayAccounting(evidence, asOf)
+    const snapshots = input.positions.filter((row) => accounts.includes(row.account) && row.asset === asset && (!scope.venue || row.venue === scope.venue))
+    const holdings = state.holdings.filter((row) => row.asset === asset && new AnalyticalDecimal(row.quantity).gt(0))
+    const canonicalKeys = canonicalInstrumentKeys(evidence, asOf)
+    const canonicalHoldings = holdings.filter((row) => canonicalKeys.has(instrumentKey(row, row.instrument)))
+    const ids = [...new Set([...canonicalHoldings, ...snapshots]
+      .map((row) => row.instrument).concat(selected).filter((id) => z.uuid().safeParse(id).success))]
+    if (ids.length > 2000) throw new ScenarioError('analytics_instrument_limit')
+    const held = canonicalHoldings.filter((row) => row.quantityStatus === 'reconstructed_from_declaration').map((row) => row.instrument)
+    const recentSnapshotIds = snapshots.filter((row) => new AnalyticalDecimal(row.quantity).gt(0)
+      && Date.parse(asOf) - row.observedAt.getTime() <= 86_400_000).map((row) => row.instrument)
+    const { metadata, rules, effective, reported } = await loadExposureCatalog(tx, asOf, asset, ids, held, recentSnapshotIds, selected)
+    const edgeOrder = (left: { left: string; right: string }, right: { left: string; right: string }) =>
+      left.left.localeCompare(right.left) || left.right.localeCompare(right.right)
+    const response = { context, metadataBasis: 'current_catalog',
+      snapshotRevision: digest(snapshots.map((row) => ({ ...row, observedAt: row.observedAt.toISOString(),
+        markAt: row.markAt?.toISOString() ?? null })).sort((left, right) => left.venue.localeCompare(right.venue) || left.account.localeCompare(right.account)
+          || left.instrument.localeCompare(right.instrument) || left.sourceRecordId.localeCompare(right.sourceRecordId))),
+      catalogRevision: digest(metadata.map((row) => ({ ...row, resolvesAt: row.resolvesAt?.toISOString() ?? null }))
+        .sort((left, right) => left.instrument.localeCompare(right.instrument))),
+      reportedExposure: analyzeReportedExposure(snapshots, input.coverage, asOf, asset, metadata, rules, reported.edges, reported.graphLimit),
+      settlementEvidenceRevision: digest([
+        rules.map((rule) => ({ ...rule, reviewedAt: rule.reviewedAt.toISOString() })).sort((left, right) => left.market.localeCompare(right.market)),
+        { effectiveLimit: effective.graphLimit, reportedLimit: reported.graphLimit,
+          effective: effective.edges.sort(edgeOrder).map((edge) => ({ ...edge, reviewedAt: edge.reviewedAt.toISOString() })),
+          reported: reported.edges.sort(edgeOrder).map((edge) => ({ ...edge, reviewedAt: edge.reviewedAt.toISOString() })) },
+      ]),
+      ...analyzeExposure(state, asset, accounts, metadata, rules, effective.edges, effective.graph, effective.graphLimit, context.accountIdentities, canonicalKeys) }
+    return { response, state, canonicalKeys, metadata, effective, rules }
+  }
+
+  registerScenarioRoutes(app, database, owned, async (tx, portfolioId, source, publicInstruments): Promise<ScenarioBaseline> => {
+    const { mode, asset, catalog, local } = source
+    const asOf = new Date(source.asOf).toISOString()
+    const actual = mode === 'actual' ? await loadExposureInputs(tx, portfolioId, asOf, asset,
+      { accounts: source.accounts.join(','), ...(source.venue === undefined ? {} : { venue: source.venue }) }, catalog) : null
+    const model = actual ?? await loadExposureCatalog(tx, asOf, asset, catalog, [], [], catalog)
+    const listings = new Map(model.metadata.map((row) => [row.instrument, row]))
+    const baselineInstruments = new Map(publicInstruments.map((row) => [row.id, row]))
+    for (const id of catalog) {
+      const entry = listings.get(id)!
+      if ((entry.settlementAsset ?? entry.marketAsset) && (entry.settlementAsset ?? entry.marketAsset) !== asset) throw new ScenarioError('catalog_instrument_asset_mismatch')
+      baselineInstruments.set(id, { id, mark: null, market: entry.market, event: entry.event, outcome: entry.outcome,
+        lifecycle: entry.lifecycle, providerMarket: entry.providerMarket, settlementAsset: entry.settlementAsset ?? entry.marketAsset,
+        resolvesAt: entry.resolvesAt?.toISOString() ?? null })
+    }
+    for (const row of local) baselineInstruments.set(row.id, { id: row.id, mark: row.mark })
+    const bucketKey = (row: { venue: string; account: string }) => JSON.stringify([row.venue, row.account])
+    const cashRows = actual?.state.cash.filter((row) => row.asset === asset) ?? []
+    const positions = actual?.state.holdings.filter((row) => row.asset === asset) ?? []
+    const buckets = mode === 'scratch' ? source.buckets.map((row) => ({ ...row, pending: '0' }))
+      : actual!.response.context.accountIdentities.map((scope) => {
+        const cash = cashRows.find((row) => row.venue === scope.venue && row.account === scope.account)
+        const scoped = positions.filter((row) => row.venue === scope.venue && row.account === scope.account)
+        const pendingKnown = cash?.openingInventoryAt != null && scoped.every((row) => row.settlementAvailability === 'selected_entitlements_only')
+        const pending = pendingKnown ? scoped.reduce((value, row) => value.plus(row.pending), new AnalyticalDecimal(0)).toFixed() : null
+        return { id: bucketKey(scope), venue: scope.venue, account: scope.account, cash: cash?.balance ?? null, pending,
+          coverage: cash?.historyCoverage ?? 'unverified', inventoryAt: cash?.openingInventoryAt ?? null,
+          pendingEntitlements: scoped.flatMap((row) => row.entitlements.map((entitlement) =>
+            ({ instrument: row.instrument, ...entitlement }))) }
+      })
+    const holdings = positions.filter((row) => new AnalyticalDecimal(row.quantity).gt(0)).map((row) => {
+      const isCanonical = actual!.canonicalKeys.has(instrumentKey(row, row.instrument))
+      const identity = isCanonical ? listings.get(row.instrument) : undefined
+      const id = identity ? row.instrument : 'holding:' + digest([row.venue, row.account, row.instrument])
+      const candidateMark = row.markStatus === 'estimated' ? row.mark : null
+      baselineInstruments.set(id, { ...baselineInstruments.get(id), id, mark: null, ...(identity ? { market: identity.market, event: identity.event,
+          resolvesAt: identity.resolvesAt?.toISOString() ?? null } : {}) })
+      return { bucket: bucketKey(row), instrument: id, quantity: row.quantity,
+        quantityKnown: row.quantityStatus === 'reconstructed_from_declaration', basis: row.basisAvailability === 'selected_events_only' ? row.basis : null,
+        originalInstrument: row.instrument, mark: candidateMark, markAt: row.markAt }
+    })
+    if (!buckets.length || buckets.length > 100 || holdings.length > 250) throw new ScenarioError('baseline_scope_limit')
+    if (model.effective.graphLimit) throw new ScenarioError('baseline_settlement_graph_limit')
+    const rules = model.rules.filter((rule) => model.effective.graph.has(rule.market) && rule.asset === asset && rule.reviewedAt.toISOString() <= asOf
+      && [rule.yes, rule.no].every((id) => listings.get(id)?.market === rule.market)
+      && ['open', 'closed'].includes(listings.get(rule.yes)?.lifecycle ?? '')
+      && model.metadata.filter((entry) => entry.market === rule.market).length === 2)
+      .map((rule) => ({ id: rule.market, yes: rule.yes, no: rule.no, asset, evidence: rule.evidence, reviewedAt: rule.reviewedAt.toISOString() }))
+    const constraints = model.effective.edges.map((edge) => ({ ...edge, reviewedAt: edge.reviewedAt.toISOString() }))
+    return { methodology, mode, asset, asOf, buckets: buckets.sort((a, b) => a.id.localeCompare(b.id)),
+      holdings: holdings.sort((a, b) => a.bucket.localeCompare(b.bucket) || a.instrument.localeCompare(b.instrument)),
+      instruments: [...baselineInstruments.values()].sort((a, b) => a.id.localeCompare(b.id)),
+      rules: rules.sort((a, b) => a.id.localeCompare(b.id)),
+      constraints: constraints.sort((a, b) => a.left.localeCompare(b.left) || a.right.localeCompare(b.right)),
+      missingRules: [...model.effective.graph].filter((id) => !rules.some((rule) => rule.id === id)).sort(),
+      revisions: actual ? { public: digest(publicInstruments), financial: actual.response.context.evidenceRevision, coverage: actual.response.context.coverageRevision,
+        catalog: actual.response.catalogRevision, snapshots: actual.response.snapshotRevision, settlement: actual.response.settlementEvidenceRevision }
+        : { public: digest(publicInstruments), catalog: digest(model.metadata.map((row) => ({ ...row, resolvesAt: row.resolvesAt?.toISOString() ?? null })).sort((a, b) => a.instrument.localeCompare(b.instrument))),
+          settlement: digest([rules.sort((a, b) => a.id.localeCompare(b.id)), constraints.sort((a, b) => a.left.localeCompare(b.left) || a.right.localeCompare(b.right))]) } }
+  }, resolvePublic)
+
   app.get<{ Params: { portfolioId: string }; Querystring: unknown }>(prefix + '/analytics/exposure', {
     schema: { ...auth, tags: ['analytics'], summary: 'Read allocation, resolution timeline and reviewed settlement risk',
       params: portfolioParams, response: { 200: exposureResponse }, querystring: { type: 'object', required: ['asset', 'asOf'],
@@ -675,84 +826,13 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     if (!query.success) return reply.code(422).send({ error: { code: 'invalid_analytics_scope' } })
     const { asset } = query.data
     const asOf = new Date(query.data.asOf).toISOString()
-    return database.transaction(async (tx) => {
-      const input = await loadEvidence(portfolioId, asOf, undefined, tx, undefined, query.data.accounts?.split(','))
-      if (input.truncated) return reply.code(422).send({ error: { code: 'provider_evidence_limit' } })
-      const accounts = selectAccounts(input, query.data.accounts, query.data.venue)
-      if (!accounts) return reply.code(422).send({ error: { code: 'invalid_analytics_accounts' } })
-      const { context, evidence } = analyticalContext(input, accounts, asOf, asset, query.data.venue)
-      const state = replayAccounting(evidence, asOf)
-      const snapshots = input.positions.filter((row) => accounts.includes(row.account) && row.asset === asset && (!query.data.venue || row.venue === query.data.venue))
-      const holdings = state.holdings.filter((row) => row.asset === asset && new AnalyticalDecimal(row.quantity).gt(0))
-      const canonicalKeys = canonicalInstrumentKeys(evidence, asOf)
-      const canonicalHoldings = holdings.filter((row) => canonicalKeys.has(instrumentKey(row, row.instrument)))
-      const ids = [...new Set([...canonicalHoldings, ...snapshots]
-        .map((row) => row.instrument).filter((id) => z.uuid().safeParse(id).success))]
-      if (ids.length > 2000) return reply.code(422).send({ error: { code: 'analytics_instrument_limit' } })
-      const relevant = ids.length ? await tx.select({ instrument: instruments.id, market: instruments.marketId }).from(instruments)
-        .where(inArray(instruments.id, ids)) : []
-      const marketIds = [...new Set(relevant.map((item) => item.market))]
-      const recentSnapshotIds = snapshots.filter((row) => new AnalyticalDecimal(row.quantity).gt(0)
-        && Date.parse(asOf) - row.observedAt.getTime() <= 86_400_000).map((row) => row.instrument)
-      const held = new Set(canonicalHoldings.filter((row) => row.quantityStatus === 'reconstructed_from_declaration')
-        .map((row) => row.instrument))
-      const loadGraph = async (seedInstruments: Set<string>) => {
-        const seedMarkets = [...new Set(relevant.filter((row) => seedInstruments.has(row.instrument)).map((row) => row.market))]
-        const graph = new Set((seedMarkets.length ? await tx.select({ market: reviewedBinaryRules.marketId })
-          .from(reviewedBinaryRules).where(and(inArray(reviewedBinaryRules.marketId, seedMarkets),
-            lte(reviewedBinaryRules.reviewedAt, new Date(asOf)), eq(reviewedBinaryRules.assetCode, asset))) : [])
-          .map((rule) => rule.market))
-        let graphLimit = graph.size > 256
-        let edges: Array<{ left: string; right: string; kind: 'equivalent' | 'exclusive' | 'implies'; evidence: string; reviewedAt: Date }> = []
-        let graphRounds = 0
-        while (graph.size && !graphLimit) {
-          if (++graphRounds > 256) { graphLimit = true; break }
-          const nodes = [...graph]
-          edges = await tx.select({ left: reviewedSettlementConstraints.leftMarketId, right: reviewedSettlementConstraints.rightMarketId,
-            kind: reviewedSettlementConstraints.kind, evidence: reviewedSettlementConstraints.evidence, reviewedAt: reviewedSettlementConstraints.reviewedAt,
-          }).from(reviewedSettlementConstraints).where(and(
-            or(inArray(reviewedSettlementConstraints.leftMarketId, nodes), inArray(reviewedSettlementConstraints.rightMarketId, nodes)),
-            lte(reviewedSettlementConstraints.reviewedAt, new Date(asOf)))).limit(1001)
-          if (edges.length > 1000) { graphLimit = true; break }
-          for (const edge of edges) { graph.add(edge.left); graph.add(edge.right) }
-          graphLimit = graph.size > 256
-          if (nodes.length === graph.size) break
-        }
-        return { graph, edges: graphLimit ? [] : edges, graphLimit }
-      }
-      const effective = await loadGraph(held)
-      const reported = await loadGraph(new Set(recentSnapshotIds))
-      const includedMarkets = [...new Set([...marketIds,
-        ...(effective.graphLimit ? [] : effective.graph), ...(reported.graphLimit ? [] : reported.graph)])]
-
-      const metadata = includedMarkets.length ? await tx.select({
-        instrument: instruments.id, market: markets.id, event: events.id, outcome: instruments.outcomeName,
-        resolvesAt: events.resolvesAt, title: markets.title, lifecycle: markets.lifecycle,
-      }).from(instruments).innerJoin(markets, eq(instruments.marketId, markets.id))
-        .innerJoin(events, eq(markets.eventId, events.id)).where(inArray(markets.id, includedMarkets)) : []
-      const rules = includedMarkets.length ? await tx.select({
-        market: reviewedBinaryRules.marketId, event: markets.eventId, yes: reviewedBinaryRules.yesInstrumentId,
-        no: reviewedBinaryRules.noInstrumentId, asset: reviewedBinaryRules.assetCode, evidence: reviewedBinaryRules.evidence,
-        reviewedAt: reviewedBinaryRules.reviewedAt,
-      }).from(reviewedBinaryRules).innerJoin(markets, eq(reviewedBinaryRules.marketId, markets.id))
-        .where(inArray(reviewedBinaryRules.marketId, includedMarkets)) : []
-      const edgeOrder = (left: { left: string; right: string }, right: { left: string; right: string }) =>
-        left.left.localeCompare(right.left) || left.right.localeCompare(right.right)
-      return { context, metadataBasis: 'current_catalog',
-        snapshotRevision: digest(snapshots.map((row) => ({ ...row, observedAt: row.observedAt.toISOString(),
-          markAt: row.markAt?.toISOString() ?? null })).sort((left, right) => left.venue.localeCompare(right.venue) || left.account.localeCompare(right.account)
-            || left.instrument.localeCompare(right.instrument) || left.sourceRecordId.localeCompare(right.sourceRecordId))),
-        catalogRevision: digest(metadata.map((row) => ({ ...row, resolvesAt: row.resolvesAt?.toISOString() ?? null }))
-          .sort((left, right) => left.instrument.localeCompare(right.instrument))),
-        reportedExposure: analyzeReportedExposure(snapshots, input.coverage, asOf, asset, metadata, rules, reported.edges, reported.graphLimit),
-        settlementEvidenceRevision: digest([
-          rules.map((rule) => ({ ...rule, reviewedAt: rule.reviewedAt.toISOString() })).sort((left, right) => left.market.localeCompare(right.market)),
-          { effectiveLimit: effective.graphLimit, reportedLimit: reported.graphLimit,
-            effective: effective.edges.sort(edgeOrder).map((edge) => ({ ...edge, reviewedAt: edge.reviewedAt.toISOString() })),
-            reported: reported.edges.sort(edgeOrder).map((edge) => ({ ...edge, reviewedAt: edge.reviewedAt.toISOString() })) },
-        ]),
-        ...analyzeExposure(state, asset, accounts, metadata, rules, effective.edges, effective.graph, effective.graphLimit, context.accountIdentities, canonicalKeys) }
-    }, { isolationLevel: 'repeatable read', accessMode: 'read only' })
+    try {
+      return await database.transaction(async (tx) => (await loadExposureInputs(tx, portfolioId, asOf, asset, query.data)).response,
+        { isolationLevel: 'repeatable read', accessMode: 'read only' })
+    } catch (error) {
+      if (error instanceof ScenarioError) return reply.code(422).send({ error: { code: error.message } })
+      throw error
+    }
   })
 
   app.get<{ Params: { portfolioId: string } }>(prefix + '/analytics/scope', {

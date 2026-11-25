@@ -601,3 +601,15 @@ export const reviewedSettlementConstraints = scevia.table('reviewed_settlement_c
   check('reviewed_settlement_constraint_kind', sql`${table.kind} in ('equivalent','exclusive','implies')`),
   check('reviewed_settlement_constraint_evidence_required', sql`length(trim(${table.evidence})) > 0`),
 ])
+
+export const portfolioScenarios = scevia.table('portfolio_scenarios', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  portfolioId: uuid('portfolio_id').notNull().references(() => portfolios.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  revision: integer('revision').default(1).notNull(),
+  baseline: jsonb('baseline').$type<import('../scenarios/engine.js').ScenarioBaseline>().notNull(),
+  source: jsonb('source').$type<import('../http/scenarios.js').BaselineSource>().notNull(),
+  input: jsonb('input').$type<import('../scenarios/engine.js').ScenarioInput>().notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [index('portfolio_scenarios_portfolio_idx').on(table.portfolioId)])

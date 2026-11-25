@@ -211,6 +211,11 @@ describe('migrations and canonical persistence', () => {
     const revised = await app.inject({ method: 'GET', url: prefix + '/analytics/performance?' + perfQuery, headers })
     expect(revised.json()).toMatchObject({ context: { accountingScope: 'user_selected' }, returns: { twr: { value: '0.1' } } })
     expect(revised.json().context.evidenceRevision).not.toBe(perf.json().context.evidenceRevision)
+    const scenarioUrl = prefix + '/scenarios'
+    const frozen = await app.inject({ method: 'POST', url: scenarioUrl, headers, payload: { name: 'Frozen',
+      source: { mode: 'actual', asset: 'USDC', asOf, accounts: ['risk'], venue: 'isolated' }, input: {} } })
+    expect(frozen.statusCode, frozen.body).toBe(201)
+    const frozenId = frozen.json().id
     const mappedRows = await app.inject({ method: 'GET', url: prefix + '/accounting/records?search=open-y', headers })
     const mappedEdit = { changes: [{ key: mappedRows.json().items[0].key, action: 'correct', correction: { quantity: '110' } }] }
     const mappedPreview = await app.inject({ method: 'POST', url: prefix + '/accounting/adjustments/preview', headers, payload: mappedEdit })
@@ -221,11 +226,52 @@ describe('migrations and canonical persistence', () => {
     const correctedRisk = await app.inject({ method: 'GET', url: prefix + '/analytics/exposure?' + riskQuery, headers })
     expect(correctedRisk.json().settlement.result).toMatchObject({ status: 'exact', best: { payout: '110' } })
     expect(correctedRisk.json().context.evidenceRevision).not.toBe(risk.json().context.evidenceRevision)
+    const fixedResult = await app.inject({ method: 'POST', url: scenarioUrl + '/evaluate', headers, payload: { scenarioId: frozenId } })
+    expect(fixedResult.statusCode, fixedResult.body).toBe(200)
+    expect(fixedResult.json().settlement.verified.result).toMatchObject({ best: { payout: '100' } })
+    const previewRebase = await app.inject({ method: 'POST', url: scenarioUrl + '/' + frozenId + '/rebase', headers,
+      payload: { asOf, revision: 1 } })
+    expect(previewRebase.statusCode, previewRebase.body).toBe(200)
+    expect(previewRebase.json()).toMatchObject({ changed: true, result: { settlement: { verified: { result: { best: { payout: '110' } } } } } })
+    const rebased = await app.inject({ method: 'POST', url: scenarioUrl + '/' + frozenId + '/rebase', headers,
+      payload: { asOf, revision: 1, previewToken: previewRebase.json().previewToken } })
+    expect(rebased.statusCode, rebased.body).toBe(200)
+    expect(rebased.json().revision).toBe(2)
     const denied = await app.inject({ method: 'GET', url: `/v1/portfolios/${OTHER_PORTFOLIO_ID}/analytics/exposure?` + riskQuery, headers })
     expect(denied.statusCode).toBe(404)
     riskQuery.set('accounts', 'missing')
     const wrongAccount = await app.inject({ method: 'GET', url: prefix + '/analytics/exposure?' + riskQuery, headers })
     expect(wrongAccount.statusCode).toBe(422)
+  })
+
+  it('persists isolated scratch scenarios with explicit revisions and unsaved evaluation', async () => {
+    const app = await createTestApp()
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const url = `/v1/portfolios/${PORTFOLIO_ID}/scenarios`
+    const asOf = '2026-11-01T00:00:00Z'
+    const payload = { name: 'Scratch', source: { mode: 'scratch', asset: 'USD', asOf,
+      buckets: [{ id: 'a', venue: 'local', account: 'a', cash: '100' }], local: [{ id: 'local:yes', mark: '0.6' }] },
+    input: { operations: [{ bucket: 'a', instrument: 'local:yes', kind: 'buy', amount: '100', price: '0.6', fee: { mode: 'fixed', value: '1' } }] } }
+    const created = await app.inject({ method: 'POST', url, headers, payload })
+    expect(created.statusCode, created.body).toBe(201)
+    const { id } = created.json()
+    const evaluated = await app.inject({ method: 'POST', url: url + '/evaluate', headers, payload: { scenarioId: id } })
+    expect(evaluated.statusCode, evaluated.body).toBe(200)
+    expect(evaluated.json()).toMatchObject({ status: 'calculated', bridge: { endingValue: '99' }, funding: [{ endingCash: '39' }] })
+    const rename = await app.inject({ method: 'PATCH', url: url + '/' + id, headers, payload: { name: 'Alternative', revision: 1 } })
+    expect(rename.statusCode, rename.body).toBe(200)
+    expect(rename.json()).toMatchObject({ name: 'Alternative', revision: 2 })
+    const stale = await app.inject({ method: 'PATCH', url: url + '/' + id, headers, payload: { name: 'Old', revision: 1 } })
+    expect(stale.statusCode).toBe(409)
+    const duplicate = await app.inject({ method: 'POST', url: url + '/' + id + '/duplicate', headers, payload: { name: 'Copy' } })
+    expect(duplicate.statusCode, duplicate.body).toBe(201)
+    const comparison = await app.inject({ method: 'POST', url: url + '/compare', headers, payload: { scenarioIds: [id, duplicate.json().id] } })
+    expect(comparison.statusCode, comparison.body).toBe(200)
+    expect(comparison.json()).toMatchObject({ compatibility: { sameAsset: true, sameBaseline: true } })
+    const rejected = await app.inject({ method: 'GET', url: `/v1/portfolios/${OTHER_PORTFOLIO_ID}/scenarios/${id}`, headers })
+    expect(rejected.statusCode).toBe(404)
+    const deleted = await app.inject({ method: 'POST', url: url + '/' + id + '/delete', headers, payload: { revision: 2 } })
+    expect(deleted.statusCode, deleted.body).toBe(204)
   })
 
   it('loads 30 independent reviewed markets through the authorized exposure API', async () => {
@@ -1749,6 +1795,12 @@ describe('provider contracts and API security', () => {
     expect(unsafeUrl.statusCode).toBe(400)
     expect(upstreamCalls).toBe(1)
 
+    const unsafeScenario = await publicApp.inject({ method: 'POST', url: `/v1/portfolios/${PORTFOLIO_ID}/scenarios/baseline`,
+      headers: { authorization: `Bearer ${TOKEN}` }, payload: { mode: 'scratch', asset: 'USDC', asOf: '2026-11-01T00:00:00Z',
+        buckets: [{ id: 'a', venue: 'polymarket', account: 'a', cash: '100' }],
+        publicOutcomes: [{ url: 'http://127.0.0.1/private', assetIdType: 'clob_token_id', assetId: '101' }] } })
+    expect(unsafeScenario.statusCode, unsafeScenario.body).toBe(422)
+    expect(upstreamCalls).toBe(1)
     const disabledApp = await buildApp({ config: testConfig(), database })
     openApps.push(disabledApp)
     const disabledSearch = await disabledApp.inject({ method: 'GET', url: '/v1/market-data/search?q=public%20event' })
