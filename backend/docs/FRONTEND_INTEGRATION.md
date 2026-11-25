@@ -78,3 +78,5 @@ The performance endpoint provides independent UTC daily, weekly and monthly retu
 Use the venue/account pair in the analytical context for scope and payoff identity. Treat concentration denominators as identified or marked subsets according to their availability and mapping coverage. Preserve unavailable reasons and keep supported settlement extrema labeled with their component coverage. For baselines, retain the response revisions alongside the analytical scope and valuation cutoff.
 
 The Phase 5 [scenario API](SCENARIOS.md) supports previewing a baseline, evaluating unsaved edits, saving a draft and comparing alternatives. Lists return revisioned metadata. Use scope keys from the returned baseline and preserve fee, funding and settlement availability when displaying results. Confirm a rebase with its preview token and current revision.
+
+Scenario comparison exposes independent compatibility dimensions. Use the availability fields alongside the known shortfall, and render identified, unmapped, cash and pending allocation rows under their reported denominators. Review structured rebase changes and conflicts before submitting the exact approved input and token.

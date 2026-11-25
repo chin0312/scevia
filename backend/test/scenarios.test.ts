@@ -1,6 +1,6 @@
 import { selectPublicOutcome } from '../src/scenarios/public-market.js'
 import { describe, expect, it } from 'vitest'
-import { evaluate, methodology, type ScenarioBaseline, type ScenarioInput } from '../src/scenarios/engine.js'
+import { evaluate, methodology, scopedReference, type ScenarioBaseline, type ScenarioInput } from '../src/scenarios/engine.js'
 
 const starting = (cash = '100'): ScenarioBaseline => ({
   methodology, asset: 'USD', mode: 'scratch', asOf: '2026-01-01T00:00:00.000Z',
@@ -36,6 +36,61 @@ describe('scenario financial references', () => {
     baseline.buckets.push({ id: 'b', venue: 'fixture', account: 'b', cash: '10', pending: '0' })
     const separate = evaluate(baseline, { ...empty, operations: [{ ...buy, amount: '50', bucket: 'b', fee: { mode: 'excluded' } }] })
     expect(separate.funding).toMatchObject([{ endingCash: '100', shortfall: '0' }, { endingCash: '-20', shortfall: '20' }])
+  })
+
+  it('models existing local holdings conditionally without overriding reviewed rules', () => {
+    const baseline = starting('40')
+    baseline.mode = 'actual'
+    baseline.instruments = [{ id: 'holding:yes', mark: '0.6' }, { id: 'holding:no', mark: '0.4' }]
+    baseline.holdings = [{ bucket: 'a', instrument: 'holding:yes', quantity: '100', basis: '40' }]
+    const rules = [{ id: 'declared', yes: 'holding:yes', no: 'holding:no', asset: 'USD', unitPayout: '1' }]
+    const result = evaluate(baseline, { ...empty, rules })
+    expect(result.settlement.verified).toMatchObject({ result: { status: 'unavailable' }, unsupported: [expect.any(String)] })
+    expect(result.settlement.conditional).toMatchObject({ authority: 'scenario_assumptions', result: { best: { payout: '100' }, worst: { payout: '0' } } })
+    baseline.rules = [{ ...rules[0]!, id: 'verified' }]
+    expect(() => evaluate(baseline, { ...empty, rules })).toThrow('reviewed_payout_cannot_be_overridden')
+    expect(baseline.rules[0]?.id).toBe('verified')
+  })
+
+  it('keeps known funding requirements when another account has unknown inventory and cash', () => {
+    const baseline = starting('500')
+    baseline.mode = 'actual'
+    baseline.buckets.push({ id: 'unknown', venue: 'fixture', account: 'unknown', cash: null, pending: null, inventoryComplete: false })
+    const operation = { bucket: 'hypothetical:b', instrument: 'yes', kind: 'buy' as const, amount: '1700',
+      price: '0.6', fee: { mode: 'excluded' as const } }
+    const result = evaluate(baseline, { ...empty, operations: [operation],
+      hypotheticalBuckets: [{ id: 'hypothetical:b', venue: 'fixture', asset: 'USD', account: 'b', startingCapital: '1000' }] })
+    expect(result).toMatchObject({ knownAdditionalCapitalRequired: '20', additionalCapitalRequired: null,
+      availability: { funding: 'partial', underfunded: true, quantities: 'partial', valuation: 'partial' },
+      funding: [{ endingCash: '500' }, { endingCash: null }, { hypotheticalStartingCapital: '1000', additionalCapital: '0', shortfall: '20' }] })
+    expect(() => evaluate(baseline, { ...empty, operations: [{ ...operation, bucket: 'unknown' }] })).toThrow('inventory_unavailable')
+    expect(baseline.buckets).toHaveLength(2)
+  })
+
+  it('withholds cross-account reference marks when eligible observations differ', () => {
+    const observations = [{ scope: 'a', price: '0.6', asOf: '2026-01-01T01:00:00Z' },
+      { scope: 'b', price: '0.7', asOf: '2026-01-01T02:00:00Z' }]
+    expect(scopedReference(observations)).toBeNull()
+    expect(scopedReference([{ ...observations[0]! }, { ...observations[1]!, price: '0.60' }]))
+      .toMatchObject({ mark: '0.6', referenceScopes: ['a', 'b'], markAt: '2026-01-01T01:00:00Z' })
+  })
+
+  it('validates provider venue, closed execution, payout bounds and allocation identities', () => {
+    const baseline = starting()
+    baseline.instruments[0] = { id: 'yes', mark: '0.6', provider: 'polymarket', venue: 'polymarket', lifecycle: 'closed',
+      market: 'market', event: 'event', resolvesAt: '2026-01-05T00:00:00Z' }
+    const op = { bucket: 'a', instrument: 'yes', kind: 'buy' as const, amount: '100', price: '0.6', fee: { mode: 'excluded' as const } }
+    expect(() => evaluate(baseline, { ...empty, operations: [op] })).toThrow('instrument_venue_mismatch')
+    baseline.buckets[0]!.venue = 'polymarket'
+    expect(() => evaluate(baseline, { ...empty, operations: [op] })).toThrow('instrument_not_open')
+    expect(() => evaluate(baseline, { ...empty, operations: [{ ...op, abstract: true, price: '1.01' }] })).toThrow('execution_price_exceeds_payout')
+    const result = evaluate(baseline, { ...empty, operations: [{ ...op, abstract: true }] })
+    expect(result.operations[0]).toMatchObject({ executionApplicability: 'abstract' })
+    expect(result.allocation.after).toMatchObject({
+      cashInclusiveEvent: { denominator: '100', rows: expect.arrayContaining([{ id: 'event', kind: 'identified', value: '60', weight: '0.6' }]) },
+      acquisitionBasisRows: { denominator: '60', rows: [{ id: '["a","yes"]', value: '60', weight: '1' }] },
+      resolutionExposure: [{ id: 'next_7_days', positions: 1, knownValue: '60' }],
+    })
   })
 
   it('uses a common sizing budget and preserves unknown fees', () => {

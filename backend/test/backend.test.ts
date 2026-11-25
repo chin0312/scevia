@@ -237,6 +237,44 @@ describe('migrations and canonical persistence', () => {
       payload: { asOf, revision: 1, previewToken: previewRebase.json().previewToken } })
     expect(rebased.statusCode, rebased.body).toBe(200)
     expect(rebased.json().revision).toBe(2)
+    const originalRules = await database.select().from(reviewedBinaryRules)
+    const bucket = JSON.stringify(['isolated', 'risk'])
+    const sell = { bucket, instrument: yes.id, kind: 'sell', amount: '100', price: '0.6', fee: { mode: 'excluded' } }
+    const toClose = await app.inject({ method: 'POST', url: scenarioUrl, headers, payload: { name: 'Sell held shares',
+      source: { mode: 'actual', asset: 'USDC', asOf, accounts: ['risk'], venue: 'isolated' },
+      input: { operations: [sell] } } })
+    expect(toClose.statusCode, toClose.body).toBe(201)
+    const reduce = { changes: [{ ...mappedEdit.changes[0], correction: { quantity: '50' } }] }
+    const reducePreview = await app.inject({ method: 'POST', url: prefix + '/accounting/adjustments/preview', headers, payload: reduce })
+    const reduced = await app.inject({ method: 'POST', url: prefix + '/accounting/adjustments/confirm', headers,
+      payload: { ...reduce, revision: reducePreview.json().revision } })
+    expect(reduced.statusCode, reduced.body).toBe(200)
+    const rebaseUrl = scenarioUrl + '/' + toClose.json().id + '/rebase'
+    const conflict = await app.inject({ method: 'POST', url: rebaseUrl, headers, payload: { asOf, revision: 1 } })
+    expect(conflict.json()).toMatchObject({ limitation: 'short_sale_unsupported', conflicts: [{ operationIndex: 0, reason: 'short_sale_unsupported' }],
+      changes: { holdings: [{ before: { quantity: '110' }, after: { quantity: '50' } }] } })
+    const resolution = { operations: [{ ...sell, amount: '40' }] }
+    const rejectedConfirmation = await app.inject({ method: 'POST', url: rebaseUrl, headers,
+      payload: { asOf, revision: 1, input: resolution, previewToken: conflict.json().previewToken } })
+    expect(rejectedConfirmation.statusCode).toBe(409)
+    const resolvedPreview = await app.inject({ method: 'POST', url: rebaseUrl, headers, payload: { asOf, revision: 1, input: resolution } })
+    expect(resolvedPreview.json()).toMatchObject({ conflicts: [], result: { operations: [{ proposedQuantity: '10' }] } })
+    const resolvedConfirmation = await app.inject({ method: 'POST', url: rebaseUrl, headers,
+      payload: { asOf, revision: 1, input: resolution, previewToken: resolvedPreview.json().previewToken } })
+    expect(resolvedConfirmation.statusCode, resolvedConfirmation.body).toBe(200)
+    expect(resolvedConfirmation.json()).toMatchObject({ revision: 2, input: { operations: [{ amount: '40' }] } })
+    expect(await database.select().from(reviewedBinaryRules)).toEqual(originalRules)
+    const actualAfterRebase = await app.inject({ method: 'GET', url: prefix + '/analytics/exposure?' + riskQuery, headers })
+    expect(actualAfterRebase.json().exposure.instruments).toContainEqual(expect.objectContaining({ instrument: yes.id, quantity: '50' }))
+    const remove = { changes: [{ key: mappedRows.json().items[0].key, action: 'exclude' }] }
+    const removePreview = await app.inject({ method: 'POST', url: prefix + '/accounting/adjustments/preview', headers, payload: remove })
+    const removed = await app.inject({ method: 'POST', url: prefix + '/accounting/adjustments/confirm', headers,
+      payload: { ...remove, revision: removePreview.json().revision } })
+    expect(removed.statusCode, removed.body).toBe(200)
+    const afterClose = await app.inject({ method: 'POST', url: rebaseUrl, headers, payload: { asOf, revision: 2 } })
+    expect(afterClose.json()).toMatchObject({ changes: { holdings: [{ before: { quantity: '50' }, after: null }] },
+      candidate: { instruments: expect.arrayContaining([expect.objectContaining({ id: yes.id })]) },
+      conflicts: [{ reason: 'short_sale_unsupported' }] })
     const denied = await app.inject({ method: 'GET', url: `/v1/portfolios/${OTHER_PORTFOLIO_ID}/analytics/exposure?` + riskQuery, headers })
     expect(denied.statusCode).toBe(404)
     riskQuery.set('accounts', 'missing')
@@ -274,6 +312,39 @@ describe('migrations and canonical persistence', () => {
     expect(evaluated.json()).toMatchObject({ bridge: { endingValue: '99.88', unexplained: '0' },
       operations: [{ feeAmount: '0.12' }], settlement: { verified: { unsupported: [expect.any(String)] } } })
     expect(requests.length).toBe(roundTrips)
+    const [event] = await database.insert(events).values({ providerCode: 'polymarket', externalId: 'test-public-event', name: 'Public event' }).returning()
+    const [market] = await database.insert(markets).values({ providerCode: 'polymarket', externalId: 'condition',
+      eventId: event!.id, title: 'Public fixture', lifecycle: 'open', settlementAssetCode: 'USDC' }).returning()
+    const canonical = await database.insert(instruments).values([
+      { marketId: market!.id, externalId: '101', outcomeName: 'Yes' }, { marketId: market!.id, externalId: '102', outcomeName: 'No' },
+    ]).returning()
+    const source = { mode: 'scratch', asOf: '2026-11-01T00:00:00Z', asset: 'USDC', catalog: canonical.map((row) => row.id),
+      buckets: [{ id: 'a', venue: 'polymarket', account: 'a', cash: '100' }],
+      publicOutcomes: ['101', '102'].map((assetId) => ({ url: 'https://polymarket.com/market/market-fixture',
+        assetIdType: 'clob_token_id', assetId, captureCurrentQuote: true })) }
+    const preview = await app.inject({ method: 'POST', url: url + '/baseline', headers, payload: source })
+    expect(preview.statusCode, preview.body).toBe(200)
+    expect(preview.json().instruments).toHaveLength(2)
+    expect(preview.json().instrumentAliases).toMatchObject({ 'polymarket:clob_token_id:102': canonical[1]!.id })
+    expect(preview.json().instruments).toContainEqual(expect.objectContaining({ id: canonical[1]!.id, mark: '0.4', markSource: 'assumed_current_quote' }))
+    const beforeSave = requests.length
+    const conditional = await app.inject({ method: 'POST', url, headers, payload: { name: 'Captured', source,
+      baselineToken: preview.json().baselineToken, input: { operations: [{ bucket: 'a', instrument: 'polymarket:clob_token_id:102',
+        kind: 'buy', amount: '5', price: '0.4', fee: { mode: 'excluded' } }],
+        rules: [{ id: 'conditional-market', yes: 'polymarket:clob_token_id:101', no: canonical[1]!.id, asset: 'USDC' }] } } })
+    expect(conditional.statusCode, conditional.body).toBe(201)
+    expect(requests.length).toBe(beforeSave)
+    const mixed = await app.inject({ method: 'POST', url: url + '/evaluate', headers, payload: { scenarioId: conditional.json().id } })
+    expect(mixed.statusCode, mixed.body).toBe(200)
+    expect(mixed.json()).toMatchObject({ valuationBasis: 'mixed_current_quote_assumption',
+      operations: [{ instrument: canonical[1]!.id }], settlement: {
+        verified: { result: { status: 'unavailable' } }, conditional: { result: { best: { payout: '5' } } },
+      } })
+    const mismatch = await app.inject({ method: 'POST', url: url + '/evaluate', headers, payload: {
+      source: { ...source, publicOutcomes: [], buckets: [{ id: 'a', venue: 'kalshi', account: 'a', cash: '100' }] },
+      input: { operations: [{ bucket: 'a', instrument: canonical[0]!.id, kind: 'buy', amount: '5', price: '0.4', fee: { mode: 'excluded' } }] },
+    } })
+    expect(mismatch.json()).toMatchObject({ error: { code: 'instrument_venue_mismatch' } })
   })
 
   it('persists isolated scratch scenarios with explicit revisions and unsaved evaluation', async () => {
@@ -307,6 +378,8 @@ describe('migrations and canonical persistence', () => {
     expect(extended.statusCode, extended.body).toBe(200)
     expect(extended.json()).toMatchObject({ revision: 3, baseline: { buckets: [{ cash: '100' }],
       instruments: [{ id: 'local:yes' }, { id: 'local:no' }] } })
+    const differentCatalog = await app.inject({ method: 'POST', url: url + '/compare', headers, payload: { scenarioIds: [id, duplicate.json().id] } })
+    expect(differentCatalog.json()).toMatchObject({ compatibility: { sameBaseline: false, sameFinancialBaseline: true, sameAccountScope: true } })
     const deleted = await app.inject({ method: 'POST', url: url + '/' + id + '/delete', headers, payload: { revision: 3 } })
     expect(deleted.statusCode, deleted.body).toBe(204)
   })

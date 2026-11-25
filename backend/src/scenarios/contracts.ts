@@ -9,27 +9,36 @@ const model = (properties: Record<string, object>) => ({
 const revisions = { type: 'object', additionalProperties: text }
 const mode = { type: 'string', enum: ['actual', 'scratch'] }
 const range = { anyOf: [model({ best: text, worst: text }), { type: 'null' }] }
-const modeled = model({ authority: text, unsupported: list(text), result: settlementResult, cashInclusive: range, basisRelative: range })
+const modeled = model({ authority: text, coverage: text, unsupported: list(text), result: settlementResult, cashInclusive: range, basisRelative: range })
 const concentration = { anyOf: [model({ denominator: text, hhi: text, weights: list(text) }), { type: 'null' }] }
 const dimension = model({ metrics: concentration, unmapped: text, availability: { type: 'string', enum: ['unavailable', 'known_subset', 'known_marked_scope'] },
   identifiedHoldings: { type: 'integer' }, unmappedHoldings: { type: 'integer' }, rows: list(model({ id: text, value: text, weight: numberText })) })
+const inclusive = model({ denominator: numberText,
+  rows: list(model({ id: text, kind: text, value: numberText, weight: numberText })) })
 const allocation = model({ instrument: dimension, market: dimension, event: dimension, account: dimension, venue: dimension,
-  cashInclusive: concentration, acquisitionBasis: concentration })
+  cashInclusive: concentration, acquisitionBasis: concentration, cashInclusiveMarket: inclusive, cashInclusiveEvent: inclusive,
+  acquisitionBasisRows: model({ denominator: numberText, unavailable: { type: 'integer' },
+    rows: list(model({ id: text, bucket: text, instrument: text, value: numberText, weight: numberText })) }),
+  resolutionExposure: list(model({ id: text, positions: { type: 'integer' }, knownValue: text })) })
 export const evaluationResponse = model({
   methodology: text, status: { type: 'string', enum: ['calculated', 'partial', 'underfunded'] }, asset: text, mode,
   baselineAsOf: text, revisions, fundingOrder: text, weightBudget: numberText, additionalCapitalRequired: numberText, knownPending: numberText,
-  hypotheticalRealized: numberText,
+  hypotheticalRealized: numberText, knownAdditionalCapitalRequired: text, valuationBasis: text,
+  availability: model({ funding: text, underfunded: { type: 'boolean' }, quantities: text, valuation: text, basis: text,
+    realized: text, unrealized: text, fees: text, settlement: text }),
   bridge: model({ evidenceStartingValue: numberText, startingValue: numberText, addedCapital: text, withdrawnCapital: text, executionEffect: numberText,
     fees: numberText, remarkEffect: numberText, endingValue: numberText, normalizedChange: numberText, unexplained: numberText }),
   funding: list(model({ bucket: text, venue: text, account: text, asset: text, actualOrScratchStartingCash: numberText,
-    assumedStartingCash: numberText, addedCapital: text, withdrawnCapital: text, grossSales: text, purchases: text, fees: numberText, endingCash: numberText, shortfall: numberText })),
-  operations: list(model({ bucket: text, instrument: text, initialQuantity: text, proposedQuantity: text, delta: text,
+    assumedStartingCash: numberText, hypotheticalStartingCapital: numberText, additionalCapital: text, addedCapital: text, withdrawnCapital: text, grossSales: text, purchases: text, fees: numberText, endingCash: numberText, shortfall: numberText })),
+  operations: list(model({ bucket: text, instrument: text, initialQuantity: text, proposedQuantity: text, executionApplicability: text, delta: text,
     notional: text, feeAmount: numberText, feeStatus: text, realized: numberText, remainingBasis: numberText, netProceeds: numberText })),
   positions: list(model({ bucket: text, instrument: text, quantity: text, initialQuantity: text, initialBasis: numberText, initialValue: numberText, initialMark: numberText, basis: numberText,
     mark: numberText, value: numberText, unrealized: numberText, resolvesAt: numberText })),
   allocation: model({ before: allocation, after: allocation }),
   settlement: model({ before: modeled, verified: modeled, conditional: modeled }),
 })
-export const comparisonResponse = model({ compatibility: model({ sameAsset: { type: 'boolean' }, sameBaseline: { type: 'boolean' },
-  sameAssumptions: { type: 'boolean' }, conversion: text }),
+const boolean = { type: 'boolean' }
+export const comparisonResponse = model({ compatibility: model({ sameAsset: boolean, sameBaseline: boolean,
+  sameAssumptions: boolean, sameFinancialBaseline: boolean, sameAccountScope: boolean, sameValuationAssumptions: boolean,
+  sameCapitalBudget: boolean, sameFundingAssumptions: boolean, sameFeeMethodology: boolean, sameSettlementScope: boolean, conversion: text }),
 items: list(model({ id: text, name: text, revision: { type: 'integer' }, result: evaluationResponse })) })

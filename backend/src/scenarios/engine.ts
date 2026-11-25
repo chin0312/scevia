@@ -8,19 +8,26 @@ const zero = () => new D(0)
 const sum = (values: Decimal[]) => values.reduce((total, value) => total.plus(value), zero())
 const add = (left: Decimal | null, right: Decimal | null) => left === null || right === null ? null : left.plus(right)
 export const methodology = 'weighted-average-scenario-v1'
-export interface FundingBucket { id: string; venue: string; account: string; cash: string | null; pending: string | null }
+export interface FundingBucket { id: string; venue: string; account: string; cash: string | null; pending: string | null; inventoryComplete?: boolean; tradingVenue?: string }
 export interface ScenarioInstrument {
   id: string; mark: string | null; markAt?: string | null; market?: string; event?: string; resolvesAt?: string | null
   venue?: string; provider?: string; nativeMarket?: string; nativeInstrument?: string; settlementAsset?: string | null; outcome?: string | null; providerMarket?: string; lifecycle?: string
+  referenceScopes?: string[]
+  nativeOutcomeIndex?: number
+  nativeIdType?: 'position_id' | 'clob_token_id'
+  markSource?: 'scoped_holding_consensus' | 'public_retrieval_at_cutoff' | 'assumed_current_quote' | 'declared_local'
   latestPrice?: string | null; latestPriceAt?: string | null
   feeSchedule?: { version: 'polymarket-price-variance-v1'; rate: string; retrievedAt: string; source: 'gamma_market'; denomination: 'USDC' }
 }
-export interface ScenarioHolding { bucket: string; instrument: string; quantity: string; basis: string | null; quantityKnown?: boolean; mark?: string | null; markAt?: string | null }
+export interface ScenarioHolding { bucket: string; instrument: string; quantity: string; basis: string | null; quantityKnown?: boolean; mark?: string | null; markAt?: string | null; originalInstrument?: string }
 export interface ScenarioBaseline {
   methodology: typeof methodology; mode: 'actual' | 'scratch'; asset: string; asOf: string
   buckets: FundingBucket[]; instruments: ScenarioInstrument[]; holdings: ScenarioHolding[]
   rules: Omit<BinaryGroup, 'legs'>[]; constraints: SettlementConstraint[]
   missingRules?: string[]
+  publicInstruments?: ScenarioInstrument[]
+  instrumentAliases?: Record<string, string>
+  reservedRules?: Array<{ id: string; yes: string; no: string }>
   settlementGraphLimited?: boolean
   revisions: Record<string, string>
 }
@@ -30,20 +37,23 @@ export type Fee =
   | { mode: 'provider'; role: 'maker' | 'taker' }
 export interface Operation {
   bucket: string; instrument: string; kind: 'buy' | 'sell' | 'exit' | 'target_quantity' | 'buy_notional' | 'target_weight'
-  amount?: string | undefined; price: string; fee: Fee
+  amount?: string | undefined; price: string; fee: Fee; abstract?: boolean | undefined
 }
 export interface ScenarioInput {
+  hypotheticalBuckets?: Array<{ id: string; venue: string; account: string; asset: string; startingCapital: string }> | undefined
   operations: Operation[]
   funding: Array<{ bucket: string; added: string; withdrawn?: string | undefined; assumedCash?: string | undefined }>
   marks: Array<{ instrument: string; price: string }>
-  rules: Array<Omit<BinaryGroup, 'legs' | 'fixed' | 'asset' | 'unitPayout'> & { unitPayout?: string | undefined }>
+  rules: Array<Omit<BinaryGroup, 'legs' | 'fixed' | 'asset' | 'unitPayout'> & { unitPayout?: string | undefined; asset?: string | undefined }>
   constraints: SettlementConstraint[]
   outcomes: Array<{ group: string; winner: 'yes' | 'no' }>
 }
 const key = (bucket: string, instrument: string) => JSON.stringify([bucket, instrument])
 const amount = (input: string | null) => input === null ? null : new D(input)
 const fixed = (input: Decimal | null) => input?.toFixed() ?? null
-export class ScenarioError extends Error {}
+export class ScenarioError extends Error {
+  constructor(message: string, readonly operationIndex?: number) { super(message) }
+}
 
 export function validateInstrumentIdentities(instruments: ScenarioInstrument[]) {
   const nativeIdentities = new Set<string>()
@@ -55,19 +65,44 @@ export function validateInstrumentIdentities(instruments: ScenarioInstrument[]) 
   }
 }
 
-export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
+export function scopedReference(observations: Array<{ scope: string; price: string; asOf: string }>) {
+  const prices = new Set(observations.map(({ price }) => new D(price).toFixed()))
+  if (prices.size !== 1) return null
+  return { mark: prices.values().next().value!, markAt: observations.map(({ asOf }) => asOf).sort()[0]!,
+    referenceScopes: [...new Set(observations.map(({ scope }) => scope))].sort(), markSource: 'scoped_holding_consensus' as const }
+}
+
+export function evaluate(baseline: ScenarioBaseline, changes: ScenarioInput) {
+  const resolve = (id: string) => Object.hasOwn(baseline.instrumentAliases ?? {}, id) ? baseline.instrumentAliases![id]! : id
+  const input = { ...changes, operations: changes.operations.map((op) => ({ ...op, instrument: resolve(op.instrument) })),
+    marks: changes.marks.map((row) => ({ ...row, instrument: resolve(row.instrument) })),
+    rules: changes.rules.map((rule) => ({ ...rule, yes: resolve(rule.yes), no: resolve(rule.no) })) }
   if (baseline.methodology !== methodology) throw new ScenarioError('unsupported_methodology')
   const instruments = new Map(baseline.instruments.map((row) => [row.id, row]))
   const buckets = new Map(baseline.buckets.map((row) => [row.id, {
     ...row, cash: amount(row.cash), pending: amount(row.pending), added: zero(), withdrawn: zero(), assumed: null as Decimal | null,
     buys: zero(), sales: zero(), fees: zero() as Decimal | null,
   }]))
+  for (const row of input.hypotheticalBuckets ?? []) {
+    if (row.asset !== baseline.asset || buckets.has(row.id) || [...buckets.values()].some((bucket) =>
+      bucket.venue === row.venue && bucket.account === row.account)) throw new ScenarioError('invalid_hypothetical_bucket')
+    buckets.set(row.id, { ...row, cash: zero(), pending: zero(), inventoryComplete: true,
+      added: new D(row.startingCapital), withdrawn: zero(), assumed: null, buys: zero(), sales: zero(), fees: zero() })
+  }
+  const hypotheticalBuckets = new Map((input.hypotheticalBuckets ?? []).map((row) => [row.id, row]))
+  const inventoryComplete = baseline.buckets.every((bucket) => bucket.inventoryComplete !== false)
   const holdings = new Map(baseline.holdings.map((row) => [key(row.bucket, row.instrument), {
     ...row, quantity: new D(row.quantity), basis: amount(row.basis),
   }]))
-  const mark = (instrument: string) => amount(instruments.get(instrument)?.mark ?? null)
-  const holdingMark = (row: { instrument: string; mark?: string | null }) =>
-    row.mark === undefined ? mark(row.instrument) : amount(row.mark)
+  const verifiedMaxima = new Map(baseline.rules.flatMap((rule) =>
+    [rule.yes, rule.no].map((id) => [id, new D(rule.unitPayout ?? '1')] as const)))
+  const recordedMaximum = (id: string) => verifiedMaxima.get(id)
+    ?? (instruments.get(id)?.provider === 'polymarket' ? new D(1) : null)
+  const holdingMark = (row: { instrument: string; mark?: string | null }) => {
+    const value = amount(row.mark === undefined ? instruments.get(row.instrument)?.mark ?? null : row.mark)
+    const max = recordedMaximum(row.instrument)
+    return value !== null && (value.lt(0) || max?.lt(value)) ? null : value
+  }
   const overrides = new Map(input.marks.map((row) => [row.instrument, new D(row.price)]))
   if (overrides.size !== input.marks.length || [...overrides.keys()].some((id) => !instruments.has(id))) throw new ScenarioError('invalid_mark_scope')
   const fundingIds = new Set<string>()
@@ -77,11 +112,11 @@ export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
     fundingIds.add(funding.bucket)
     if (funding.assumedCash !== undefined && bucket.cash !== null) throw new ScenarioError('known_cash_cannot_be_assumed')
     bucket.assumed = amount(funding.assumedCash ?? null)
-    bucket.added = new D(funding.added)
+    bucket.added = bucket.added.plus(funding.added)
     bucket.withdrawn = new D(funding.withdrawn ?? 0)
   }
   const marked = (rows: Iterable<{ instrument: string; quantity: Decimal; quantityKnown?: boolean; mark?: string | null }>, proposed: boolean) => {
-    let total: Decimal | null = zero()
+    let total: Decimal | null = inventoryComplete ? zero() : null
     for (const row of rows) {
       if (row.quantity.isZero() && row.quantityKnown !== false) continue
       const price = (proposed ? overrides.get(row.instrument) : undefined) ?? holdingMark(row)
@@ -89,6 +124,25 @@ export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
     }
     return total
   }
+  const reviewed = [...baseline.rules, ...(baseline.reservedRules ?? [])]
+  const conditionalRules = input.rules.map(({ unitPayout, asset, ...rule }) => {
+    const yes = instruments.get(rule.yes)
+    const no = instruments.get(rule.no)
+    if (!yes || !no || yes.id === no.id || (asset !== undefined && asset !== baseline.asset)
+      || [yes, no].some((row) => row.settlementAsset && row.settlementAsset !== baseline.asset)
+      || ((yes.market || no.market) && yes.market !== no.market)
+      || (yes.nativeOutcomeIndex !== undefined && yes.nativeOutcomeIndex === no.nativeOutcomeIndex)
+      || (yes.venue && no.venue && yes.venue !== no.venue)
+      || (unitPayout !== undefined && !new D(unitPayout).gt(0))) throw new ScenarioError('invalid_conditional_payout')
+    if (reviewed.some((item) => item.id === rule.id || item.id === yes.market
+      || [item.yes, item.no].some((id) => id === yes.id || id === no.id))
+      || baseline.missingRules?.includes(rule.id)) throw new ScenarioError('reviewed_payout_cannot_be_overridden')
+    return { ...rule, ...(unitPayout === undefined ? {} : { unitPayout }), asset: baseline.asset }
+  })
+  const maxima = new Map([...conditionalRules, ...baseline.rules].flatMap((rule) =>
+    [rule.yes, rule.no].map((id) => [id, new D(rule.unitPayout ?? '1')] as const)))
+  const maximum = (instrument: ScenarioInstrument) => recordedMaximum(instrument.id) ?? maxima.get(instrument.id) ?? null
+  for (const [id, price] of overrides) if (maximum(instruments.get(id)!)?.lt(price)) throw new ScenarioError('reference_price_exceeds_payout')
   const initialMarked = marked(holdings.values(), false)
   const pending = [...buckets.values()].reduce((total, bucket) => add(total, bucket.pending), zero() as Decimal | null)
   const actualOpeningCash = [...buckets.values()].reduce((total, bucket) => add(total, bucket.cash), zero() as Decimal | null)
@@ -105,13 +159,15 @@ export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
   let remarkEffect: Decimal | null = zero()
   let realized: Decimal | null = zero()
   const used = new Set<string>()
-  const operations = input.operations.map((op) => {
+  const operations = input.operations.map((op, index) => {
     const id = key(op.bucket, op.instrument)
     const bucket = buckets.get(op.bucket)
-    if (!bucket || !instruments.has(op.instrument) || used.has(id)) throw new ScenarioError('invalid_operation_scope')
+    if (!bucket || !instruments.has(op.instrument) || used.has(id)) throw new ScenarioError('invalid_operation_scope', index)
     used.add(id)
-    const prior = holdings.get(id) ?? { bucket: op.bucket, instrument: op.instrument, quantity: zero(), basis: zero(), quantityKnown: true }
-    if (prior.quantityKnown === false) throw new ScenarioError('quantity_unavailable')
+    const existing = holdings.get(id)
+    if (!existing && bucket.inventoryComplete === false) throw new ScenarioError('inventory_unavailable', index)
+    const prior = existing ?? { bucket: op.bucket, instrument: op.instrument, quantity: zero(), basis: zero(), quantityKnown: true }
+    if (prior.quantityKnown === false) throw new ScenarioError('quantity_unavailable', index)
     const price = new D(op.price)
     const requested = new D(op.amount ?? '0')
     let delta = requested
@@ -119,20 +175,29 @@ export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
     if (op.kind === 'sell') delta = requested.neg()
     if (op.kind === 'target_quantity') delta = requested.minus(prior.quantity)
     if (op.kind === 'buy_notional') {
-      if (price.lte(0)) throw new ScenarioError('positive_execution_price_required')
+      if (price.lte(0)) throw new ScenarioError('positive_execution_price_required', index)
       delta = requested.div(price).toDecimalPlaces(18, Decimal.ROUND_DOWN)
     }
     if (op.kind === 'target_weight') {
       const reference = overrides.get(op.instrument) ?? holdingMark(prior)
-      if (!reference?.gt(0) || !weightBudget?.gt(0)) throw new ScenarioError('target_weight_basis_unavailable')
+      if (!reference?.gt(0) || !weightBudget?.gt(0)) throw new ScenarioError('target_weight_basis_unavailable', index)
       delta = requested.mul(weightBudget).div(reference).toDecimalPlaces(18, Decimal.ROUND_DOWN).minus(prior.quantity)
     }
     const nextQuantity = prior.quantity.plus(delta)
-    if (nextQuantity.lt(0)) throw new ScenarioError('short_sale_unsupported')
+    if (nextQuantity.lt(0)) throw new ScenarioError('short_sale_unsupported', index)
     const notional = delta.abs().mul(price)
     const instrument = instruments.get(op.instrument)!
-    if (instrument.venue && instrument.venue !== bucket.venue) throw new ScenarioError('instrument_venue_mismatch')
-    if (instrument.settlementAsset && instrument.settlementAsset !== baseline.asset) throw new ScenarioError('instrument_asset_mismatch')
+    const abstract = op.abstract === true || bucket.venue === 'abstract'
+    const venue = bucket.tradingVenue ?? bucket.venue
+    const mappedImport = existing?.originalInstrument === instrument.id && !['polymarket', 'kalshi'].includes(bucket.venue)
+    if (instrument.venue && instrument.venue !== venue && bucket.venue !== 'abstract' && !mappedImport) {
+      throw new ScenarioError('instrument_venue_mismatch', index)
+    }
+    if (maximum(instrument)?.lt(price)) throw new ScenarioError('execution_price_exceeds_payout', index)
+    if (!delta.isZero() && !abstract && instrument.lifecycle && !['open', 'unknown'].includes(instrument.lifecycle)) {
+      throw new ScenarioError('instrument_not_open', index)
+    }
+    if (instrument.settlementAsset && instrument.settlementAsset !== baseline.asset) throw new ScenarioError('instrument_asset_mismatch', index)
     const schedule = instrument.feeSchedule
     const providerFee = op.fee.mode === 'provider' && schedule?.denomination === baseline.asset && price.lte(1)
       ? op.fee.role === 'maker' ? zero() : delta.abs().mul(schedule.rate).mul(price).mul(new D(1).minus(price)).toDecimalPlaces(5, Decimal.ROUND_HALF_UP)
@@ -156,7 +221,8 @@ export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
       realized = add(realized, pnl)
     }
     holdings.set(id, { ...prior, quantity: nextQuantity, basis })
-    return { ...op, initialQuantity: prior.quantity.toFixed(), proposedQuantity: nextQuantity.toFixed(),
+    return { ...op, executionApplicability: abstract ? 'abstract' : instrument.lifecycle === 'open' ? 'open_market_assumption' : 'lifecycle_unverified',
+      initialQuantity: prior.quantity.toFixed(), proposedQuantity: nextQuantity.toFixed(),
       delta: delta.toFixed(), notional: notional.toFixed(), feeAmount: fixed(fee), feeStatus: delta.isZero() ? 'no_trade' : fee === null ? 'unavailable' : op.fee.mode, realized: fixed(pnl),
       remainingBasis: fixed(basis), netProceeds: delta.lt(0) ? fixed(fee === null ? null : notional.minus(fee)) : null }
   })
@@ -171,7 +237,9 @@ export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
     const available = bucket.cash ?? bucket.assumed
     const ending = add(available?.plus(bucket.added).minus(bucket.withdrawn).plus(bucket.sales).minus(bucket.buys) ?? null, bucket.fees?.neg() ?? null)
     return { bucket: bucket.id, venue: bucket.venue, account: bucket.account, asset: baseline.asset,
-      actualOrScratchStartingCash: fixed(bucket.cash), assumedStartingCash: fixed(bucket.assumed), addedCapital: fixed(bucket.added), withdrawnCapital: fixed(bucket.withdrawn),
+      actualOrScratchStartingCash: hypotheticalBuckets.has(bucket.id) ? null : fixed(bucket.cash),
+      hypotheticalStartingCapital: hypotheticalBuckets.get(bucket.id)?.startingCapital ?? null,
+      additionalCapital: fixed(bucket.added.minus(hypotheticalBuckets.get(bucket.id)?.startingCapital ?? 0)), assumedStartingCash: fixed(bucket.assumed), addedCapital: fixed(bucket.added), withdrawnCapital: fixed(bucket.withdrawn),
       grossSales: fixed(bucket.sales), purchases: fixed(bucket.buys), fees: fixed(bucket.fees), endingCash: fixed(ending),
       shortfall: ending === null ? null : D.max(0, ending.neg()).toFixed() }
   })
@@ -180,6 +248,7 @@ export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
   const endingCash = total('endingCash')
   const fees = total('fees')
   const shortfall = total('shortfall')
+  const knownAdditionalCapitalRequired = sum(funding.flatMap((row) => row.shortfall === null ? [] : [new D(row.shortfall)]))
   const endingMarked = marked(proposed, true)
   const endingValue = add(add(endingMarked, endingCash), pending)
   const explained = add(add(add(startingValue, netCapital), executionEffect), add(remarkEffect, fees?.neg() ?? null))
@@ -214,19 +283,43 @@ export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
     const cashInclusive = cash === null || open === null || pending === null
       || (after ? funding.some((row) => row.endingCash === null || new D(row.endingCash).lt(0)) : !openingCashNonnegative)
       ? null : concentration([open.toFixed(), cash.toFixed(), pending.toFixed()])
+    const market = dimension((row) => instruments.get(row.instrument)?.market)
+    const event = dimension((row) => instruments.get(row.instrument)?.event)
+    const inclusive = (view: typeof market) => {
+      const denominator = cashInclusive?.denominator ?? null
+      const rows = [...view.rows.map(({ id, value }) => ({ id, kind: 'identified', value })),
+        { id: 'unmapped', kind: 'unmapped', value: view.unmapped },
+        { id: 'cash', kind: 'cash', value: fixed(cash) }, { id: 'pending', kind: 'pending', value: fixed(pending) }]
+      return { denominator, rows: rows.map((row) => ({ ...row,
+        weight: denominator === null || row.value === null ? null : new D(row.value).div(denominator).toFixed() })) }
+    }
+    const basisRows = rows.filter((row) => !row.quantity.isZero()).map((row) => ({
+      id: key(row.bucket, row.instrument), bucket: row.bucket, instrument: row.instrument, value: fixed(row.basis),
+    }))
+    const basisMetrics = concentration(basisRows.flatMap((row) => row.value === null ? [] : [row.value]))
+    const resolution = new Map<string, { positions: number; knownValue: Decimal }>()
+    for (const row of rows.filter((item) => !item.quantity.isZero())) {
+      const at = instruments.get(row.instrument)?.resolvesAt
+      const days = at ? (Date.parse(at) - Date.parse(baseline.asOf)) / 86_400_000 : NaN
+      const group = !Number.isFinite(days) ? 'unknown' : days <= 0 ? 'past_hint' : days <= 7 ? 'next_7_days' : days <= 30 ? 'next_30_days' : 'later'
+      const total = resolution.get(group) ?? { positions: 0, knownValue: zero() }
+      total.positions += 1
+      total.knownValue = total.knownValue.plus(values.find((value) => value.bucket === row.bucket && value.instrument === row.instrument)?.value ?? 0)
+      resolution.set(group, total)
+    }
     return { instrument: dimension((row) => instruments.get(row.instrument)?.market ? row.instrument : key(row.bucket, row.instrument)),
-      market: dimension((row) => instruments.get(row.instrument)?.market), event: dimension((row) => instruments.get(row.instrument)?.event),
+      market, event, cashInclusiveMarket: inclusive(market), cashInclusiveEvent: inclusive(event),
       account: dimension((row) => row.bucket), venue: dimension((row) => buckets.get(row.bucket)?.venue),
-      acquisitionBasis: concentration(rows.flatMap((row) => row.basis === null || row.quantity.isZero() ? [] : [row.basis.toFixed()])),
+      acquisitionBasis: basisMetrics,
+      acquisitionBasisRows: { denominator: basisMetrics?.denominator ?? null,
+        unavailable: basisRows.filter((row) => row.value === null).length,
+        rows: basisRows.map((row) => ({ ...row, weight: row.value === null || !basisMetrics
+          ? null : new D(row.value).div(basisMetrics.denominator).toFixed() })) },
+      resolutionExposure: [...resolution].map(([id, row]) => ({ id, positions: row.positions, knownValue: row.knownValue.toFixed() })),
       cashInclusive }
   }
   const modeled = (rows: typeof proposed, after: boolean, hypothetical: boolean) => {
-    const rules = hypothetical ? [...baseline.rules, ...input.rules.map(({ unitPayout, ...rule }) =>
-      ({ ...rule, ...(unitPayout === undefined ? {} : { unitPayout }), asset: baseline.asset }))] : baseline.rules
-    if (hypothetical && (input.rules.some((rule) => rule.yes === rule.no || (rule.unitPayout !== undefined && !new D(rule.unitPayout).gt(0)))
-      || input.rules.some((rule) => ![rule.yes, rule.no].every((id) => id.startsWith('local:') && instruments.has(id))))) {
-      throw new ScenarioError('scenario_rule_requires_local_instruments')
-    }
+    const rules = hypothetical ? [...baseline.rules, ...conditionalRules] : baseline.rules
     if (hypothetical && (new Set(rules.map((rule) => rule.id)).size !== rules.length
       || new Set(rules.flatMap((rule) => [rule.yes, rule.no])).size !== rules.length * 2)) {
       throw new ScenarioError('conflicting_instrument_assignment')
@@ -234,7 +327,7 @@ export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
     const outcomes = new Map(input.outcomes.map(({ group, winner }) => [group, winner]))
     if (hypothetical && baseline.rules.some((rule) => rule.fixed !== undefined && outcomes.has(rule.id) && outcomes.get(rule.id) !== rule.fixed)) {
       return { authority: 'scenario_assumptions', unsupported: [], result: { status: 'unavailable' as const, reason: 'no_feasible_outcomes' },
-        cashInclusive: null, basisRelative: null }
+        cashInclusive: null, basisRelative: null, coverage: 'unavailable_or_supported_subset' }
     }
     if (hypothetical && (outcomes.size !== input.outcomes.length || [...outcomes.keys()].some((id) => !rules.some((rule) => rule.id === id)))) {
       throw new ScenarioError('invalid_outcome_scope')
@@ -262,18 +355,29 @@ export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
     const cash = after ? endingCash : openingCash
     const allBasis = rows.reduce((known, row) => add(known, row.basis), zero() as Decimal | null)
     return { authority: hypothetical ? 'scenario_assumptions' : 'reviewed_rules', unsupported, result,
-      cashInclusive: result.status === 'exact' && !unsupported.length && cash !== null && pending !== null && !cash.lt(0)
+      coverage: result.status !== 'exact' ? 'unavailable_or_supported_subset' : inventoryComplete && !unsupported.length ? 'complete_selected_model' : 'supported_subset',
+      cashInclusive: result.status === 'exact' && inventoryComplete && !unsupported.length && cash !== null && pending !== null && !cash.lt(0)
         && (after ? shortfall?.isZero() : openingCashNonnegative) ? { best: cash.plus(pending).plus(result.best.payout).toFixed(),
           worst: cash.plus(pending).plus(result.worst.payout).toFixed() } : null,
-      basisRelative: result.status === 'exact' && !unsupported.length && allBasis !== null
+      basisRelative: result.status === 'exact' && inventoryComplete && !unsupported.length && allBasis !== null
         ? { best: new D(result.best.payout).minus(allBasis).toFixed(), worst: new D(result.worst.payout).minus(allBasis).toFixed() } : null }
   }
   const baselinePositions = new Map(baseline.holdings.map((row) => [key(row.bucket, row.instrument), row]))
   const original = baseline.holdings.map((row) => ({ ...row, quantity: new D(row.quantity), basis: amount(row.basis) }))
+  const settlement = { before: modeled(original, false, false), verified: modeled(proposed, true, false),
+    conditional: modeled(proposed, true, true) }
   return { methodology, asset: baseline.asset, mode: baseline.mode, baselineAsOf: baseline.asOf, revisions: baseline.revisions,
     status: funding.some((row) => row.shortfall !== null && new D(row.shortfall).gt(0)) ? 'underfunded'
       : shortfall === null || endingValue === null ? 'partial' : 'calculated',
-    funding, additionalCapitalRequired: fixed(shortfall), operations, weightBudget: fixed(weightBudget),
+    funding, additionalCapitalRequired: fixed(shortfall), knownAdditionalCapitalRequired: knownAdditionalCapitalRequired.toFixed(),
+    availability: { funding: shortfall === null ? 'partial' : 'complete', underfunded: knownAdditionalCapitalRequired.gt(0),
+      quantities: inventoryComplete && proposed.every((row) => row.quantityKnown !== false) ? 'complete' : 'partial',
+      valuation: endingValue === null ? 'partial' : 'complete',
+      basis: inventoryComplete && proposed.every((row) => row.basis !== null) ? 'complete' : 'partial',
+      realized: realized === null ? 'partial' : 'complete',
+      unrealized: endingMarked !== null && proposed.every((row) => row.basis !== null) ? 'complete' : 'partial',
+      fees: fees === null ? 'partial' : 'complete', settlement: settlement.verified.coverage },
+    valuationBasis: baseline.instruments.some((row) => row.markSource === 'assumed_current_quote') ? 'mixed_current_quote_assumption' : 'frozen_with_explicit_overrides', operations, weightBudget: fixed(weightBudget),
     fundingOrder: 'net_batch_sales_available_for_purchases',
     positions: proposed.map((row) => {
       const before = baselinePositions.get(key(row.bucket, row.instrument))
@@ -294,7 +398,6 @@ export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
       unexplained: endingValue === null || explained === null ? null : endingValue.minus(explained).toFixed() },
     knownPending: fixed(pending), hypotheticalRealized: fixed(realized),
     allocation: { before: allocation(original, false), after: allocation(proposed, true) },
-    settlement: { before: modeled(original, false, false), verified: modeled(proposed, true, false),
-      conditional: modeled(proposed, true, true) },
+    settlement,
   }
 }

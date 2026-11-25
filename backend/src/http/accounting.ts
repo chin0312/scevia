@@ -1,5 +1,5 @@
 import { registerScenarioRoutes } from './scenarios.js'
-import { methodology, ScenarioError, type ScenarioBaseline } from '../scenarios/engine.js'
+import { methodology, scopedReference, ScenarioError, type ScenarioBaseline } from '../scenarios/engine.js'
 import { canonicalInstrumentKeys, instrumentKey } from '../analytics/scope.js'
 import { Decimal } from 'decimal.js'
 import { createHash, randomUUID } from 'node:crypto'
@@ -751,26 +751,41 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
           reported: reported.edges.sort(edgeOrder).map((edge) => ({ ...edge, reviewedAt: edge.reviewedAt.toISOString() })) },
       ]),
       ...analyzeExposure(state, asset, accounts, metadata, rules, effective.edges, effective.graph, effective.graphLimit, context.accountIdentities, canonicalKeys) }
-    return { response, state, canonicalKeys, metadata, effective, rules }
+    return { response, state, canonicalKeys, metadata, effective, rules, evidence }
   }
 
   registerScenarioRoutes(app, database, owned, async (tx, portfolioId, source, publicInstruments): Promise<ScenarioBaseline> => {
-    const { mode, asset, catalog, local } = source
+    const { mode, asset, local } = source
+    const publicMatches = publicInstruments.length ? await tx.select({ id: instruments.id, token: instruments.externalId,
+      market: markets.externalId, provider: markets.providerCode }).from(instruments).innerJoin(markets, eq(instruments.marketId, markets.id))
+      .where(and(eq(markets.providerCode, 'polymarket'), inArray(instruments.externalId, publicInstruments.map((row) => row.nativeInstrument!)))) : []
+    const aliases: Record<string, string> = {}
+    const normalizedPublic = publicInstruments.map((row) => {
+      const exact = publicMatches.find((entry) => entry.provider === row.provider && entry.market === row.nativeMarket && entry.token === row.nativeInstrument)
+      if (exact) aliases[row.id] = exact.id
+      return { ...row, id: exact?.id ?? row.id }
+    })
+    const catalog = [...new Set([...source.catalog, ...Object.values(aliases)])]
+    const venueFor = (provider: string) => ['polymarket', 'kalshi'].includes(provider) ? provider : undefined
+    const metadataFor = (entry: Awaited<ReturnType<typeof loadExposureCatalog>>['metadata'][number]) => {
+      const venue = venueFor(entry.provider)
+      return { market: entry.market, event: entry.event, outcome: entry.outcome, lifecycle: entry.lifecycle,
+        provider: entry.provider, nativeMarket: entry.providerMarket, nativeInstrument: entry.nativeInstrument, providerMarket: entry.providerMarket,
+        settlementAsset: entry.settlementAsset ?? entry.marketAsset, resolvesAt: entry.resolvesAt?.toISOString() ?? null,
+        ...(venue ? { venue } : {}) }
+    }
     const asOf = new Date(source.asOf).toISOString()
     const actual = mode === 'actual' ? await loadExposureInputs(tx, portfolioId, asOf, asset,
       { accounts: source.accounts.join(','), ...(source.venue === undefined ? {} : { venue: source.venue }) }, catalog) : null
     const model = actual ?? await loadExposureCatalog(tx, asOf, asset, catalog, [], [], catalog)
     const listings = new Map(model.metadata.map((row) => [row.instrument, row]))
-    const baselineInstruments = new Map(publicInstruments.map((row) => [row.id, row]))
+    const baselineInstruments = new Map(normalizedPublic.map((row) => [row.id, row]))
     for (const id of catalog) {
       const entry = listings.get(id)!
       if ((entry.settlementAsset ?? entry.marketAsset) && (entry.settlementAsset ?? entry.marketAsset) !== asset) throw new ScenarioError('catalog_instrument_asset_mismatch')
-      baselineInstruments.set(id, { id, mark: null, market: entry.market, event: entry.event, outcome: entry.outcome,
-        lifecycle: entry.lifecycle, provider: entry.provider, nativeMarket: entry.providerMarket,
-        nativeInstrument: entry.nativeInstrument, providerMarket: entry.providerMarket, settlementAsset: entry.settlementAsset ?? entry.marketAsset,
-        resolvesAt: entry.resolvesAt?.toISOString() ?? null })
+      baselineInstruments.set(id, { id, mark: null, ...baselineInstruments.get(id), ...metadataFor(entry) })
     }
-    for (const row of local) baselineInstruments.set(row.id, { id: row.id, mark: row.mark })
+    for (const row of local) baselineInstruments.set(row.id, { id: row.id, mark: row.mark, markSource: 'declared_local' })
     const bucketKey = (row: { venue: string; account: string }) => JSON.stringify([row.venue, row.account])
     const cashRows = actual?.state.cash.filter((row) => row.asset === asset) ?? []
     const positions = actual?.state.holdings.filter((row) => row.asset === asset) ?? []
@@ -780,7 +795,15 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
         const scoped = positions.filter((row) => row.venue === scope.venue && row.account === scope.account)
         const pendingKnown = cash?.openingInventoryAt != null && scoped.every((row) => row.settlementAvailability === 'selected_entitlements_only')
         const pending = pendingKnown ? scoped.reduce((value, row) => value.plus(row.pending), new AnalyticalDecimal(0)).toFixed() : null
-        return { id: bucketKey(scope), venue: scope.venue, account: scope.account, cash: cash?.balance ?? null, pending,
+        const providers = [...new Set(scoped.flatMap((row) => {
+          const provider = actual!.canonicalKeys.has(instrumentKey(row, row.instrument)) ? listings.get(row.instrument)?.provider : undefined
+          return provider && venueFor(provider) ? [provider] : []
+        }))]
+        const tradingVenue = venueFor(scope.venue) ?? (providers.length === 1 ? providers[0] : undefined)
+        const inventoryComplete = pendingKnown && !actual!.state.discrepancies.some(({ scope: issue, reason }) =>
+          issue.venue === scope.venue && issue.account === scope.account && (issue.asset === asset || issue.asset === 'UNKNOWN')
+          && reason !== 'same_time_marks_conflict' && (issue.instrument !== null || issue.type === 'opening_inventory' || issue.type === 'unresolved_activity'))
+        return { id: bucketKey(scope), inventoryComplete, ...(tradingVenue ? { tradingVenue } : {}), venue: scope.venue, account: scope.account, cash: cash?.balance ?? null, pending,
           coverage: cash?.historyCoverage ?? 'unverified', inventoryAt: cash?.openingInventoryAt ?? null,
           pendingEntitlements: scoped.flatMap((row) => row.entitlements.map((entitlement) =>
             ({ instrument: row.instrument, ...entitlement }))) }
@@ -790,12 +813,33 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       const identity = isCanonical ? listings.get(row.instrument) : undefined
       const id = identity ? row.instrument : 'holding:' + digest([row.venue, row.account, row.instrument])
       const candidateMark = row.markStatus === 'estimated' ? row.mark : null
-      baselineInstruments.set(id, { ...baselineInstruments.get(id), id, mark: null, ...(identity ? { market: identity.market, event: identity.event, provider: identity.provider, nativeMarket: identity.providerMarket,
-          nativeInstrument: identity.nativeInstrument, resolvesAt: identity.resolvesAt?.toISOString() ?? null } : {}) })
+      baselineInstruments.set(id, { id, mark: null, ...baselineInstruments.get(id), ...(identity ? metadataFor(identity) : {}) })
       return { bucket: bucketKey(row), instrument: id, quantity: row.quantity,
         quantityKnown: row.quantityStatus === 'reconstructed_from_declaration', basis: row.basisAvailability === 'selected_events_only' ? row.basis : null,
         originalInstrument: row.instrument, mark: candidateMark, markAt: row.markAt }
     })
+    for (const [id, instrument] of baselineInstruments) {
+      if (!listings.has(id) || instrument.mark !== null || !actual) continue
+      const observations = new Map(holdings.filter((row) => row.instrument === id && row.quantityKnown && row.mark !== null && row.markAt !== null)
+        .map((row) => [row.bucket, { scope: row.bucket, price: row.mark!, asOf: row.markAt! }]))
+      const markedScopes = new Map<string, { scope: string; asOf: string; prices: Set<string> }>()
+      for (const item of actual.evidence) {
+        const row = item.observation
+        if (item.unresolvedReason || row.type !== 'mark' || row.instrument !== id || row.asset !== asset || row.price === null
+          || row.timestamp > asOf || Date.parse(asOf) - Date.parse(row.timestamp) > 86_400_000
+          || (!('providerAccountId' in item) && row.canonicalInstrumentId !== id && !actual.canonicalKeys.has(instrumentKey(row, id)))) continue
+        const scope = bucketKey(row)
+        const prior = markedScopes.get(scope)
+        if (!prior || prior.asOf < row.timestamp) markedScopes.set(scope, { scope, asOf: row.timestamp, prices: new Set([row.price]) })
+        else if (prior.asOf === row.timestamp) prior.prices.add(row.price)
+      }
+      for (const row of markedScopes.values()) {
+        if (observations.has(row.scope)) continue
+        if (row.prices.size === 1) observations.set(row.scope, { ...row, price: row.prices.values().next().value! })
+      }
+      const reference = scopedReference([...observations.values()])
+      if (reference) baselineInstruments.set(id, { ...instrument, ...reference })
+    }
     if (!buckets.length || buckets.length > 100 || holdings.length > 250) throw new ScenarioError('baseline_scope_limit')
     const rules = model.rules.filter((rule) => model.effective.graph.has(rule.market) && rule.asset === asset && rule.reviewedAt.toISOString() <= asOf
       && [rule.yes, rule.no].every((id) => listings.get(id)?.market === rule.market)
@@ -808,6 +852,9 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       instruments: [...baselineInstruments.values()].sort((a, b) => a.id.localeCompare(b.id)),
       rules: rules.sort((a, b) => a.id.localeCompare(b.id)),
       constraints: constraints.sort((a, b) => a.left.localeCompare(b.left) || a.right.localeCompare(b.right)),
+      publicInstruments, instrumentAliases: aliases,
+      reservedRules: model.rules.filter((rule) => rule.reviewedAt.toISOString() <= asOf)
+        .map((rule) => ({ id: rule.market, yes: rule.yes, no: rule.no })).sort((a, b) => a.id.localeCompare(b.id)),
       settlementGraphLimited: model.effective.graphLimit,
       missingRules: [...model.effective.graph].filter((id) => !rules.some((rule) => rule.id === id)).sort(),
       revisions: actual ? { public: digest(publicInstruments), financial: actual.response.context.evidenceRevision, coverage: actual.response.context.coverageRevision,

@@ -141,3 +141,5 @@ Phase 4 analytics are scoped read models over Phase 3 replay. Return calculation
 Phase 4 exposes separate revisions for selected accounting evidence, provider coverage, snapshots, current catalog and reviewed settlement inputs. Phase 5 can freeze the scope and revisions of a baseline and reuse the pure analytics functions with isolated scenario inputs. See [Phase 4 methodology](ANALYTICS.md).
 
 Phase 5 stores portfolio-owned scenario inputs with immutable normalized baselines and optimistic revisions. Its pure simulator applies hypothetical trades outside the actual ledger. Reviewed and conditional exposure reuse the Phase 4 settlement solver. See [Scenario calculation and persistence](SCENARIOS.md).
+
+Scenario hardening separates instrument identity from conditional payout authority. Scenario-only funding buckets and resolved operation changes remain revisioned inputs. Baseline preview tokens pin the exact frozen evidence returned to the client.
