@@ -1,7 +1,7 @@
 import { and, desc, eq, lte, sql } from 'drizzle-orm'
 import { Decimal } from 'decimal.js'
 import type { Database } from '../db/client.js'
-import { activityFactOccurrences, cashBalanceSnapshots, cashMovements, dataCoverage, fills, instruments, positionSnapshots,
+import { activityFactOccurrences, cashBalanceSnapshots, cashMovements, dataCoverage, fills, instruments, markets, positionSnapshots,
   priceObservations, providerAccounts, providerActivityFacts, settlements, sourceRecords } from '../db/schema.js'
 import type { Evidence, FinancialObservation } from './model.js'
 
@@ -13,9 +13,10 @@ export async function loadProviderEvidence(db: Pick<Database, 'select' | 'select
   const owned = eq(providerAccounts.portfolioId, portfolioId)
   const account = { account: providerAccounts.id, venue: providerAccounts.providerCode }
   const source = { sourceRecordId: sourceRecords.id, payloadSha256: sourceRecords.payloadSha256 }
-  const tradeRows = await db.select({ ...account, ...source, row: fills, instrument: instruments.id }).from(fills)
+  const tradeRows = await db.select({ ...account, ...source, row: fills, instrument: instruments.id, market: markets.id, event: markets.eventId, title: markets.title, externalInstrument: instruments.externalId }).from(fills)
       .innerJoin(providerAccounts, eq(fills.providerAccountId, providerAccounts.id))
       .innerJoin(instruments, eq(fills.instrumentId, instruments.id))
+      .innerJoin(markets, eq(instruments.marketId, markets.id))
       .innerJoin(sourceRecords, eq(fills.sourceRecordId, sourceRecords.id))
       .where(and(owned, lte(fills.occurredAt, asOf))).orderBy(fills.occurredAt, fills.id).limit(limit)
   const cashRows = await db.select({ ...account, ...source, row: cashMovements }).from(cashMovements)
@@ -69,6 +70,7 @@ export async function loadProviderEvidence(db: Pick<Database, 'select' | 'select
       fee: row.feeStatus === 'reported' ? nullable(row.feeAmount) : null },
     row.identityKind !== 'provider_native' ? 'provider_fill_identity_ambiguous'
       : !['confirmed', 'final'].includes(row.finality) ? 'provider_fill_finality_unverified' : undefined)
+    evidence.at(-1)!.instrumentMetadata = { market: ref.market, event: ref.event, title: ref.title, instrument: ref.externalInstrument }
   }
   for (const ref of cashRows) {
     const row = ref.row
@@ -90,8 +92,15 @@ export async function loadProviderEvidence(db: Pick<Database, 'select' | 'select
     const row = ref.row
     const knownAt = row.occurredAt ?? ref.firstIngestedAt
     if (knownAt > asOf) continue
-    add(ref, { id: null, timestamp: knownAt.toISOString(),
-      type: 'merge', asset: row.assetCode ?? 'UNKNOWN' }, 'provider_activity_requires_reconciliation')
+    add(ref, { id: null, timestamp: knownAt.toISOString(), type: 'unresolved_activity', asset: row.assetCode ?? 'UNKNOWN',
+      instrument: row.externalInstrumentId, quantity: nullable(row.quantity), amount: nullable(row.amount), price: nullable(row.price),
+    }, 'provider_activity_requires_reconciliation')
+    evidence.at(-1)!.providerActivity = {
+      type: row.activityType, classification: row.classification, occurredAt: row.occurredAt?.toISOString() ?? null,
+      transactionHash: row.transactionHash, externalId: row.externalId, market: row.externalMarketId,
+      instrument: row.externalInstrumentId, side: row.side, largestObservedRunCount: ref.largestObservedRunCount,
+      identityKind: row.identityKind, reason: row.resolutionReason,
+    }
   }
   for (const ref of markRows) {
     const row = ref.row
@@ -104,7 +113,9 @@ export async function loadProviderEvidence(db: Pick<Database, 'select' | 'select
   const activityEvidence = factRows.filter(({ row, firstIngestedAt }) => (row.occurredAt ?? firstIngestedAt) <= asOf)
     .map(({ account, venue, sourceRecordId, row, largestObservedRunCount }) => ({
       account, venue, sourceRecordId, occurredAt: row.occurredAt, classification: row.classification, activityType: row.activityType,
-      largestObservedRunCount,
+      largestObservedRunCount, transactionHash: row.transactionHash, externalId: row.externalId,
+      market: row.externalMarketId, instrument: row.externalInstrumentId, quantity: row.quantity,
+      price: row.price, amount: row.amount, asset: row.assetCode, identityKind: row.identityKind, reason: row.resolutionReason,
     }))
   return { evidence, accounts, positions, balances, coverage, activityEvidence, truncated }
 }

@@ -41,7 +41,7 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
     mark: Decimal | null; markAt: string | null; markSources: EvidenceReference[]
   }>()
   const cash = new Map<string, {
-    venue: string; account: string; asset: string; delta: Decimal; opening: Decimal | null
+    venue: string; account: string; asset: string; delta: Decimal; opening: Decimal | null; openingAt: string | null
     contributions: Decimal; unclassifiedCashFlow: boolean; realized: Decimal; fees: Decimal; posted: boolean; inventoryOpeningAt: string | null; coverageFrom: string | null; coverageThrough: string | null; incomplete: boolean; pnlIncomplete: boolean
   }>()
   const ledger: Array<{
@@ -51,7 +51,7 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
     const key = JSON.stringify([event.venue, event.account, asset])
     let state = cash.get(key)
     if (!state) {
-      state = { venue: event.venue, account: event.account, asset, delta: zero(), opening: null,
+      state = { venue: event.venue, account: event.account, asset, delta: zero(), opening: null, openingAt: null,
         contributions: zero(), unclassifiedCashFlow: false, realized: zero(), fees: zero(), posted: false, inventoryOpeningAt: null, coverageFrom: null, coverageThrough: null, incomplete: false, pnlIncomplete: false }
       cash.set(key, state)
     }
@@ -139,6 +139,7 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
         reject('opening_cash_conflict'); continue
       }
       money.opening = amount
+      money.openingAt = event.timestamp
     } else if (event.type === 'deposit' || event.type === 'withdrawal') {
       delta = event.type === 'deposit' ? amount : amount.negated()
       if (event.sources.some((item) => 'providerAccountId' in item)) {
@@ -296,7 +297,7 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
   const positionIssues = new Set(discrepancies.filter(({ scope, reason }) => scope.instrument !== null
     || reason === 'provider_activity_requires_reconciliation' || scope.type === 'opening_inventory')
     .filter(({ reason }) => reason !== 'same_time_marks_conflict')
-    .flatMap(({ scope }) => [scope.instrument, ...(scope.completeSet ? [scope.completeSet.counterInstrument] : [])]
+    .flatMap(({ scope }) => [scope.type === 'unresolved_activity' ? null : scope.instrument, ...(scope.completeSet ? [scope.completeSet.counterInstrument] : [])]
       .map((instrument) => JSON.stringify([scope.venue, scope.account, scope.asset, instrument]))))
   const positionAffected = (entry: Pick<FinancialObservation, 'venue' | 'account' | 'asset' | 'instrument'>) =>
     positionIssues.has(JSON.stringify([entry.venue, entry.account, entry.asset, entry.instrument]))
@@ -318,6 +319,10 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
   const accountBalances = [...cash.entries()].map(([key, entry]) => {
     const balance = affected(entry) || entry.opening === null || entry.incomplete ? null : entry.opening.plus(entry.delta)
     const inventory = inventoryValues.has(key) ? inventoryValues.get(key)! : zero()
+    const declaredCoverage = entry.coverageFrom === null || entry.coverageThrough === null ? 'unverified'
+      : asOf > entry.coverageThrough ? 'outside_declared_interval'
+        : entry.openingAt !== entry.coverageFrom || entry.inventoryOpeningAt !== entry.coverageFrom ? 'opening_state_incompatible'
+          : affected(entry) ? 'declared_with_unresolved_evidence' : 'user_declared_complete'
     return { venue: entry.venue, account: entry.account, asset: entry.asset,
       opening: entry.opening?.toFixed() ?? null, knownDelta: entry.delta.toFixed(), knownDeclaredContributions: entry.contributions.toFixed(),
       netContributions: entry.unclassifiedCashFlow || affected(entry) ? null : entry.contributions.toFixed(),
@@ -325,7 +330,8 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
       balanceAvailability: affected(entry) ? 'unresolved_evidence' : entry.opening === null ? 'opening_cash_unknown'
         : entry.incomplete ? 'cash_fees_unknown' : 'reconstructed_from_declaration',
       knownRealized: entry.realized.toFixed(), realized: affected(entry) || entry.pnlIncomplete || entry.inventoryOpeningAt === null ? null : entry.realized.toFixed(),
-      historyCoverage: entry.coverageThrough && asOf <= entry.coverageThrough ? 'user_declared_complete' : 'unverified',
+      historyCoverage: declaredCoverage,
+      openingCashAt: entry.openingAt,
       historyFrom: entry.coverageFrom,
       historyThrough: entry.coverageThrough,
       openingState: entry.inventoryOpeningAt === null ? 'inventory_unknown' : 'declared_opening_inventory',

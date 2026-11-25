@@ -1,6 +1,6 @@
 import { Decimal } from 'decimal.js'
 import { createHash, randomUUID } from 'node:crypto'
-import { and, desc, eq, inArray, isNotNull, isNull, lte } from 'drizzle-orm'
+import { and, count, desc, eq, inArray, isNotNull, isNull, lte } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { Database } from '../db/client.js'
@@ -8,7 +8,7 @@ import { financialImportBatches as batches, portfolios, providerAccounts, source
 import { normalizeManualEvent, parseFinancialCsv } from '../accounting/csv.js'
 import { loadProviderEvidence } from '../accounting/provider-evidence.js'
 import type { Evidence, PortfolioDecision } from '../accounting/model.js'
-import { applyDecisions, digest, potentialOverlaps, recordKey } from '../accounting/decisions.js'
+import { applyDecisions, compose, digest, potentialOverlaps, recordKey, replacementDecisions } from '../accounting/decisions.js'
 import { replayAccounting } from '../accounting/ledger.js'
 
 const uuid = { type: 'string', format: 'uuid' }
@@ -21,18 +21,26 @@ const maxRetainedBatches = 250
 type AccountingRead = Pick<Database, 'select' | 'selectDistinctOn'>
 const operationalCutoff = '9999-12-31T23:59:59.999Z'
 const adjustmentItem = z.object({
-  key: z.string().min(1).max(120), action: z.enum(['include', 'distinct', 'exclude', 'restore', 'correct', 'duplicate']),
+  key: z.string().min(1).max(120), action: z.enum(['include', 'distinct', 'exclude', 'restore', 'correct', 'duplicate', 'reset_correction', 'reset_identity', 'reset_duplicate', 'reset_all']),
   correction: z.record(z.string(), z.unknown()).optional(), duplicateOf: z.string().min(1).max(120).optional(),
 }).strict()
+const recordFilter = z.object({
+  account: z.string().min(1).max(160).optional(), venue: z.string().min(1).max(160).optional(),
+  instrument: z.string().min(1).max(160).optional(), market: z.string().min(1).max(160).optional(), event: z.uuid().optional(),
+  type: z.string().min(1).max(40).optional(), batchId: z.uuid().optional(),
+  source: z.enum(['provider', 'import', 'manual']).optional(),
+  inclusion: z.enum(['included', 'unresolved', 'excluded']).optional(),
+  key: z.string().max(120).optional(),
+  from: z.iso.datetime({ offset: true }).optional(), through: z.iso.datetime({ offset: true }).optional(),
+  duplicates: z.enum(['yes', 'no']).optional(), review: z.enum(['required', 'clear']).optional(),
+  search: z.string().max(100).optional(),
+}).strict()
 const adjustmentRequest = z.object({
-  changes: z.array(adjustmentItem).min(1).max(200).optional(),
-  selection: z.object({
-    action: z.enum(['include', 'exclude', 'restore']),
-    account: z.string().min(1).max(160).optional(), batchId: z.uuid().optional(),
-    instrument: z.string().min(1).max(160).optional(), type: z.string().min(1).max(40).optional(),
-    inclusion: z.enum(['included', 'unresolved', 'excluded']).optional(),
-    except: z.array(z.string().min(1).max(120)).max(200).optional(),
-  }).strict().refine((value) => !!(value.account || value.batchId || value.instrument)).optional(),
+  changes: z.array(adjustmentItem).min(1).max(1000).optional(),
+  selection: recordFilter.extend({
+    action: z.enum(['include', 'exclude', 'restore', 'reset_correction', 'reset_duplicate', 'reset_identity', 'reset_all']),
+    except: z.array(z.string().min(1).max(120)).max(1000).optional(),
+  }).refine((value) => Object.keys(value).some((key) => key !== 'action' && key !== 'except')).optional(),
   revision: z.string().regex(/^[0-9a-f]{64}$/).optional(),
 }).strict().refine((value) => !!value.changes !== !!value.selection)
 const missing = { error: { code: 'not_found' } }
@@ -40,7 +48,7 @@ function concurrentWrite(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false
   const pg = ('cause' in error && error.cause ? error.cause : error) as { code?: string; constraint?: string }
   return pg.code === '40001' || pg.code === '40P01'
-    || (pg.code === '23505' && pg.constraint === 'accounting_decision_revision_unique')
+    || (pg.code === '23505' && ['accounting_decision_revision_unique', 'accounting_decision_operation_unique'].includes(pg.constraint ?? ''))
 }
 
 
@@ -96,7 +104,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       await tx.select({ id: portfolios.id }).from(portfolios).where(eq(portfolios.id, portfolioId)).for('update')
       await tx.delete(batches).where(and(eq(batches.portfolioId, portfolioId), isNull(batches.confirmedAt), lte(batches.expiresAt, now)))
       const existing = await tx.select({ id: batches.id, contentHash: batches.contentHash, expiresAt: batches.expiresAt, confirmedAt: batches.confirmedAt, supersededAt: batches.supersededAt })
-        .from(batches).where(eq(batches.portfolioId, portfolioId)).limit(maxRetainedBatches)
+        .from(batches).where(and(eq(batches.portfolioId, portfolioId), eq(batches.manual, false))).limit(maxRetainedBatches)
       const repeat = existing.find((row) => row.contentHash === contentHash)
       if (repeat) return repeat
       if (existing.length >= maxRetainedBatches || existing.filter((row) => !row.supersededAt).length >= maxBatches) return null
@@ -119,7 +127,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       discrepancies: proposed.discrepancies.filter((issue) => issue.sources.some((source) => 'batchId' in source && source.batchId === preview.id)),
       matchedEvents: proposed.events.filter((event) => event.sources.some((source) => 'batchId' in source && source.batchId === preview.id)).length,
     } : null
-    return { batchId: preview.id, reviewRevision, previewSummary, associatedAccountId: association, expiresAt: preview.expiresAt, confirmedAt: preview.confirmedAt, supersededAt: preview.supersededAt, unresolvedRows, ...parsed, rows: candidate.observations }
+    return { batchId: preview.id, reviewRevision, replacementDecisions: state.replacement.report, previewSummary, associatedAccountId: association, expiresAt: preview.expiresAt, confirmedAt: preview.confirmedAt, supersededAt: preview.supersededAt, unresolvedRows, ...parsed, rows: candidate.observations }
   })
 
   app.get<{ Params: { portfolioId: string }; Querystring: { offset?: number } }>(prefix + '/imports', {
@@ -132,7 +140,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const rows = await database.select({ batchId: batches.id, createdAt: batches.createdAt, expiresAt: batches.expiresAt,
       confirmedAt: batches.confirmedAt, supersededAt: batches.supersededAt, supersededBy: batches.supersededBy,
       associatedAccountId: batches.associatedAccountId,
-    }).from(batches).where(eq(batches.portfolioId, portfolioId)).orderBy(desc(batches.createdAt), desc(batches.id)).limit(25).offset(offset)
+    }).from(batches).where(and(eq(batches.portfolioId, portfolioId), eq(batches.manual, false))).orderBy(desc(batches.createdAt), desc(batches.id)).limit(25).offset(offset)
     const now = new Date()
     return { items: rows.map((row) => ({ ...row, status: row.supersededAt ? 'superseded' : row.confirmedAt ? 'active'
       : row.expiresAt <= now ? 'expired' : 'preview' })), offset }
@@ -167,19 +175,29 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       if (!batch || (!batch.confirmedAt && batch.expiresAt <= now)) return { status: 'missing' } as const
       if (batch.supersededAt) return { status: 'conflict' } as const
       if (batch.confirmedAt && !replaces) return { status: 'confirmed', confirmedAt: batch.confirmedAt } as const
+      let carried: Map<string, PortfolioDecision> = new Map()
+      let latestDecision = 0
       if (!batch.confirmedAt) {
         const evidence = await loadEvidence(portfolioId, operationalCutoff, batch, tx, replaces)
         const revision = importRevision(evidence, batchId, replaces)
         if (evidence.truncated || !batch.reviewDigest || batch.reviewReplaces !== (replaces ?? null)
-          || batch.reviewDigest !== revision || (request.query.reviewRevision && request.query.reviewRevision !== revision)) {
+          || batch.reviewDigest !== revision || request.query.reviewRevision !== revision) {
           return { status: 'stale' } as const
         }
+        carried = evidence.replacement.changes
+        latestDecision = evidence.decisionRevision
       }
       if (replaces) {
         const [previous] = await tx.select().from(batches).where(and(eq(batches.id, replaces), eq(batches.portfolioId, portfolioId)))
         if (previous?.supersededBy === batchId && batch.confirmedAt) return { status: 'confirmed', confirmedAt: batch.confirmedAt } as const
         if (!previous?.confirmedAt || previous.supersededAt || replaces === batchId || batch.confirmedAt) return { status: 'conflict' } as const
         await tx.update(batches).set({ supersededAt: now, supersededBy: batchId }).where(eq(batches.id, replaces))
+      }
+      const inherited = [...carried.entries()]
+      for (let offset = 0; offset < inherited.length; offset += 250) {
+        await tx.insert(decisions).values(inherited.slice(offset, offset + 250).map(([key, decision], index) => ({
+          portfolioId, recordKey: key, decision, revision: latestDecision + offset + index + 1,
+        })))
       }
       await tx.update(batches).set({ confirmedAt: now }).where(eq(batches.id, batchId))
       return { status: 'confirmed', confirmedAt: now } as const
@@ -204,7 +222,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       }).from(decisions).where(eq(decisions.portfolioId, portfolioId)).orderBy(decisions.recordKey, desc(decisions.revision)).limit(10001)
       const [last] = await tx.select({ revision: decisions.revision }).from(decisions)
         .where(eq(decisions.portfolioId, portfolioId)).orderBy(desc(decisions.revision)).limit(1)
-      return [confirmed.filter((batch) => batch.id !== replaces), provider, latest, last?.revision ?? 0] as const
+      return [confirmed, provider, latest, last?.revision ?? 0] as const
     }
     const [confirmed, provider, latest, decisionRevision] = read ? await readAll(read)
       : await database.transaction(readAll, { isolationLevel: 'repeatable read', accessMode: 'read only' })
@@ -224,7 +242,8 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
         const canonical = providerEvidence.observation
         const candidate = { ...observation, id: canonical.id }
         return Object.entries(candidate).every(([key, value]) => canonical[key as keyof typeof canonical] === value)
-          ? { ...ref, observation: canonical, originalObservation: observation, linkedSourceRecordId: requested! }
+          ? { ...ref, observation: canonical, originalObservation: observation, linkedSourceRecordId: requested!,
+            ...(providerEvidence.instrumentMetadata ? { instrumentMetadata: providerEvidence.instrumentMetadata } : {}) }
           : { ...ref, observation: candidate, originalObservation: observation, linkedSourceRecordId: requested!, unresolvedReason: 'linked_source_financial_conflict' }
       }
       if (batch.associatedAccountId && connected.has(batch.associatedAccountId)) {
@@ -233,7 +252,8 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       }
       return { ...ref, observation }
     }))
-    const allEvidence = [...provider.evidence, ...imported]
+    const prior = imported.filter((item) => 'batchId' in item && item.batchId === replaces)
+    const allEvidence = [...provider.evidence, ...imported.filter((item) => !('batchId' in item) || item.batchId !== replaces)]
     const candidateOverlaps = supplementCandidates.size ? potentialOverlaps(allEvidence) : new Map()
     const rawEvidence = allEvidence.map((item): Evidence => {
       const key = recordKey(item)
@@ -242,8 +262,12 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       return { ...resolved, originalObservation: item.observation, observation: { ...item.observation, id: item.observation.id ?? 'local:' + key }, authority: 'user_accepted' }
     })
     const decisionMap = new Map(latest.map(({ key, decision }) => [key, decision]))
-    const applied = applyDecisions(rawEvidence, decisionMap)
-    return { ...provider, ...applied, rawEvidence, decisionMap, decisionRevision,
+    const incoming = rawEvidence.filter((item) => 'batchId' in item && item.batchId === preview?.id)
+    const replacement = replaces ? replacementDecisions(prior, incoming,
+      rawEvidence.filter((item) => !('batchId' in item) || item.batchId !== preview?.id), decisionMap)
+      : { changes: new Map<string, PortfolioDecision>(), report: [] }
+    const applied = applyDecisions(rawEvidence, new Map([...decisionMap, ...replacement.changes]))
+    return { ...provider, ...applied, rawEvidence, decisionMap, decisionRevision, replacement,
       truncated: provider.truncated || latest.length > 10000,
       selected: applied.records.some((record) => record.decision !== null) }
 
@@ -252,7 +276,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
   function importRevision(input: Awaited<ReturnType<typeof loadEvidence>>, batchId: string, replaces?: string) {
     const scopes = new Set(input.records.filter((record) => record.source.kind === 'import' && record.source.batchId === batchId)
       .map(({ original }) => JSON.stringify([original.venue, original.account])))
-    return digest([batchId, replaces ?? null, input.records.filter(({ original }) =>
+    return digest([batchId, replaces ?? null, input.replacement.report, [...input.replacement.changes], input.records.filter(({ original }) =>
       scopes.has(JSON.stringify([original.venue, original.account])))
       .map(({ key, revision, decision }) => [key, revision, decision]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))])
   }
@@ -294,10 +318,12 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const hash = digest(['manual', accountId, clientId])
     const result = await database.transaction(async (tx) => {
       await tx.select({ id: portfolios.id }).from(portfolios).where(eq(portfolios.id, portfolioId)).for('update')
-      const existing = await tx.select().from(batches).where(eq(batches.portfolioId, portfolioId)).limit(maxRetainedBatches)
-      const repeat = existing.find((row) => row.contentHash === hash)
+      const [repeat] = await tx.select().from(batches)
+        .where(and(eq(batches.portfolioId, portfolioId), eq(batches.contentHash, hash))).limit(1)
       if (repeat) return digest(repeat.observations[0]) === digest(observation) && !repeat.supersededAt ? repeat : null
-      if (existing.length >= maxRetainedBatches || existing.filter((row) => !row.supersededAt).length >= maxBatches) return null
+      const [capacity] = await tx.select({ total: count() }).from(batches)
+        .where(and(eq(batches.portfolioId, portfolioId), eq(batches.manual, true)))
+      if ((capacity?.total ?? 0) >= 5000) return null
       const now = new Date()
       const [created] = await tx.insert(batches).values({ portfolioId, contentHash: hash, associatedAccountId: accountId,
         observations: [observation], confirmedAt: now, expiresAt: now, manual: true }).returning()
@@ -307,39 +333,43 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     return { key: 'import:' + result.id + ':2', batchId: result.id }
   })
 
-  app.get<{ Params: { portfolioId: string }; Querystring: Record<string, string | number | undefined> }>(prefix + '/accounting/records', {
+  function filterRecords(input: Awaited<ReturnType<typeof loadEvidence>>, q: z.infer<typeof recordFilter>) {
+    const candidates = potentialOverlaps(input.rawEvidence)
+    return input.records.filter((record) => {
+      const row = record.effective?.observation ?? record.original
+      const activity = record.providerActivity
+      const requiresReview = record.inclusion === 'unresolved' || record.revisionChanged
+        || (record.duplicateLinkStatus !== null && record.duplicateLinkStatus !== 'selected')
+      return (!q.account || row.account === q.account) && (!q.venue || row.venue === q.venue)
+        && (!q.instrument || row.instrument === q.instrument || activity?.instrument === q.instrument || record.instrumentMetadata?.instrument === q.instrument)
+        && (!q.market || activity?.market === q.market || record.instrumentMetadata?.market === q.market)
+        && (!q.event || record.instrumentMetadata?.event === q.event) && (!q.type || (activity?.type ?? row.type).toLowerCase() === q.type.toLowerCase())
+        && (!q.batchId || (record.source.kind === 'import' && record.source.batchId === q.batchId))
+        && (!q.source || record.acquisition === q.source) && (!q.inclusion || record.inclusion === q.inclusion)
+        && (!q.key || record.key === q.key) && (!q.from || Date.parse(row.timestamp) >= Date.parse(q.from))
+        && (!q.through || Date.parse(row.timestamp) <= Date.parse(q.through))
+        && (!q.duplicates || candidates.has(record.key) === (q.duplicates === 'yes'))
+        && (!q.review || requiresReview === (q.review === 'required'))
+        && (!q.search || [record.key, row.id, row.instrument, activity?.externalId, activity?.market, activity?.transactionHash, record.instrumentMetadata?.title]
+          .some((value) => value?.toLowerCase().includes(q.search!.toLowerCase())))
+    }).map((record) => ({ ...record, potentialOverlap: candidates.get(record.key) ?? null }))
+  }
+
+  app.get<{ Params: { portfolioId: string }; Querystring: z.infer<typeof recordFilter> & { offset?: number; limit?: number } }>(prefix + '/accounting/records', {
     schema: { ...auth, tags: ['accounting'], summary: 'List normalized financial source records and portfolio decisions',
-      params: portfolioParams, querystring: { type: 'object', additionalProperties: false, properties: {
-        account: { type: 'string', maxLength: 160 }, venue: { type: 'string', maxLength: 160 }, instrument: { type: 'string', maxLength: 160 },
-        type: { type: 'string', maxLength: 40 }, batchId: uuid, source: { enum: ['provider', 'import', 'manual'] },
-        inclusion: { enum: ['included', 'unresolved', 'excluded'] }, key: { type: 'string', maxLength: 120 },
-        from: { type: 'string', format: 'date-time' }, through: { type: 'string', format: 'date-time' },
-        duplicates: { enum: ['yes', 'no'] },
-        search: { type: 'string', maxLength: 100 }, limit: { type: 'integer', minimum: 1, maximum: 100 },
-        offset: { type: 'integer', minimum: 0, maximum: 100000 },
-      } } },
+      params: portfolioParams, querystring: { type: 'object', additionalProperties: false,
+        properties: z.toJSONSchema(recordFilter.extend({
+          limit: z.number().int().min(1).max(100).optional(), offset: z.number().int().min(0).max(100000).optional(),
+        })).properties ?? {} } },
   }, async (request, reply) => {
     const { portfolioId } = request.params
     if (!await owned(portfolioId, request.principalId!)) return reply.code(404).send(missing)
     const input = await loadEvidence(portfolioId, operationalCutoff)
     if (input.truncated) return reply.code(422).send({ error: { code: 'provider_evidence_limit' } })
-    const candidates = potentialOverlaps(input.rawEvidence)
-    const q = request.query
-    const records = input.records.filter((record) => {
-      const row = record.effective?.observation ?? record.original
-      return (!q.account || row.account === q.account) && (!q.venue || row.venue === q.venue)
-        && (!q.instrument || row.instrument === q.instrument) && (!q.type || row.type === q.type)
-        && (!q.batchId || (record.source.kind === 'import' && record.source.batchId === q.batchId))
-        && (!q.source || record.acquisition === q.source) && (!q.inclusion || record.inclusion === q.inclusion)
-        && (!q.key || record.key === q.key) && (!q.from || Date.parse(row.timestamp) >= Date.parse(String(q.from)))
-        && (!q.through || Date.parse(row.timestamp) <= Date.parse(String(q.through)))
-        && (!q.duplicates || candidates.has(record.key) === (q.duplicates === 'yes'))
-        && (!q.search || [record.key, row.id, row.instrument].some((value) => value?.toLowerCase().includes(String(q.search).toLowerCase())))
-    }).sort((a, b) => b.original.timestamp.localeCompare(a.original.timestamp) || a.key.localeCompare(b.key))
-    const offset = Number(q.offset ?? 0)
-    const limit = Number(q.limit ?? 50)
-    return { offset, limit, total: records.length, items: records.slice(offset, offset + limit)
-      .map((record) => ({ ...record, potentialOverlap: candidates.get(record.key) ?? null })) }
+    const records = filterRecords(input, request.query)
+      .sort((a, b) => b.original.timestamp.localeCompare(a.original.timestamp) || a.key.localeCompare(b.key))
+    const { offset = 0, limit = 50 } = request.query
+    return { offset, limit, total: records.length, items: records.slice(offset, offset + limit) }
   })
 
   async function planChanges(portfolioId: string, request: z.infer<typeof adjustmentRequest>, read?: AccountingRead) {
@@ -349,15 +379,10 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const changes = new Map<string, PortfolioDecision | null>()
     const selection = request.selection
     const except = new Set(selection?.except)
-    const expanded = selection ? input.records.filter((record) => {
-      const event = record.effective?.observation ?? record.original
-      return !except.has(record.key) && (!selection.account || event.account === selection.account)
-        && (!selection.instrument || event.instrument === selection.instrument)
-        && (!selection.type || event.type === selection.type) && (!selection.inclusion || record.inclusion === selection.inclusion)
-        && (!selection.batchId || (record.source.kind === 'import' && record.source.batchId === selection.batchId))
-    }).map(({ key }) => ({ key, action: selection.action })) : []
+    const expanded = selection ? filterRecords(input, selection).filter(({ key }) => !except.has(key))
+      .map(({ key }) => ({ key, action: selection.action })) : []
     const candidates: Array<z.infer<typeof adjustmentItem>> = request.changes ?? expanded
-    if (candidates.length === 0 || candidates.length > 200) throw new Error('adjustment_selection_limit')
+    if (candidates.length === 0 || candidates.length > 2000) throw new Error('adjustment_selection_limit')
     const ordered = [...candidates].sort((a, b) => a.key.localeCompare(b.key))
     for (const change of ordered) {
       const record = records.get(change.key)
@@ -365,28 +390,41 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       if ((change.action !== 'correct' && change.correction !== undefined)
         || (change.action !== 'duplicate' && change.duplicateOf !== undefined)) throw new Error('unexpected_adjustment_fields')
       const { original } = record
-      if (change.action === 'restore') { changes.set(change.key, null); continue }
+      const next = compose(record.decision)
+      if (change.action === 'reset_all') { changes.set(change.key, null); continue }
+      if (change.action === 'restore') { delete next.membership; delete next.membershipRevision }
+      if (change.action === 'reset_correction') delete next.financial
+      if (change.action === 'reset_identity') delete next.identity
+      if (change.action === 'reset_duplicate') delete next.duplicate
+      if (change.action === 'exclude') { next.membership = 'excluded'; next.membershipRevision = record.revision }
+      if (change.action === 'include') {
+        next.membership = 'included'
+        next.membershipRevision = record.revision
+        if (record.source.kind === 'import' && (record.originalReason || !original.id) && !next.identity) {
+          next.identity = { mode: 'include', revision: record.revision }
+        }
+      }
+      if (change.action === 'distinct') next.identity = { mode: 'distinct', revision: record.revision }
       if (record.source.kind === 'provider' && (change.action === 'distinct' || (change.action === 'include' && record.originalReason !== null))) {
         throw new Error('provider_evidence_cannot_be_promoted')
       }
-      const next: PortfolioDecision = { action: change.action, evidenceRevision: record.revision }
+
       if (change.action === 'correct') {
-        if (record.source.kind !== 'import' || !change.correction || (record.effective?.linkedSourceRecordId && record.decision?.action !== 'distinct')) throw new Error('import_correction_required')
+        if (record.source.kind !== 'import' || !change.correction || (record.linkedSourceRecordId && record.dimensions.identity?.mode !== 'distinct')) throw new Error('import_correction_required')
         const { coveredThrough, entitlementId, relatedEventId, feeTiming, completeSet, ...base } = original
         if (coveredThrough || entitlementId || relatedEventId || feeTiming || completeSet) throw new Error('replace_complex_event_via_import')
-        next.correction = normalizeManualEvent({ ...base, ...change.correction, venue: base.venue, account: base.account,
-          id: record.decision?.action === 'distinct' ? record.effective?.observation.id : base.id })
+        next.financial = { revision: record.revision, values: normalizeManualEvent({ ...base, ...change.correction, venue: base.venue, account: base.account,
+          id: base.id }) }
       }
       if (change.action === 'duplicate') {
         const target = change.duplicateOf ? records.get(change.duplicateOf) : undefined
-        if (!target || target.key === record.key || target.inclusion !== 'included'
+        if (!target || target.key === record.key || target.inclusion !== 'included' || !target.effectiveRevision || target.dimensions.duplicate
           || ordered.some((item) => item.key === target.key)
           || target.original.account !== original.account || target.original.venue !== original.venue
           || target.original.asset !== original.asset || target.original.type !== original.type) throw new Error('invalid_duplicate_target')
-        next.duplicateOf = target.key
-        next.duplicateRevision = target.revision
+        next.duplicate = { target: target.key, revision: target.effectiveRevision, sourceRevision: record.revision }
       }
-      changes.set(change.key, next)
+      changes.set(change.key, Object.keys(next).length ? next : null)
     }
     const affectedAccounts = new Set(ordered.map(({ key }) => {
       const { venue, account } = records.get(key)!.original
@@ -421,11 +459,20 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
         }
         const committed = await database.transaction(async (tx) => {
           await tx.select({ id: portfolios.id }).from(portfolios).where(eq(portfolios.id, portfolioId)).for('update')
+          if (!parsed.data.revision) return null
+          const operationDigest = digest(parsed.data)
+          const [receipt] = await tx.select({ applied: decisions.operationCount }).from(decisions)
+            .where(and(eq(decisions.portfolioId, portfolioId), eq(decisions.operationDigest, operationDigest))).limit(1)
+          if (receipt) return receipt
           const plan = await planChanges(portfolioId, parsed.data, tx)
           if (plan.revision !== parsed.data.revision) return null
-          await tx.insert(decisions).values([...plan.changes.entries()].map(([recordKey, decision], index) => ({
-            portfolioId, recordKey, decision, revision: plan.input.decisionRevision + index + 1,
-          })))
+          const entries = [...plan.changes.entries()]
+          for (let offset = 0; offset < entries.length; offset += 250) {
+            await tx.insert(decisions).values(entries.slice(offset, offset + 250).map(([recordKey, decision], index) => ({
+              portfolioId, recordKey, decision, revision: plan.input.decisionRevision + offset + index + 1,
+              ...(offset === 0 && index === 0 ? { operationDigest, operationCount: entries.length } : {}),
+            })))
+          }
           return { applied: plan.changes.size }
         }, { isolationLevel: 'serializable' })
         if (!committed) return reply.code(409).send({ error: { code: 'adjustment_preview_stale' } })
@@ -482,11 +529,11 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     }
   }
 
-  app.get<{ Params: { portfolioId: string }; Querystring: { asOf?: string } }>(prefix + '/accounting', {
+  app.get<{ Params: { portfolioId: string }; Querystring: { asOf?: string; view?: 'summary' | 'detail' } }>(prefix + '/accounting', {
     schema: {
       ...auth, tags: ['accounting'], summary: 'Replay confirmed financial evidence through an optional event-time cutoff',
       params: portfolioParams,
-      querystring: { type: 'object', properties: { asOf: { type: 'string', format: 'date-time' } } },
+      querystring: { type: 'object', properties: { asOf: { type: 'string', format: 'date-time' }, view: { enum: ['summary', 'detail'] } } },
     },
   }, async (request, reply) => {
     const { portfolioId } = request.params
@@ -497,8 +544,21 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const input = await loadEvidence(portfolioId, asOf)
     if (input.truncated) return reply.code(422).send({ error: { code: 'provider_evidence_limit' } })
     const result = replay(input, asOf)
-    return { ...result, providerEvidencePresent: input.evidence.some((item) => 'providerAccountId' in item),
-      providerCoverage: input.coverage, activityEvidence: input.activityEvidence, snapshots: compareSnapshots(input, asOf) }
+    const accountCoverage = input.accounts.map(({ account, venue, kind }) => ({
+      account, venue, kind, externalAccountCompleteness: 'unverified',
+      historyAvailability: kind === 'file_import' ? 'user_evidence' :
+        input.coverage.some((scope) => scope.account === account && scope.status === 'partial') ? 'provider_partial' : 'provider_unverified',
+      observedState: input.positions.some((position) => position.account === account)
+        || input.balances.some((balance) => balance.account === account) ? 'reported_snapshot_available' : 'unavailable',
+      replayEvidence: result.events.some((event) => event.account === account) ? 'available' : 'unavailable',
+    }))
+    const { events, ledger, discrepancies, ...summary } = result
+    const coverage = { providerEvidencePresent: input.rawEvidence.some((item) => 'providerAccountId' in item),
+      providerCoverage: input.coverage, accountCoverage, discrepancyCount: discrepancies.length }
+    if (request.query.view === 'summary') return { ...summary, ...coverage }
+    return { ...summary, ...coverage, events, ledger, discrepancies,
+      activityEvidence: input.activityEvidence, snapshots: compareSnapshots(input, asOf) }
+
   })
 
   app.get<{ Params: { portfolioId: string }; Querystring: { from: string; through: string } }>(prefix + '/accounting/history', {
@@ -524,7 +584,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const points = Array.from({ length: days }, (_, index) => {
       const asOf = new Date(start + (index + 1) * day - 1).toISOString()
       const state = replay(input, asOf)
-      return { asOf, status: state.status, discrepancyCount: state.discrepancies.length, balances: state.cash }
+      return { asOf, status: state.status, portfolioScope: state.portfolioScope, discrepancyCount: state.discrepancies.length, balances: state.cash }
     })
     return { method: 'weighted_average', points }
 

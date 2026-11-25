@@ -6,6 +6,7 @@ import { runMigrations } from '../src/db/migrate.js'
 import {
   activityFactOccurrences,
   cashMovements,
+  financialImportBatches,
   events,
   fills,
   instruments,
@@ -129,7 +130,7 @@ describe('migrations and canonical persistence', () => {
     expect((await preview([cash, 'invalid'])).statusCode).toBe(422)
     const read = () => app.inject({ method: 'GET', url: prefix + '/accounting?asOf=2026-11-25T02:00:00Z', headers })
     expect((await read()).json().events).toEqual([])
-    const confirm = () => app.inject({ method: 'POST', url: prefix + '/imports/' + batch + '/confirm', headers })
+    const confirm = () => app.inject({ method: 'POST', url: prefix + '/imports/' + batch + '/confirm?reviewRevision=' + first.json().reviewRevision, headers })
     const confirmed = await confirm()
     expect(confirmed.statusCode).toBe(200)
     expect((await confirm()).json()).toEqual(confirmed.json())
@@ -137,7 +138,7 @@ describe('migrations and canonical persistence', () => {
     const revised = await preview([cash, deposit.replace(',40,,', ',45,,')], batch)
     expect(revised.statusCode).toBe(200)
     const replace = () => app.inject({
-      method: 'POST', url: prefix + '/imports/' + revised.json().batchId + '/confirm?replaces=' + batch, headers,
+      method: 'POST', url: prefix + '/imports/' + revised.json().batchId + '/confirm?replaces=' + batch + '&reviewRevision=' + revised.json().reviewRevision, headers,
     })
     const replaced = await replace()
     expect(replaced.statusCode).toBe(200)
@@ -180,7 +181,7 @@ describe('migrations and canonical persistence', () => {
     const preview = await post('/imports/preview', { csv, providerAccountId: account })
     expect(preview.statusCode).toBe(200)
     const batch = preview.json().batchId
-    expect((await post('/imports/' + batch + '/confirm', {})).statusCode).toBe(200)
+    expect((await post('/imports/' + batch + '/confirm?reviewRevision=' + preview.json().reviewRevision, {})).statusCode).toBe(200)
     const rows = (await get('/accounting/records?account=' + account + '&type=buy')).json().items
     const first = rows.find((row: { original: { id: string } }) => row.original.id === 'buy-a')
     const duplicate = rows.find((row: { original: { id: string } }) => row.original.id === 'duplicate-b')
@@ -226,8 +227,78 @@ describe('migrations and canonical persistence', () => {
     const revised = (await get('/accounting/records?key=' + encodeURIComponent(first.key))).json().items[0]
     expect(revised.original.price).toBe('0.4')
     expect(revised.effective.observation.price).toBe('0.45')
+    expect((await choose({ changes: [{ key: first.key, action: 'exclude' }] })).statusCode).toBe(200)
+    expect((await choose({ changes: [{ key: first.key, action: 'restore' }] })).statusCode).toBe(200)
+    expect((await get('/accounting/records?key=' + encodeURIComponent(first.key))).json().items[0]
+      .effective.observation.price).toBe('0.45')
+    expect((await choose({ changes: [{ key: preferred.key, action: 'exclude' }] })).statusCode).toBe(200)
+    const broken = (await get('/accounting/records?key=' + encodeURIComponent(duplicate.key))).json().items[0]
+    expect(broken).toMatchObject({ inclusion: 'unresolved', duplicateLinkStatus: 'review_required' })
+    expect((await state()).discrepancies).toContainEqual(expect.objectContaining({ reason: 'duplicate_relationship_requires_review' }))
+    expect((await choose({ changes: [{ key: preferred.key, action: 'restore' }] })).statusCode).toBe(200)
+    expect((await choose({ changes: [{ key: preferred.key, action: 'correct', correction: { price: '0.61' } }] })).statusCode).toBe(200)
+    expect((await get('/accounting/records?key=' + encodeURIComponent(duplicate.key))).json().items[0])
+      .toMatchObject({ inclusion: 'unresolved', duplicateLinkStatus: 'target_revised' })
+    const cycle = await post('/accounting/adjustments/preview', { changes: [{ key: preferred.key, action: 'duplicate', duplicateOf: duplicate.key }] })
+    expect(cycle.statusCode).toBe(422)
+    expect((await choose({ changes: [{ key: preferred.key, action: 'reset_correction' }] })).statusCode).toBe(200)
+    const [header, ...body] = csv.split('\n')
+    const reordered = [header, ...body.map((line) => line.includes(',buy-a,') ? line.replace(',0.4,', ',0.45,') : line).reverse()].join('\n')
+    const replacement = await post('/imports/preview', { csv: reordered, providerAccountId: account, replaces: batch })
+    expect(replacement.statusCode).toBe(200)
+    expect(replacement.json().replacementDecisions).toContainEqual(expect.objectContaining({ from: first.key, status: 'correction_incorporated' }))
+    expect(replacement.json().replacementDecisions).toContainEqual(expect.objectContaining({ from: duplicate.key, status: 'carried' }))
+    const replacementPath = '/imports/' + replacement.json().batchId + '/confirm?replaces=' + batch
+    expect((await post(replacementPath, {})).statusCode).toBe(409)
+    expect((await post(replacementPath + '&reviewRevision=' + replacement.json().reviewRevision, {})).statusCode).toBe(200)
+    const afterReplacement = (await get('/accounting/records?batchId=' + replacement.json().batchId)).json().items
+    expect(afterReplacement).toContainEqual(expect.objectContaining({ original: expect.objectContaining({ id: 'duplicate-b' }),
+      duplicateLinkStatus: 'selected', inclusion: 'excluded' }))
     expect((await app.inject({ method: 'POST', url: `/v1/portfolios/${OTHER_PORTFOLIO_ID}/accounting/adjustments/preview`,
       headers, payload: adjustment })).statusCode).toBe(404)
+  })
+
+  it('handles 526 filtered records and hundreds of manual records without using CSV batch capacity', async () => {
+    await new IngestionService(database, providerRegistry).syncProviderAccount(MULTI_ACCOUNT_ROW_ID)
+    const app = await createTestApp()
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const prefix = `/v1/portfolios/${PORTFOLIO_ID}`
+    const post = (path: string, payload: object) => app.inject({ method: 'POST', url: prefix + path, headers, payload })
+    const created = await post('/accounting/accounts', { venue: 'fixture-multisided', label: 'Scale test' })
+    const account = created.json().id
+    const now = new Date()
+    await database.insert(financialImportBatches).values(Array.from({ length: 250 }, (_, index) => ({
+      portfolioId: PORTFOLIO_ID, associatedAccountId: account, contentHash: 'scale-manual-' + index,
+      manual: true, confirmedAt: now, expiresAt: now, observations: [{
+        venue: 'fixture-multisided', account, id: 'manual-' + index, type: 'reward' as const,
+        timestamp: '2026-11-01T00:00:00.000Z', asset: 'USD', amount: '1',
+        instrument: null, quantity: null, price: null, fee: null, feeAsset: null, sequence: null,
+      }],
+    })))
+    const csvHeader = 'venue,account,id,timestamp,sequence,type,instrument,asset,quantity,price,amount,fee,fee_asset'
+    const lines = Array.from({ length: 526 }, (_, index) =>
+      `fixture-multisided,local,large-${index},2026-11-02T00:00:00Z,,buy,yes,USD,1,0.25,,0,`)
+    for (const group of [lines, ['fixture-multisided,local,bonus-scale,2026-11-03T00:00:00Z,,reward,,USD,,,1,,']]) {
+      const preview = await post('/imports/preview', { providerAccountId: account, csv: [csvHeader, ...group].join('\n') })
+      expect(preview.statusCode).toBe(200)
+      expect((await post('/imports/' + preview.json().batchId + '/confirm?reviewRevision=' + preview.json().reviewRevision, {})).statusCode).toBe(200)
+    }
+    const manual = await post('/accounting/manual-records', { accountId: account, clientId: '00000000-0000-4000-8000-000000000913',
+      event: { type: 'reward', timestamp: '2026-11-04T00:00:00Z', asset: 'USD', amount: '1' } })
+    expect(manual.statusCode).toBe(200)
+    const filters = { source: 'import', venue: 'fixture-multisided', type: 'buy', from: '2026-11-01T00:00:00Z',
+      through: '2026-11-15T23:59:59Z', duplicates: 'yes' }
+    const page = await app.inject({ method: 'GET', url: prefix + '/accounting/records?' + new URLSearchParams(filters), headers })
+    expect(page.json()).toMatchObject({ total: 526, limit: 50 })
+    const request = { selection: { ...filters, action: 'exclude', except: [page.json().items[0].key] } }
+    const preview = await post('/accounting/adjustments/preview', request)
+    expect(preview.json().affected).toBe(525)
+    const confirmation = { ...request, revision: preview.json().revision }
+    expect((await post('/accounting/adjustments/confirm', confirmation)).json()).toEqual({ applied: 525 })
+    expect((await post('/accounting/adjustments/confirm', confirmation)).json()).toEqual({ applied: 525 })
+    const summary = await app.inject({ method: 'GET', url: prefix + '/accounting?view=summary', headers })
+    expect(summary.json().holdings).toContainEqual(expect.objectContaining({ account, quantity: '1' }))
+    expect(summary.json().ledger).toBeUndefined()
   })
 
   it('replays synchronized provider evidence and coalesces an explicitly linked CSV observation', async () => {
@@ -256,11 +327,11 @@ describe('migrations and canonical persistence', () => {
     expect((await create('00000000-0000-4000-8000-000000000999')).statusCode).toBe(404)
     const preview = await create(MULTI_ACCOUNT_ROW_ID, { 'csv-trade': fill.sources[0].sourceRecordId })
     expect(preview.statusCode).toBe(200)
-    const confirm = (batchId: string) => app.inject({ method: 'POST', url: prefix + '/imports/' + batchId + '/confirm', headers })
-    expect((await confirm(preview.json().batchId)).statusCode).toBe(200)
+    const confirm = (batch: { batchId: string; reviewRevision: string }) => app.inject({ method: 'POST', url: prefix + '/imports/' + batch.batchId + '/confirm?reviewRevision=' + batch.reviewRevision, headers })
+    expect((await confirm(preview.json())).statusCode).toBe(200)
     const overlap = await create(MULTI_ACCOUNT_ROW_ID)
     expect(overlap.statusCode).toBe(200)
-    expect((await confirm(overlap.json().batchId)).statusCode).toBe(200)
+    expect((await confirm(overlap.json())).statusCode).toBe(200)
     const after = (await read()).json()
     expect(after.events.find((event: { economicId: string }) => event.economicId === fill.economicId).sources).toHaveLength(2)
     expect(after.ledger).toEqual(before.ledger)
@@ -286,7 +357,7 @@ describe('migrations and canonical persistence', () => {
     const supplement = await app.inject({ method: 'POST', url: prefix + '/imports/preview', headers,
       payload: { csv: gapCsv, providerAccountId: MULTI_ACCOUNT_ROW_ID, acceptUnlinked: true } })
     expect(supplement.statusCode).toBe(200)
-    expect((await confirm(supplement.json().batchId)).statusCode).toBe(200)
+    expect((await confirm(supplement.json())).statusCode).toBe(200)
     expect((await read()).json().events).toContainEqual(expect.objectContaining({ type: 'reward', amount: '4',
       account: MULTI_ACCOUNT_ROW_ID, authority: 'user_accepted' }))
     const original = new MultiOutcomeFixtureAdapter()
@@ -526,6 +597,13 @@ describe('migrations and canonical persistence', () => {
     expect(runEvidence.json().items).toContainEqual(expect.objectContaining({
       resolutionReason: 'trade_identity_ambiguous', observationsInRun: 2,
     }))
+    const unresolved = await app.inject({ method: 'GET', url: `/v1/portfolios/${PORTFOLIO_ID}/accounting/records?source=provider&type=TRADE_UNRESOLVED&search=0xno-id`, headers: auth })
+    expect(unresolved.statusCode).toBe(200)
+    expect(unresolved.json().items).toContainEqual(expect.objectContaining({
+      inclusion: 'unresolved', original: expect.objectContaining({ quantity: '2', price: '0.25' }),
+      providerActivity: expect.objectContaining({ type: 'TRADE_UNRESOLVED', transactionHash: '0xno-id', largestObservedRunCount: 2 }),
+    }))
+
 
     omitPositions = true
     const emptyRefresh = await app.inject({ method: 'POST', url: `/v1/provider-accounts/${accountId}/sync?scope=current`, headers: auth })

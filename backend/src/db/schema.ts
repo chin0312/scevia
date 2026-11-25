@@ -568,7 +568,10 @@ export const portfolioAccountingDecisions = scevia.table('portfolio_accounting_d
   decision: jsonb('decision').$type<import('../accounting/model.js').PortfolioDecision | null>(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   revision: integer('revision').notNull(),
+  operationDigest: text('operation_digest'),
+  operationCount: integer('operation_count'),
 }, (table) => [
+  uniqueIndex('accounting_decision_operation_unique').on(table.portfolioId, table.operationDigest),
   uniqueIndex('accounting_decision_revision_unique').on(table.portfolioId, table.revision),
   index('accounting_decision_record_idx').on(table.portfolioId, table.recordKey, table.revision),
 ])
