@@ -59,3 +59,24 @@ Assume one wallet per user, an initial 10 trade pages and 5 activity pages, and 
 | 100 | 3,720 | 960 | 240 | 288 |
 
 If current pages are one premium request each and all relevant history qualifies as unmetered, that workload fits the published 1,000 premium quota at all four sizes, narrowly at 100 wallets. An additional premium call per refresh moves 100 wallets over the quota. At 1 request/sec the 100-wallet initial history alone takes at least 30 minutes with the retry allowance. Spread backfills out and keep holdings refresh on demand. If higher throughput or paid entitlements are required, the advertised Predexon Dev price starts at $49/month. Hosted data rights, Envio query costs and the cost of higher-cardinality histories still require measurement.
+
+### Capability assignments
+
+All live assignments below are conditional on permission and an approved test sample. Fixture coverage verifies Scevia's contracts. The reviewed upstream documentation and code do not establish populated live behavior. Apply the same wallet privacy and cost assumptions above to each account lookup.
+
+| Capability | Preferred evidence | Alternative and acceptance check |
+| --- | --- | --- |
+| Current holdings | Venue OPEN observations with source-specific freshness | Compare Predexon positions against the same wallet and time window. Treat both as observations until completeness and authority are established. |
+| Historical closures | Venue CLOSED evidence | Compare Predexon historical positions; only a current-state observation can substantiate the current balance. |
+| Trades | Bounded independent contract evidence for canonical fills; venue and Predexon for source history | User CSV is a separate source. Match venue and instrument identity, roles, quantities and fees before combining sources. |
+| Economic identity | Versioned Polygon logs with chain, transaction and log index | Licensed Goldsky event rows or approved receipt retrieval. Order hash and transaction hash alone leave multiplicity unresolved. |
+| Historical execution fees | Decoded version-specific fee and refund evidence | Predexon fee_usd is a comparison value until units, role, missing values and fee corrections reconcile. |
+| Cash and collateral balances | Approved chain balance evidence for explicit collateral contracts | Licensed Goldsky balance data where the asset, account and as-of block can be verified. No lifetime cash ledger follows from a balance alone. |
+| Deposits and withdrawals | Venue observations plus versioned collateral transfer and bridge evidence | User CSV for declared cash movements. Classify contribution, withdrawal or internal transfer only after reconciliation. |
+| Splits and merges | Conditional Tokens and collateral adapter events | Venue or licensed historical activity helps locate candidates. Verify legs and collateral and avoid classifying these as trades. |
+| Redemptions and settlements | Resolution payouts plus decoded redemption receipts | Venue redemption activity and approved user CSV are supplemental. Reconcile payouts and redeemed quantities as separate facts. |
+| External P&L benchmark | Predexon wallet P&L, if coverage and entitlements are confirmed | Compare against Scevia's future reproducible reconciliation by role, accounting period, fees and cost basis. |
+| Market metadata and rules | Venue market and event metadata | Managed catalogs can help discover IDs. Resolve versioned instrument mappings and conflicts against venue rules. |
+| Public search and link resolution | Gamma search and explicit supported venue URL resolution | A managed catalog is a fallback only if it preserves venue-native IDs and link semantics. Share cache across authorized requests. |
+| Market fee schedules | Venue market-specific schedule | Allow user assumptions for simulation. Keep actual historical fees and rebate eligibility separate. |
+| Reference and historical prices | CLOB midpoint and venue price history | Managed candles are fallback observations with their own timestamps and aggregation. Midpoints are references and carry no execution guarantee. |
