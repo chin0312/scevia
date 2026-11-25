@@ -12,7 +12,7 @@ import { CATEGORIES, CAT_COLOR, PLATFORM_NAME } from '../data/labels'
 import { PROVENANCE_TEXT, REL_TEXT, type RelClass } from '../data/relations'
 import { account, addDays, baseHoldings, exposures, fmtDate, positionsFor, outcomeLabel, settlementRange, settlementRangeFor, sourceRelations, type EventExposure } from '../lib/finance'
 import { fmt, kfmt, pct, sfmt } from '../lib/format'
-import { useSessionState } from '../lib/useSessionState'
+import { useSettings } from '../lib/settings'
 
 const RAIL: RailSection[] = [
   { id: 'summary', label: 'Exposure summary', icon: 'home' },
@@ -43,7 +43,8 @@ export default function Risk() {
   const rels = useMemo(() => sourceRelations(), [])
   const details = useDetails()
   const [groupBy, setGroupBy] = useState<'By event' | 'By category' | 'By platform'>('By event')
-  const [limit, setLimit] = useSessionState('scevia-guardrail', 15)
+  const { settings, update } = useSettings()
+  const limit = settings.guardrail, setLimit = (v: number) => update({ guardrail: v })
   const [editLimit, setEditLimit] = useState<number | null>(null)
   const [filter, setFilter] = useState<'All events' | 'Next 30 days' | 'Over guardrail'>('All events')
   const [hotStep, setHotStep] = useState<number | null>(null)
@@ -237,6 +238,14 @@ export default function Risk() {
             <CardHeader title="Resolution calendar" sub="When capital is released or lost · circle area = capital at stake" right={<Seg label="Range" options={['90 days', '12 months'] as const} value={range} onChange={setRange} />} />
             <div className="card-b">
               <Calendar exps={exps} range={range} hot={hotCal} setHot={setHotCal} onPick={openEvent} />
+              <div className="tl-list cal-list" role="list" aria-label="Next resolutions">
+                {[...exps].sort((a, b) => a.days - b.days).slice(0, 5).map((e) => (
+                  <button type="button" role="listitem" key={e.event.id} className="tl-li cal-li" onClick={() => openEvent(e.event.id)}>
+                    <span className="t3 tnum">{fmtDate(e.resolves)}</span><span className="tl-t">{e.event.name}</span>
+                    <span className="r tnum">{fmt(e.cost)}<small className="t3"> at stake</small></span><small className="t3 r">{e.days}d</small>
+                  </button>
+                ))}
+              </div>
               {week.n > 1 && <div style={{ marginTop: 'var(--space-3)' }}><Callout tone="warn"><b>{fmt(week.cost)}</b> resolves between {fmtDate(week.from)} and {fmtDate(week.to)}. If those {week.n} events all settled against you, you’d lose {fmt(week.loss)} ({pct((week.loss / acct.totalValue) * 100, 0)} of portfolio value).</Callout></div>}
             </div>
           </Card>

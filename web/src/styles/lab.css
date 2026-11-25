@@ -186,7 +186,7 @@
 .pick-chip:has(input:disabled) { opacity: 0.5; cursor: not-allowed; }
 
 /* ── Accounts & records ──────────────────────────────────── */
-.acct-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--space-3); }
+.acct-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--space-3); }
 .acct-card { border: 1px solid var(--color-border-subtle); border-radius: var(--radius-lg); padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-2); background: var(--color-bg-surface); font-size: var(--font-size-sm); min-width: 0; }
 .acct-card b { font-weight: var(--font-weight-medium); }
 .acct-card small { font-size: var(--font-size-xs); }
@@ -236,3 +236,31 @@
   .sb-row { grid-template-columns: minmax(0, 1fr); gap: var(--space-1); }
   .lab-nav .tabs { gap: var(--space-4); }
 }
+
+/* ── Top bar menus and settings ──────────────────────────── */
+/* The top bar sits above sticky section bars and page cards (cards are containers, which create stacking contexts). */
+.topbar { z-index: var(--z-dropdown); }
+.menu-sep { height: 1px; background: var(--color-border-subtle); margin: var(--space-1) 0; }
+.acct-row { gap: var(--space-3); }
+.acct-row .row { min-width: 0; color: var(--color-text-secondary); }
+.menu-i:disabled { opacity: 0.5; cursor: not-allowed; }
+.menu-i:disabled:hover { background: transparent; color: inherit; }
+.set-body { display: flex; flex-direction: column; gap: var(--space-4); margin-top: var(--space-4); min-height: 280px; }
+.set-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-4); align-items: center; padding-bottom: var(--space-4); border-bottom: 1px solid var(--color-border-subtle); }
+.set-row b { display: block; font-weight: var(--font-weight-medium); font-size: var(--font-size-sm); }
+.set-row small { display: block; font-size: var(--font-size-xs); margin-top: 2px; max-width: 46ch; }
+.set-ctl { display: flex; justify-content: flex-end; }
+.set-ctl .slider { width: 180px; }
+@media (max-width: 640px) { .set-row { grid-template-columns: minmax(0, 1fr); } .set-ctl { justify-content: flex-start; overflow-x: auto; } }
+
+/* Layout fill and wrapping fixes */
+.cal-list { margin-top: var(--space-3); }
+.cal-li { width: 100%; border: 0; border-bottom: 1px solid var(--color-border-subtle); background: transparent; color: inherit; font: inherit; font-size: var(--font-size-xs); text-align: left; cursor: pointer; }
+.cal-li:hover .tl-t, .cal-li:focus-visible .tl-t { color: var(--color-text-primary); text-decoration: underline; }
+.cal-li:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: -2px; }
+.po span { white-space: nowrap; width: auto; min-width: 64px; }
+.span-all { grid-column: 1 / -1; }
+.cov-mini { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); margin-top: var(--space-3); }
+.cov-mini > div { background: var(--color-bg-raised); border-radius: var(--radius-md); padding: var(--space-2) var(--space-3); font-size: var(--font-size-xs); color: var(--color-text-tertiary); }
+.cov-mini b { display: block; font-size: var(--font-size-md); font-weight: var(--font-weight-semibold); color: var(--color-text-primary); font-variant-numeric: tabular-nums; }
+.range-tbl { margin-top: var(--space-3); }

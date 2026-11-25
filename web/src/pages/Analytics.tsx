@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState } from 'react'
+import { useSettings } from '../lib/settings'
 import { useWidth } from '../components/charts'
 import { useDetails } from '../components/details'
 import { SectionRail, useHashScroll, type RailSection } from '../components/shell'
@@ -22,7 +23,7 @@ const monthLabel = (m: string) => fmtDate(`${m}-01`, { month: 'short' })
 
 function PnlChart({ f, start, end, prior, stats, tab, onMonth }: { f: PlatformFilter; start: string; end: string; prior: { start: string; end: string } | null; stats: PeriodStats; tab: 'Net' | 'Realized' | 'By platform'; onMonth: (m: string) => void }) {
   const [wrap, W] = useWidth<HTMLDivElement>(760)
-  const H = 330, P = { l: 52, r: 12, t: 16, b: 26 }
+  const H = 400, P = { l: 52, r: 12, t: 16, b: 26 }
   const base = (pts: { netPnl: number }[]) => pts.map((p) => p.netPnl - pts[0].netPnl)
   const cur = useMemo(() => base(series(f, start, end)), [f, start, end])
   const pri = useMemo(() => (prior ? base(series(f, prior.start, prior.end)) : null), [f, prior])
@@ -80,7 +81,7 @@ function PnlChart({ f, start, end, prior, stats, tab, onMonth }: { f: PlatformFi
 export default function Analytics() {
   useHashScroll()
   const [plat, setPlat] = useState<PlatformLabel>('All')
-  const [period, setPeriod] = useState<Period>('6M')
+  const [period, setPeriod] = useState<Period>(useSettings().settings.defaultPeriod)
   const [compareOn, setCompareOn] = useState(true)
   const [tab, setTab] = useState<'Net' | 'Realized' | 'By platform'>('Net')
   const [attrBy, setAttrBy] = useState<'Category' | 'Platform'>('Category')
@@ -132,7 +133,7 @@ export default function Analytics() {
           </>} />
 
         <p className="summary">
-          Over this period you made <b className={stats.netPnl >= 0 ? 'gain' : 'loss'}>{sfmt(stats.netPnl, 2)}</b> net{compare && prior ? <>, <b>{sfmt(stats.netPnl - prior.netPnl)}</b> vs. the prior period</> : ''}: <b>{sfmt(stats.realized)}</b> realized on {stats.trades.length} trades closed in the period, and <b>{sfmt(stats.unrealizedChange)}</b> change in unrealized P&amp;L{stats.openFillFees ? <>, less <b>{fmt(stats.openFillFees, 2)}</b> fees on new fills</> : ''}.
+          Over this period you made <b className={stats.netPnl >= 0 ? 'gain' : 'loss'}>{sfmt(stats.netPnl, 2)}</b> net{compare && prior ? <>, <b>{sfmt(stats.netPnl - prior.netPnl)}</b> vs. the prior period</> : ''}: <b>{sfmt(stats.realized)}</b> realized on {stats.trades.length} trades closed in the period, and <b>{sfmt(stats.unrealizedChange)}</b> change in unrealized P&amp;L{stats.openFillFees ? <> (after <b>{fmt(stats.openFillFees, 2)}</b> fees on new purchases)</> : ''}.
           {top && top.net > 0 && <> <a href="#attribution">{top.label}</a> made {gains > 0 ? pct((top.net / gains) * 100, 0) : '—'} of realized gains.</>}
           {worst && worst.net < 0 && <> The weakest group was <a href="#attribution">{worst.label}</a> ({sfmt(worst.net)}).</>}
           {worstMonth && worstMonth.realized < 0 && <> Worst month: {monthLabel(worstMonth.month)} ({sfmt(worstMonth.realized)}).</>}
@@ -178,9 +179,9 @@ export default function Analytics() {
                 </button>
               ))}
               <div className="attr" style={{ fontWeight: 'var(--font-weight-semibold)' }}><span>Realized</span><span /><span /><span className={cx('r', stats.realized >= 0 ? 'gain' : 'loss')}>{sfmt(stats.realized)}</span><span className="r t3">{stats.trades.length}</span></div>
-              <div className="attr t2"><span>Change in unrealized{stats.openFillFees > 0 ? <small className="t3"> · incl. −{fmt(stats.openFillFees, 2)} fees on new purchases</small> : null}</span><span /><span /><span className={cx('r', stats.unrealizedChange >= 0 ? 'gain' : 'loss')}>{sfmt(stats.unrealizedChange)}</span><span className="r t3">—</span></div>
+              <div className="attr t2"><span title={stats.openFillFees > 0 ? `Includes −${fmt(stats.openFillFees, 2)} fees on new purchases` : undefined}>Change in unrealized</span><span /><span /><span className={cx('r', stats.unrealizedChange >= 0 ? 'gain' : 'loss')}>{sfmt(stats.unrealizedChange)}</span><span className="r t3">—</span></div>
               <div className="attr" style={{ fontWeight: 'var(--font-weight-semibold)' }}><span>Net P&amp;L</span><span /><span /><span className={cx('r', stats.netPnl >= 0 ? 'gain' : 'loss')}>{sfmt(stats.netPnl)}</span><span className="r t3" /></div>
-              <p className="t3" style={{ fontSize: 'var(--font-size-xs)', marginTop: 'var(--space-3)' }}>Realized counts each trade closed in this period in full, including gains or losses that built up before the period began. That earlier part is reversed in “Change in unrealized”, so the rows add up to the period’s net P&amp;L.</p>
+              <p className="t3" style={{ fontSize: 'var(--font-size-xs)', marginTop: 'var(--space-3)' }}>Change in unrealized is after fees on new purchases (they’re part of cost basis). Realized counts each trade closed in this period in full, including gains or losses that built up before the period began. That earlier part is reversed in “Change in unrealized”, so the rows add up to the period’s net P&amp;L.</p>
             </div>
           </Card>
         </div>

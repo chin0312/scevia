@@ -18,6 +18,7 @@ import { int } from '../lib/format'
 import { claimHandoff, readHandoff } from '../lib/handoff'
 import * as SC from '../lib/scenarios'
 import { readStored } from '../lib/storage'
+import { useSettings } from '../lib/settings'
 import { useSessionState, useStorageHealthy } from '../lib/useSessionState'
 import type { Scenario } from '../lib/scenarios'
 import { AddPositionModal } from './lab/AddPosition'
@@ -59,7 +60,8 @@ export default function ScenarioLab() {
   })
   const [storedActive, setActiveKey] = useSessionState<string>('scevia-active-v4', 'base', (v) => (typeof v === 'string' ? v : null))
   const [view, setView] = useSessionState<View>('scevia-lab-view', 'Build', (v) => (VIEWS.includes(v as View) ? (v as View) : null))
-  const [mode, setMode] = useSessionState<SizeMode>('scevia-lab-size', 'shares', (v) => (v === 'shares' || v === 'amount' || v === 'weight' ? v : null))
+  const { settings } = useSettings()
+  const [mode, setMode] = useSessionState<SizeMode>('scevia-lab-size', settings.labSize, (v) => (v === 'shares' || v === 'amount' || v === 'weight' ? v : null))
   const activeKey = storedActive === 'base' || scenarios.some((x) => x.key === storedActive) ? storedActive : 'base'
   const storageOk = useStorageHealthy()
   const [renaming, setRenaming] = useState(false)

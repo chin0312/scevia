@@ -7,7 +7,15 @@ Required states for every interactive component: **default, hover, focus-visible
 
 ## Shell
 - **AppShell** `.shell`: top bar + left section rail + main. Use for every product page. Don't use for modals or onboarding.
-- **TopNav** `.topbar`: brand wordmark (`/brand/scevia-logo.png`, 28px tall), the 4 areas (Overview, Analytics, Risk, Scenario Lab), utilities on the right (search ⌘K, sync status, data-mode chip, help, alerts, settings, avatar). Don't add more top-level areas. New things become sections.
+- **TopNav** `.topbar`: brand wordmark (`/brand/scevia-logo.png`, 28px tall), the 4 areas (Overview, Analytics, Risk, Scenario Lab), utilities on the right, each with one job (no item appears in two menus):
+  - **Search** (⌘K palette);
+  - **Portfolio menu** (data chip `Sample portfolio · date`): portfolio identity, its accounts with freshness, *Data sources*, *Accounts & records*, *Data coverage*;
+  - **Help**: search, “How Scevia calculates”, shortcuts;
+  - **Notifications**: alerts filtered by the user's alert settings, *Mark all read*, *Alert settings*;
+  - **Settings** (gear, opens `SettingsModal` directly);
+  - **Profile** (avatar): sign-in state, Settings, Data & privacy; *Sign in* disabled with a reason.
+  The top bar is `z-index: --z-dropdown` (also when not sticky on phones), so its menus always paint above sticky section bars and cards. Don't add more top-level areas. New things become sections.
+- **SettingsModal** (`components/Settings.tsx`, `lib/settings.tsx`, `.set-row`): tabs *General* (default platform scope, default period, Scenario Lab sizing, currency), *Alerts* (resolution window, price-move threshold, data-quality alerts), *Risk* (single-event guardrail, shared with Risk), *Data & privacy* (what is stored, clear with confirmation). Every control takes effect immediately; *Restore defaults*. Only preferences that change something real belong here; data sources live in the portfolio menu.
 - **SectionRail** `SectionRail` (`.rail`, `.rail-sub`): this page's sections as jump links. Cards that share a row are **one group** (the row container has the group id) with one child entry per card, so side-by-side cards never compete for the active state. Scroll-spy tracks groups only. A click (or a `#hash` link) scrolls to the target, focuses it (`tabindex=-1`) and flashes it (`.section-flash`), and keeps that entry active until the user scrolls themselves (wheel, touch, PageUp/Down, arrows, Home/End, Space); reaching the bottom of the page never overrides it. Exactly one entry has `aria-current="location"`. Programmatic jumps (“Show in Holdings”) call `scrollToSection(id)` so they behave like rail clicks; scrollbar drags and Back/Forward release the lock too. The spy offset is measured from whatever is sticky (top bar, and the rail when it is a horizontal bar). Also holds saved scenarios and one context card. One level of children at most.
 
 ## Responsive behaviour (`web/src/styles/responsive.css`)
@@ -29,7 +37,7 @@ Smaller screens reflow instead of shrinking.
   - the top bar scrolls away;
   - tiles go two per row;
   - drawers go full width;
-  - Settings is hidden (its items stay reachable from the data chip, Help and Risk).
+  - the profile menu is hidden (its items stay reachable from Settings).
 - **Card internals use container queries** (`.card` is an inline-size container), so the same card adapts in a narrow column or full width:
   - allocation stacks;
   - concentration names wrap above their bars;

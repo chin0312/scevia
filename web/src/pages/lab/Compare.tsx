@@ -82,7 +82,7 @@ export function CompareView({ scenarios, evals, actual, activeKey, onOpen }: { s
           })} />
         </div>
       </Card>
-      <Card id="c-alloc">
+      <Card id="c-alloc" className="span-all">
         <CardHeader title="Allocation by category" sub="% of open-position value at reference marks" />
         <div className="card-b">
           <StackBars label="Category allocation by scenario" rows={entries.map((x) => {

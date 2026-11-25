@@ -3,14 +3,15 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { LAST_VISIT, TODAY } from '../data/portfolio'
 import { PLATFORM_NAME } from '../data/labels'
-import { POSITIONS, account, exposures, fmtDate } from '../lib/finance'
+import { ACCOUNTS, POSITIONS, account, exposures, fmtDate, sourceOf } from '../lib/finance'
 import { fmt, sfmt } from '../lib/format'
 import { ConnectProvider, useConnect } from './ConnectSources'
 import { DetailProvider, useDetails, type Detail } from './details'
-import { clearScevia, sceviaKeys } from '../lib/storage'
+import { SettingsProvider, useSettings, type SettingsTab } from '../lib/settings'
+import { SettingsModal } from './Settings'
 import { Icon, type IconName } from './Icon'
-import { Layer, Menu, Modal, ToastProvider, useToast } from './overlays'
-import { Button, Callout, cx } from './ui'
+import { Layer, Menu, Modal, ToastProvider } from './overlays'
+import { PlatformBadge, cx } from './ui'
 
 const AREAS = [
   { to: '/overview', label: 'Overview' },
@@ -23,18 +24,23 @@ function Logo() {
   return <img className="brand-logo" src="/brand/scevia-logo.png" srcSet="/brand/scevia-logo@2x.png 2x" alt="Scevia" height={28} />
 }
 
+/** Alerts, filtered by the user's alert settings. Each one opens the thing it is about in place. */
 function useNotifications() {
+  const { settings } = useSettings()
+  const { resolvingWithin, priceMove, feeEstimates } = settings.alerts
   return useMemo(() => {
-    const soonest = [...POSITIONS].sort((a, b) => a.days - b.days)[0]
-    const mover = [...POSITIONS].sort((a, b) => Math.abs((b.mark - b.markAtLastVisit) * b.shares) - Math.abs((a.mark - a.markAtLastVisit) * a.shares))[0]
-    const moved = (mover.mark - mover.markAtLastVisit) * mover.shares
+    const out: { icon: IconName; tone: string; title: string; sub: string; detail?: Detail; to?: string }[] = []
+    if (resolvingWithin > 0) for (const p of [...POSITIONS].filter((x) => x.days <= resolvingWithin).sort((x, y) => x.days - y.days).slice(0, 2))
+      out.push({ icon: 'cal', tone: 'warn', title: `${p.market} resolves in ${p.days} days`, sub: `${fmt(p.cost)} at stake · ${PLATFORM_NAME[p.platform]} · view event`, detail: { kind: 'event', id: p.eventId } })
+    if (priceMove > 0) {
+      const mover = [...POSITIONS].sort((x, y) => Math.abs((y.mark - y.markAtLastVisit) * y.shares) - Math.abs((x.mark - x.markAtLastVisit) * x.shares))[0]
+      const moved = (mover.mark - mover.markAtLastVisit) * mover.shares
+      if (Math.abs(moved) >= priceMove) out.push({ icon: 'trend', tone: moved >= 0 ? 'gain' : 'loss', title: `${mover.market} ${mover.side}: ${mover.markAtLastVisit.toFixed(2)} → ${mover.mark.toFixed(2)}`, sub: `${sfmt(moved)} since ${fmtDate(LAST_VISIT)} · view position`, detail: { kind: 'position', id: mover.id } })
+    }
     const est = account().feeEstimates
-    return [
-      { icon: 'cal' as IconName, tone: 'warn', title: `${soonest.market} resolves in ${soonest.days} days`, sub: `${fmt(soonest.cost)} at stake · ${PLATFORM_NAME[soonest.platform]} · view event`, detail: { kind: 'event', id: soonest.eventId } as Detail },
-      { icon: 'trend' as IconName, tone: moved >= 0 ? 'gain' : 'loss', title: `${mover.market} ${mover.side}: ${mover.markAtLastVisit.toFixed(2)} → ${mover.mark.toFixed(2)}`, sub: `${sfmt(moved)} since ${fmtDate(LAST_VISIT)} · view position`, detail: { kind: 'position', id: mover.id } as Detail },
-      ...(est ? [{ icon: 'alert' as IconName, tone: 'warn', title: `${est} settlements have estimated fees`, sub: 'Kalshi · marked as estimates in net P&L · go to Overview › Data coverage', to: '/overview#coverage' }] : []),
-    ]
-  }, [])
+    if (feeEstimates && est) out.push({ icon: 'alert', tone: 'warn', title: `${est} settlements have estimated fees`, sub: 'Kalshi · marked as estimates in net P&L · go to Overview › Data coverage', to: '/overview#coverage' })
+    return out
+  }, [resolvingWithin, priceMove, feeEstimates])
 }
 
 const DEFINITIONS: [string, string][] = [
@@ -47,12 +53,15 @@ const DEFINITIONS: [string, string][] = [
   ['Settlement payoff', 'A contract pays $1 per share if its side wins and $0 otherwise. Scevia never assigns probabilities.'],
 ]
 
-function TopNav({ onSearch, onInfo }: { onSearch: () => void; onInfo: (k: 'calc' | 'privacy') => void }) {
+function TopNav({ onSearch, onInfo }: { onSearch: () => void; onInfo: () => void }) {
   const nav = useNavigate()
   const details = useDetails()
   const connect = useConnect()
+  const { open: openSettings } = useSettings()
   const notifs = useNotifications()
-  const [read, setRead] = useState(false)
+  const sig = notifs.map((n) => n.title).join('|')
+  const [readSig, setReadSig] = useState<string | null>(null)
+  const read = notifs.length === 0 || readSig === sig
   return (
     <header className="topbar">
       <NavLink className="brand" to="/overview" aria-label="Scevia home"><Logo /></NavLink>
@@ -65,38 +74,49 @@ function TopNav({ onSearch, onInfo }: { onSearch: () => void; onInfo: (k: 'calc'
       </nav>
       <div className="utils">
         <button type="button" className="search" onClick={onSearch} aria-keyshortcuts="Meta+K" aria-label="Search pages, positions, events"><Icon name="search" size={15} /><span>Search pages, positions, events…</span><kbd>⌘K</kbd></button>
-        <button type="button" className="chip accent chip-btn" title="You’re viewing a fictional sample portfolio. No account is connected." onClick={() => connect()}>Sample portfolio<span className="chip-date"> · {fmtDate(TODAY)}</span></button>
+        {/* Portfolio: what the figures are based on, its accounts and their freshness, and where to manage them. */}
+        <Menu label="Portfolio" width={320} trigger={(t) => <button type="button" className="chip accent chip-btn" aria-label="Portfolio and data sources" {...t}>Sample portfolio<span className="chip-date"> · {fmtDate(TODAY)}</span></button>}>
+          {(close) => (<>
+            <div className="menu-h"><span>Sample portfolio<small>Fictional data · as of {fmtDate(TODAY)} · no account connected</small></span></div>
+            {ACCOUNTS.map((a) => { const src = sourceOf(a.venue); return (
+              <div className="menu-row acct-row" key={a.id}><span className="row"><PlatformBadge p={a.venue} size={18} />{PLATFORM_NAME[a.venue]} · {a.label}</span><small className={src.stale ? 'stale' : 't3'}>{src.stale ? 'stale · ' : ''}{fmtDate(src.asOf)}</small></div>
+            ) })}
+            <div className="menu-sep" />
+            <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); connect() }}><Icon name="link" />Data sources</button>
+            <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); nav('/accounts') }}><Icon name="list" />Accounts &amp; records<small className="t3" style={{ marginLeft: 'auto' }}>sample</small></button>
+            <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); nav('/overview#coverage') }}><Icon name="db" />Data coverage</button>
+          </>)}
+        </Menu>
         <Menu label="Help" width={300} trigger={(t) => <button type="button" className="icon-btn" aria-label="Help" {...t}><Icon name="help" size={18} /></button>}>
           {(close) => (<>
             <div className="menu-h">Help</div>
-            <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); onSearch() }}><Icon name="search" />Search <kbd className="kbd">⌘K</kbd></button>
-            <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); onInfo('calc') }}><Icon name="info" />How Scevia calculates P&amp;L</button>
-            <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); onInfo('privacy') }}><Icon name="shield" />Data & privacy</button>
+            <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); onSearch() }}><Icon name="search" />Search<kbd className="kbd" style={{ marginLeft: 'auto' }}>⌘K</kbd></button>
+            <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); onInfo() }}><Icon name="info" />How Scevia calculates</button>
+            <div className="menu-sep" />
+            <div className="menu-row t3"><span>Close a panel or dialog</span><kbd className="kbd">esc</kbd></div>
           </>)}
         </Menu>
         <Menu label="Notifications" width={360} trigger={(t) => <button type="button" className={cx('icon-btn', !read && 'has-badge')} aria-label={`Notifications${read ? '' : `, ${notifs.length} unread`}`} {...t}><Icon name="bell" size={18} />{!read && <span className="badge" />}</button>}>
           {(close) => (<>
-            <div className="menu-h">Notifications <button type="button" role="menuitem" className="link" onClick={() => setRead(true)} disabled={read}>{read ? 'All read' : 'Mark all read'}</button></div>
+            <div className="menu-h">Notifications <button type="button" role="menuitem" className="link" onClick={() => setReadSig(sig)} disabled={read}>{read ? 'All read' : 'Mark all read'}</button></div>
+            {notifs.length === 0 && <div className="menu-row t3">No alerts with your current settings.</div>}
             {notifs.map((n) => (
-              <button type="button" role="menuitem" key={n.title} className="menu-i notif" onClick={() => { close(); setRead(true); if ('detail' in n && n.detail) details.open(n.detail); else if ('to' in n && n.to) nav(n.to) }}>
+              <button type="button" role="menuitem" key={n.title} className="menu-i notif" onClick={() => { close(); setReadSig(sig); if (n.detail) details.open(n.detail); else if (n.to) nav(n.to) }}>
                 <span className={`ic ${n.tone}`}><Icon name={n.icon} size={14} /></span><span><b>{n.title}</b><small>{n.sub}</small></span>
               </button>
             ))}
+            <div className="menu-sep" />
+            <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); openSettings('Alerts') }}><Icon name="gear" />Alert settings</button>
           </>)}
         </Menu>
-        <Menu label="Settings" width={280} trigger={(t) => <button type="button" className="icon-btn" aria-label="Settings" {...t}><Icon name="gear" size={18} /></button>}>
+        <button type="button" className="icon-btn" aria-label="Settings" onClick={() => openSettings('General')}><Icon name="gear" size={18} /></button>
+        <Menu label="Profile" width={280} trigger={(t) => <button type="button" className="avatar" aria-label="Profile" {...t}><Icon name="user" size={16} /></button>}>
           {(close) => (<>
-            <div className="menu-h">Settings</div>
-            <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); connect() }}><Icon name="link" />Data sources</button>
-            <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); nav('/risk#conc') }}><Icon name="shield" />Guardrails<small className="t3" style={{ marginLeft: 'auto' }}>in Risk →</small></button>
-            <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); onInfo('privacy') }}><Icon name="db" />Data & privacy</button>
-          </>)}
-        </Menu>
-        <Menu label="Account" width={260} trigger={(t) => <button type="button" className="avatar" aria-label="Account" {...t}>AR</button>}>
-          {(close) => (<>
-            <div className="menu-h"><span>Not signed in<small>Viewing the sample portfolio</small></span></div>
-            <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); connect() }}><Icon name="link" />Data sources</button>
-            <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); onInfo('privacy') }}><Icon name="shield" />Data & privacy</button>
+            <div className="menu-h"><span>Not signed in<small>Sample workspace in this browser tab</small></span></div>
+            <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); openSettings('General') }}><Icon name="gear" />Settings</button>
+            <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); openSettings('Data & privacy') }}><Icon name="shield" />Data &amp; privacy</button>
+            <div className="menu-sep" />
+            <button type="button" role="menuitem" className="menu-i" disabled title="Accounts and sign-in aren’t available in this version"><Icon name="user" />Sign in<small className="t3" style={{ marginLeft: 'auto' }}>not available yet</small></button>
           </>)}
         </Menu>
       </div>
@@ -104,35 +124,10 @@ function TopNav({ onSearch, onInfo }: { onSearch: () => void; onInfo: (k: 'calc'
   )
 }
 
-function InfoModal({ kind, onClose }: { kind: 'calc' | 'privacy'; onClose: () => void }) {
-  if (kind === 'calc') return (
+function CalcModal({ onClose }: { onClose: () => void }) {
+  return (
     <Modal title="How Scevia calculates" sub="The same definitions are used on every page" onClose={onClose} width={600}>
       {DEFINITIONS.map(([k, v]) => <div className="list-row" key={k}><b style={{ minWidth: 170, fontWeight: 'var(--font-weight-medium)' }}>{k}</b><span className="t2">{v}</span></div>)}
-    </Modal>
-  )
-  return <PrivacyModal onClose={onClose} />
-}
-
-/* Describes what the app does today, not future cloud features. Clearing removes only Scevia's own keys, asks first,
-   and reports failure instead of claiming success. */
-function PrivacyModal({ onClose }: { onClose: () => void }) {
-  const toast = useToast()
-  const [confirm, setConfirm] = useState(false)
-  const held = sceviaKeys().length
-  const clear = () => {
-    const r = clearScevia()
-    if (!r.ok) { toast('Couldn’t clear Scevia’s saved data in this browser', 'info'); setConfirm(false); return }
-    onClose(); location.reload()
-  }
-  return (
-    <Modal title="Data & privacy" onClose={onClose} width={560}
-      footer={confirm
-        ? <><Button variant="ghost" onClick={() => setConfirm(false)}>Cancel</Button><Button variant="primary" onClick={clear}>Clear and reload</Button></>
-        : <><Button variant="ghost" onClick={onClose}>Close</Button><Button onClick={() => setConfirm(true)} disabled={held === 0} title={held === 0 ? 'Nothing is saved in this tab' : undefined}>Clear saved scenarios & settings…</Button></>}>
-      <p className="t2">You’re viewing a <b>sample portfolio</b>: its positions and trades are fictional. No Polymarket, Kalshi or other account is connected, and no file has been imported.</p>
-      <p className="t2">Scenarios, your guardrail, relationship choices and fee setting are kept only in this browser tab (session storage) and are removed when the tab closes. They aren’t sent to a server.</p>
-      <p className="t2">Scevia is read-only. It never places trades, holds funds, or asks for private keys, seed phrases or trading permissions.</p>
-      {confirm && <Callout tone="warn" icon="alert">This removes your saved scenarios and settings in this tab ({held} item{held === 1 ? '' : 's'}). It can’t be undone. Other sites’ data isn’t affected.</Callout>}
     </Modal>
   )
 }
@@ -186,7 +181,8 @@ function CommandPalette({ onClose }: { onClose: () => void }) {
 
 export function AppLayout() {
   const [palette, setPalette] = useState(false)
-  const [info, setInfo] = useState<'calc' | 'privacy' | null>(null)
+  const [calc, setCalc] = useState(false)
+  const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); setPalette((p) => !p) } }
     document.addEventListener('keydown', onKey)
@@ -194,14 +190,17 @@ export function AppLayout() {
   }, [])
   return (
     <ToastProvider>
+      <SettingsProvider onOpen={setSettingsTab}>
       <ConnectProvider>
         <DetailProvider>
-        <TopNav onSearch={() => setPalette(true)} onInfo={setInfo} />
+        <TopNav onSearch={() => setPalette(true)} onInfo={() => setCalc(true)} />
         <Outlet />
         {palette && <CommandPalette onClose={() => setPalette(false)} />}
-        {info && <InfoModal kind={info} onClose={() => setInfo(null)} />}
+        {calc && <CalcModal onClose={() => setCalc(false)} />}
+        {settingsTab && <SettingsModal tab={settingsTab} onClose={() => setSettingsTab(null)} />}
         </DetailProvider>
       </ConnectProvider>
+      </SettingsProvider>
     </ToastProvider>
   )
 }

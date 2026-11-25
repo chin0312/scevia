@@ -133,6 +133,10 @@ A portfolio is **user-controlled** and can combine several accounts and acquisit
 - A CSV import names its account and whether it supplements that account's history or stands alone. Overlaps are offered for review, never merged automatically; unmatched rows can be accepted in one decision.
 - In this build these flows run in a clearly labelled **sample records workspace** (`/accounts`) that never changes portfolio figures. Real imports and decisions need the backend accounting API.
 
+## Settings
+
+Settings are the user's preferences, not a list of shortcuts: default platform scope and period, Scenario Lab sizing, which alerts appear, the single-event guardrail (one value shared with Risk), and the data kept in this browser. Each takes effect immediately. Data sources and accounts belong to the portfolio menu next to the data chip.
+
 ## Interaction principles
 
 - **Four independent modules.** Overview, Analytics, Risk and Scenario Lab each answer their own question and are complete on their own. They share one data layer, not each other's screens.

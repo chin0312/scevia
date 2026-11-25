@@ -195,7 +195,8 @@ test('4 · switching platform and period keeps summaries consistent', async ({ p
 
 test('data sources never claim a connection; account actions are unavailable, not simulated', async ({ page }) => {
   await fresh(page, '/overview')
-  await page.getByRole('button', { name: /Sample portfolio ·/ }).click()
+  await page.getByRole('button', { name: 'Portfolio and data sources' }).click()
+  await page.getByRole('menuitem', { name: 'Data sources' }).click()
   const dlg = page.getByRole('dialog', { name: 'Data sources' })
   await expect(dlg).toContainText('Sample portfolio')
   await expect(dlg).toContainText('Active')
@@ -463,9 +464,9 @@ test('stored state: invalid data falls back safely; clearing removes only Scevia
   await expect(page.locator('#saved')).toContainText('Restored') // older scenario migrated, not discarded
   await page.getByRole('option', { name: /Restored/ }).click()
   await expect(rows(page)).toHaveCount(1) // dangling "ghost" reference dropped
-  await page.getByRole('button', { name: 'Help' }).click()
+  await page.getByRole('button', { name: 'Profile' }).click()
   await page.getByRole('menuitem', { name: 'Data & privacy' }).click()
-  const dlg = page.getByRole('dialog', { name: 'Data & privacy' })
+  const dlg = page.getByRole('dialog', { name: 'Settings' })
   await dlg.getByRole('button', { name: /Clear saved scenarios/ }).click()
   await expect(dlg).toContainText('It can’t be undone')
   await dlg.getByRole('button', { name: 'Clear and reload' }).click()
@@ -867,4 +868,49 @@ test('accounts & records: a supplemental import keeps overlaps for review; dupli
   await expect(drawer).toContainText('duplicate of a-002')
   await drawer.getByRole('button', { name: 'Restore as delivered' }).click()
   await expect(drawer).toContainText('Needs review')
+})
+
+for (const vp of [{ width: 375, height: 812 }, { width: 768, height: 1024 }, { width: 1100, height: 900 }, { width: 1440, height: 900 }]) {
+  test(`top bar menus paint above the page at ${vp.width}px (sticky section bars and cards never cover them)`, async ({ page }) => {
+    await page.setViewportSize(vp)
+    for (const path of ['/risk', '/accounts']) {
+      await fresh(page, path)
+      await page.mouse.wheel(0, 500)
+      for (const label of ['Notifications', 'Portfolio and data sources', 'Help']) {
+        await page.getByRole('button', { name: new RegExp(`^${label}`) }).first().click()
+        const menu = page.getByRole('menu').first()
+        await expect(menu).toBeVisible()
+        const onTop = await menu.evaluate((m) => { const r = m.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + Math.min(r.height - 4, 40)); return !!hit && m.contains(hit) })
+        expect(onTop, `${label} menu at ${vp.width}px on ${path}`).toBe(true)
+        await page.keyboard.press('Escape')
+      }
+    }
+  })
+}
+
+test('settings are user preferences that take effect: default scope, alerts and the shared guardrail', async ({ page }) => {
+  await fresh(page, '/overview')
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const dlg = page.getByRole('dialog', { name: 'Settings' })
+  await dlg.getByRole('radiogroup', { name: 'Default platform scope' }).getByRole('radio', { name: 'Kalshi' }).click()
+  await dlg.getByRole('tab', { name: 'Alerts' }).click()
+  await dlg.getByRole('radiogroup', { name: 'Resolution alerts' }).getByRole('radio', { name: 'Off' }).click()
+  await dlg.getByRole('tab', { name: 'Risk' }).click()
+  await dlg.getByLabel('Single-event guardrail').fill('30')
+  await dlg.getByRole('button', { name: 'Done' }).click()
+  await page.goto('/overview')
+  await expect(page.getByText('Sample portfolio: Kalshi only')).toBeVisible()
+  await page.getByRole('button', { name: /^Notifications/ }).click()
+  await expect(page.getByRole('menu', { name: 'Notifications' })).not.toContainText('resolves in')
+  await page.keyboard.press('Escape')
+  await page.goto('/risk')
+  await expect(page.locator('main')).toContainText('30% guardrail')
+  // Data sources live with the portfolio, not in settings; the profile is honest about sign-in.
+  await page.getByRole('button', { name: 'Portfolio and data sources' }).click()
+  await expect(page.getByRole('menu', { name: 'Portfolio' })).toContainText('Wallet 0x7a…c2')
+  await page.getByRole('menuitem', { name: 'Data sources' }).click()
+  await expect(page.getByRole('dialog', { name: 'Data sources' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await page.getByRole('button', { name: 'Profile' }).click()
+  await expect(page.getByRole('menuitem', { name: /Sign in/ })).toBeDisabled()
 })

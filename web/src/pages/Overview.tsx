@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { useSettings } from '../lib/settings'
 import { Link, useNavigate } from 'react-router-dom'
 import type { ClosedTrade } from '../data/types'
 import { Donut, LineChart } from '../components/charts'
@@ -32,8 +33,9 @@ export default function Overview() {
   useHashScroll()
   const nav = useNavigate()
   const connect = useConnect()
-  const [plat, setPlat] = useState<PlatformLabel>('All')
-  const [period, setPeriod] = useState<Period>('6M')
+  const { settings } = useSettings()
+  const [plat, setPlat] = useState<PlatformLabel>(settings.defaultScope === 'pm' ? 'Polymarket' : settings.defaultScope === 'ks' ? 'Kalshi' : 'All')
+  const [period, setPeriod] = useState<Period>(settings.defaultPeriod)
   const [chartTab, setChartTab] = useState<'Value' | 'Net P&L'>('Value')
   const [holdTab, setHoldTab] = useState<'Open positions' | 'Resolved' | 'Activity'>('Open positions')
   const [sel, setSel] = useState<Selection>(null)
@@ -224,10 +226,10 @@ export default function Overview() {
           </Card>
 
           <Card id="upcoming">
-            <CardHeader title="Upcoming resolutions" sub="Next 40 days · capital at stake" right={<Link className="btn btn-sm btn-ghost" to="/risk#calendar" title="Open the resolution calendar in Risk">Full calendar →</Link>} />
+            <CardHeader title="Upcoming resolutions" sub="Next 6 resolutions · capital at stake" right={<Link className="btn btn-sm btn-ghost" to="/risk#calendar" title="Open the resolution calendar in Risk">Full calendar →</Link>} />
             <div className="card-b">
-              {exps.filter((e) => e.days <= 40).length === 0 && <div className="empty"><p>Nothing resolves in the next 40 days.</p></div>}
-              {exps.filter((e) => e.days <= 40).sort((a, b) => a.days - b.days).map((e) => (
+              {exps.length === 0 && <div className="empty"><p>No open positions to resolve.</p></div>}
+              {[...exps].sort((a, b) => a.days - b.days).slice(0, 6).map((e) => (
                 <button type="button" key={e.event.id} className="tl-row tl-btn" aria-label={`${e.event.name}: view event exposure`} onClick={() => details.open({ kind: 'event', id: e.event.id, scope: f })}>
                   <div className="date"><b>{fmtDate(e.resolves, { day: 'numeric' })}</b><span>{fmtDate(e.resolves, { month: 'short' })}</span></div>
                   <div className="t">{e.event.name} {e.positions.length > 1 && <Chip tone="accent">{e.positions.length} contracts</Chip>}<small>{e.platforms.map((p) => PLATFORM_NAME[p]).join(' + ')} · {e.side === 'Mixed' ? 'YES + NO' : e.side} · in {e.days} days</small></div>
@@ -245,6 +247,8 @@ export default function Overview() {
                 const c = coverage(p), src = sourceOf(p)
                 return <div className="cov" key={p}><PlatformBadge p={p} /><span>{accountsOn(p).map((a) => a.label).join(', ')} · {c.fills} fills · {c.settlements} settlements</span><span className={src.stale ? 'stale' : 't3'} title={src.stale ? 'Older than 24 hours' : undefined}>as of {fmtDate(src.asOf)}{src.stale ? ' · stale' : ''}</span></div>
               })}
+              {(() => { const ps = (['pm', 'ks'] as Platform[]).filter((p) => f === 'all' || p === f).map(coverage); const t = (k: keyof (typeof ps)[number]) => ps.reduce((a, c) => a + c[k], 0)
+                return <div className="cov-mini"><div><b>{t('open')}</b>open positions</div><div><b>{t('fills')}</b>fills</div><div><b>{t('settlements')}</b>settlements</div><div><b>{t('feeEstimates')}</b>fee estimates</div></div> })()}
               <Link className="link" style={{ display: 'inline-block', marginTop: 'var(--space-3)' }} to="/accounts">Accounts &amp; records (sample workspace) →</Link>
               {feeEstimateTrades.length > 0 && <div style={{ marginTop: 'var(--space-3)' }}>
                 <Callout tone="warn">{feeEstimateTrades.length} Kalshi settlements have no fee detail, so their fees ({fmt(feeEstimateTrades.reduce((a, t) => a + t.fees, 0), 2)} total) are estimates. <button type="button" className="link" onClick={() => setFeeReview(true)}>Review</button></Callout>

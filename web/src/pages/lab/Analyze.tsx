@@ -70,6 +70,10 @@ export function AnalyzeView({ E, onEdit }: { E: Evaluation; onEdit: (id: string)
             { key: 'b', label: 'Start', text: rangeText('Start', B.worstValue, B.bestValue), lo: B.worstValue, hi: B.bestValue, ref: B.totalValue, color: 'var(--color-text-tertiary)' },
             { key: 'a', label: 'Scenario', text: rangeText('Scenario', A.worstValue, A.bestValue), lo: A.worstValue, hi: A.bestValue, ref: A.totalValue, color: 'var(--color-accent-solid)' },
           ]} />
+          <div className="dt-wrap range-tbl"><table className="dt">
+            <thead><tr><th scope="col" /><th scope="col" className="r">Worst feasible</th><th scope="col" className="r">At reference marks</th><th scope="col" className="r">Best feasible</th></tr></thead>
+            <tbody>{([['Start', B], ['Scenario', A]] as const).map(([l, m]) => <tr key={l}><th scope="row">{l}</th><td className="r">{m.worstValue == null ? 'Unavailable' : fmt(m.worstValue)}</td><td className="r">{m.totalValue == null ? 'Unavailable' : fmt(m.totalValue)}</td><td className="r">{m.bestValue == null ? 'Unavailable' : fmt(m.bestValue)}</td></tr>)}</tbody>
+          </table></div>
           <div className="legend chart-note"><span><i style={{ background: 'var(--color-accent-solid)' }} />worst ○ — ● best</span><span><i className="ln" style={{ background: 'var(--color-text-primary)' }} />value at reference marks</span></div>
           <p className="t3 chart-note">The range isn’t a distribution: outcomes between the ends aren’t more likely, and the middle isn’t an expected value.{A.excluded ? ` ${A.excluded} impossible joint outcome${A.excluded > 1 ? 's' : ''} excluded by constraints.` : ''}</p>
         </div>
