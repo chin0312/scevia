@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Icon } from '../components/Icon'
 import { useWidth } from '../components/charts'
 import { useDetails } from '../components/details'
+import { handoffPath } from '../lib/handoff'
 import { Modal, useToast } from '../components/overlays'
 import { RelationshipModal } from '../components/relationships'
 import { SectionRail, useHashScroll, type RailSection } from '../components/shell'
@@ -10,7 +11,7 @@ import { Button, Callout, Card, CardHeader, Chip, Legend, PageHead, PlatformBadg
 import { TODAY } from '../data/portfolio'
 import { CATEGORIES, CAT_COLOR, PLATFORM_NAME } from '../data/labels'
 import { REL_TEXT, useRelations, type RelClass } from '../data/relations'
-import { account, addDays, baseHoldings, exposures, fmtDate, positionsFor, settlementRange, settlementRangeFor, type EventExposure } from '../lib/finance'
+import { account, addDays, baseHoldings, exposures, fmtDate, positionsFor, outcomeLabel, settlementRange, settlementRangeFor, type EventExposure } from '../lib/finance'
 import { fmt, kfmt, pct, sfmt } from '../lib/format'
 import { useSessionState } from '../lib/useSessionState'
 
@@ -25,11 +26,11 @@ const MACRO = ['fed', 'cpi', 'rec']
 /** Largest capital resolving inside any 7-day window within `days`. */
 function busiestWeek(exps: EventExposure[], days = 90) {
   const near = exps.filter((e) => e.days <= days)
-  let best = { cost: 0, from: '', to: '', n: 0 }
+  let best = { cost: 0, loss: 0, from: '', to: '', n: 0 }
   for (const e of near) {
     const inWin = near.filter((x) => x.resolves >= e.resolves && x.resolves <= addDays(e.resolves, 6))
     const cost = inWin.reduce((a, x) => a + x.cost, 0)
-    if (cost > best.cost) best = { cost, from: e.resolves, to: inWin.reduce((m, x) => (x.resolves > m ? x.resolves : m), e.resolves), n: inWin.length }
+    if (cost > best.cost) best = { cost, loss: inWin.reduce((a, x) => a + x.maxLoss, 0), from: e.resolves, to: inWin.reduce((m, x) => (x.resolves > m ? x.resolves : m), e.resolves), n: inWin.length }
   }
   return best
 }
@@ -72,12 +73,16 @@ export default function Risk() {
   const scale = Math.max(32, Math.ceil(shareOf(groups[0].cost) / 10) * 10 + 4)
   const over = exps.filter((e) => shareOf(e.cost) > limit)
   const top3 = exps.slice(0, 3).reduce((a, e) => a + e.cost, 0)
+  // Downside uses each event's worst settlement (opposing holdings offset), ordered by that loss.
+  const byLoss = [...exps].sort((a, b) => b.maxLoss - a.maxLoss)
+  const top3Loss = byLoss.slice(0, 3).reduce((a, e) => a + e.maxLoss, 0)
   const rows = exps.filter((e) => filter === 'All events' || (filter === 'Next 30 days' ? e.days <= 30 : shareOf(e.cost) > limit))
-  const ladder = exps.reduce<number[]>((a, e) => [...a, (a.at(-1) ?? 0) + e.cost], [])
+  const ladder = byLoss.reduce<number[]>((a, e) => [...a, (a.at(-1) ?? 0) + e.maxLoss], [])
   const ladderMax = Math.max(10000, Math.ceil((ladder.at(-1) ?? 0) / 10000) * 10000)
   const ladderTicks = Array.from({ length: ladderMax / 10000 + 1 }, (_, i) => i * 10000)
   const [ladderRef, LW] = useWidth<HTMLDivElement>(480)
-  const macroCost = exps.filter((e) => MACRO.includes(e.event.id)).reduce((a, e) => a + e.cost, 0)
+  const macroLoss = exps.filter((e) => MACRO.includes(e.event.id)).reduce((a, e) => a + e.maxLoss, 0)
+  const poScale = Math.max(1, ...exps.flatMap((e) => [Math.abs(e.pnl.YES), Math.abs(e.pnl.NO)]))
   const soon = exps.filter((e) => e.days <= 30)
   const week = busiestWeek(exps)
 
@@ -86,11 +91,12 @@ export default function Risk() {
   const shownIds = new Set(rows.map((e) => e.event.id))
   const table = settlementRangeFor([...shownIds], rels)
   const unclassifiedPair = crypto === 'unknown' && shownIds.has('btc') && shownIds.has('eth')
-  const worstValue = acct.cash + committed + portfolio.min
-  const openEvent = (id: string) => details.open({ kind: 'event', id })
-  // Explicit hand-off: the Lab asks which scenario and which of these holdings to add before changing anything.
-  const stressIds = rows.map((e) => e.event.id)
-  const stressTest = () => nav(`/scenario-lab?addEvent=${stressIds.join(',')}`)
+  const worstValue = portfolio ? acct.cash + committed + portfolio.min : null
+  const openEvent = (id: string) => details.open({ kind: 'event', id, scope: 'all' })
+  // Explicit hand-off of the holdings behind the rows shown; the Lab confirms the scenario and which of them to add.
+  const stressIds = rows.flatMap((e) => e.positions.map((p) => p.id))
+  const stressTest = () => nav(handoffPath(stressIds, `Risk · outcome payoffs · ${filter.toLowerCase()} · all platforms`))
+  const na = 'Unavailable'
 
   return (
     <div className="shell">
@@ -105,15 +111,15 @@ export default function Risk() {
 
       <main>
         <PageHead caption={`Risk · ${acct.openCount} positions across ${exps.length} events`} title="What you’re exposed to"
-          actions={<><Seg label="Group by" options={['By event', 'By category', 'By platform'] as const} value={groupBy} onChange={setGroupBy} /><Button variant="primary" onClick={stressTest} disabled={stressIds.length === 0} title={`Choose a scenario and which of the ${stressIds.length} events in the payoff table to add`}><Icon name="flask" size={15} />Stress-test in Lab…</Button></>} />
+          actions={<><Seg label="Group by" options={['By event', 'By category', 'By platform'] as const} value={groupBy} onChange={setGroupBy} /><Button variant="primary" onClick={stressTest} disabled={stressIds.length === 0} title={`Choose a scenario and which of the ${stressIds.length} positions behind the payoff table to add`}><Icon name="flask" size={15} />Stress-test in Lab…</Button></>} />
 
         <p className="summary">You have <b>{fmt(committed)}</b> committed across {exps.length} events. {over.length > 0
           ? <><b>{over.length === 1 ? 'One event' : `${over.length} events`}</b> ({over.map((e) => e.event.short).join(', ')}) {over.length === 1 ? 'is' : 'are'} above your <button type="button" className="link" onClick={() => setEditLimit(limit)}>{limit}% guardrail</button>.</>
-          : <>No event is above your <button type="button" className="link" onClick={() => setEditLimit(limit)}>{limit}% guardrail</button>.</>} If your three largest events all went against you, you’d lose <b className="loss">{sfmt(-top3)}</b> ({pct((top3 / acct.totalValue) * 100, 0)} of portfolio value).{week.n > 1 && <> <b>{fmt(week.cost)}</b> resolves within one week ({fmtDate(week.from)}–{fmtDate(week.to)}).</>}</p>
+          : <>No event is above your <button type="button" className="link" onClick={() => setEditLimit(limit)}>{limit}% guardrail</button>.</>} If your three most exposed events all settled against you, you’d lose <b className="loss">{sfmt(-top3Loss)}</b> ({pct((top3Loss / acct.totalValue) * 100, 0)} of portfolio value).{week.n > 1 && <> <b>{fmt(week.cost)}</b> resolves within one week ({fmtDate(week.from)}–{fmtDate(week.to)}).</>}</p>
 
         <div className="tiles">
           <Tile label="Capital committed" info="Cost basis of open positions." value={fmt(committed)} foot={`${pct((committed / acct.totalValue) * 100, 0)} of portfolio value`} />
-          <Tile label="Worst feasible outcome" info="Lowest settlement P&L of the whole portfolio across joint outcomes that are possible given confirmed relationships. Unclassified pairs can go either way. Not affected by the table filter below." value={sfmt(portfolio.min)} tone="loss" foot={`You’d hold ${fmt(worstValue)} (cash + payouts)`} />
+          <Tile label="Worst feasible outcome" info="Lowest settlement P&L of the whole portfolio across joint outcomes that are possible given confirmed relationships. Unclassified pairs can go either way. Not affected by the table filter below." value={portfolio ? sfmt(portfolio.min) : na} tone={portfolio ? 'loss' : undefined} foot={worstValue != null ? `You’d hold ${fmt(worstValue)} (cash + payouts)` : 'Too many events to evaluate every combination exactly'} />
           <Tile label="Largest single event" info="Capital committed to one event (the same outcome across platforms counts once) ÷ total committed." value={pct(shareOf(exps[0].cost))} tone={shareOf(exps[0].cost) > limit ? 'warn' : undefined} foot={`${exps[0].event.short} · ${shareOf(exps[0].cost) > limit ? `over ${limit}% guardrail` : `within ${limit}%`}`} />
           <Tile label="Top-3 concentration" info="Share of committed capital in your three largest events." value={pct(shareOf(top3), 0)} foot={`${fmt(top3)} of committed`} />
           <Tile label="Resolving ≤ 30 days" info="Capital committed to events that resolve within 30 days." value={fmt(soon.reduce((a, e) => a + e.cost, 0))} foot={soon.length ? `${soon.length} events · first ${fmtDate([...soon].sort((a, b) => a.days - b.days)[0].resolves)}` : 'none'} />
@@ -140,13 +146,13 @@ export default function Risk() {
             </div>
           </Card>
           <Card id="ladder">
-            <CardHeader title="Downside ladder" sub="Loss if your N largest events all go against you · hover a step, select it for the event" />
+            <CardHeader title="Downside ladder" sub="Settlement loss if your N most exposed events all go against you · hover a step, select it for the event" />
             <div className="card-b">
-              <div ref={ladderRef}><svg viewBox={`0 0 ${LW} 220`} width="100%" style={{ overflow: 'visible' }} className="chart" role="group" aria-label={`Downside ladder: largest event ${sfmt(-exps[0].cost)}, top three ${sfmt(-top3)}, all events ${sfmt(-committed)}`} onPointerLeave={() => setHotStep(null)}>
+              <div ref={ladderRef}><svg viewBox={`0 0 ${LW} 220`} width="100%" style={{ overflow: 'visible' }} className="chart" role="group" aria-label={`Downside ladder: largest event ${sfmt(-(byLoss[0]?.maxLoss ?? 0))}, top three ${sfmt(-top3Loss)}, all events ${sfmt(-(ladder.at(-1) ?? 0))}`} onPointerLeave={() => setHotStep(null)}>
                 <g className="axis">{ladderTicks.map((t) => <g key={t}><line className="grid-l" x1={48} x2={LW - 10} y1={10 + (t / ladderMax) * 182} y2={10 + (t / ladderMax) * 182} strokeDasharray="2 4" /><text x={40} y={14 + (t / ladderMax) * 182} textAnchor="end">{t ? `−${kfmt(t)}` : '$0'}</text></g>)}
-                  {exps.map((_, i) => <text key={i} x={48 + (i + 0.5) * ((LW - 58) / exps.length)} y={212} textAnchor="middle">{i + 1}</text>)}</g>
-                {exps.map((e, i) => {
-                  const bw = (LW - 58) / exps.length, x0 = 48 + i * bw, y = (v: number) => 10 + (v / ladderMax) * 182, prev = i ? ladder[i - 1] : 0
+                  {byLoss.map((_, i) => <text key={i} x={48 + (i + 0.5) * ((LW - 58) / byLoss.length)} y={212} textAnchor="middle">{i + 1}</text>)}</g>
+                {byLoss.map((e, i) => {
+                  const bw = (LW - 58) / byLoss.length, x0 = 48 + i * bw, y = (v: number) => 10 + (v / ladderMax) * 182, prev = i ? ladder[i - 1] : 0
                   const on = hotStep == null ? i < 3 : i <= hotStep
                   return (
                     <g key={e.event.id} onPointerEnter={() => setHotStep(i)} onFocus={() => setHotStep(i)} onBlur={() => setHotStep(null)} className="hoverable step" role="button" tabIndex={0}
@@ -160,12 +166,12 @@ export default function Risk() {
               </svg></div>
               <div className="ministat">
                 {hotStep == null ? <>
-                  <div><div className="l">Largest event</div><div className="v loss">{sfmt(-exps[0].cost)}</div></div>
-                  <div><div className="l">Top 3 events</div><div className="v loss">{sfmt(-top3)}</div></div>
-                  <div><div className="l">Macro cluster (related)</div><div className="v loss">{sfmt(-macroCost)}</div></div>
+                  <div><div className="l">Largest event</div><div className="v loss">{sfmt(-(byLoss[0]?.maxLoss ?? 0))}</div></div>
+                  <div><div className="l">Top 3 events</div><div className="v loss">{sfmt(-top3Loss)}</div></div>
+                  <div><div className="l">Macro cluster (related)</div><div className="v loss">{sfmt(-macroLoss)}</div></div>
                 </> : <>
                   <div style={{ gridColumn: 'span 2' }}><div className="l">If your top {hotStep + 1} event{hotStep ? 's' : ''} go against you</div><div className="v loss">{sfmt(-ladder[hotStep])}</div></div>
-                  <div><div className="l">Adds</div><button type="button" className="link v t2" style={{ fontSize: 'var(--font-size-sm)', whiteSpace: 'normal', textAlign: 'left' }} onClick={() => openEvent(exps[hotStep].event.id)}>{exps[hotStep].event.name}</button></div>
+                  <div><div className="l">Adds</div><button type="button" className="link v t2" style={{ fontSize: 'var(--font-size-sm)', whiteSpace: 'normal', textAlign: 'left' }} onClick={() => openEvent(byLoss[hotStep].event.id)}>{byLoss[hotStep].event.name}</button></div>
                 </>}
               </div>
               <p className="t3" style={{ fontSize: 'var(--font-size-xs)', marginTop: 'var(--space-2)' }}>The ladder adds events as if they could all go against you together. It doesn’t say how likely that is.</p>
@@ -175,25 +181,27 @@ export default function Risk() {
 
         <Card id="payoffs" flush>
           <CardHeader pad title="Outcome payoffs" sub="P&L at settlement vs. cost basis (fees already paid not included) · select a row for every contract behind the event" right={<Tabs label="Filter events" options={['All events', 'Next 30 days', 'Over guardrail'] as const} value={filter} onChange={setFilter} />} />
-          <div className="po-row h"><span>Event · your side</span><span>Resolves</span><span>If it resolves for you</span><span>If it resolves against you</span><span className="r">Share</span></div>
-          {rows.length === 0 && <div className="empty"><p>No events match “{filter}”. This filter only changes the table: the portfolio’s worst feasible outcome is still <b className="loss">{sfmt(portfolio.min)}</b>.</p><button type="button" className="link" onClick={() => setFilter('All events')}>Show all events</button></div>}
+          <div className="po-row h"><span>Event · your side</span><span>Resolves</span><span>Better outcome</span><span>Worse outcome</span><span className="r">Share</span></div>
+          {rows.length === 0 && <div className="empty"><p>No events match “{filter}”. This filter only changes the table: the portfolio’s worst feasible outcome is still <b className="loss">{portfolio ? sfmt(portfolio.min) : na}</b>.</p><button type="button" className="link" onClick={() => setFilter('All events')}>Show all events</button></div>}
           {rows.map((e) => {
             const rel = relationOf(e.event.id)
             const chip = rel === 'equivalent' ? { tone: 'accent' as const, text: `${e.positions.length} contracts · equivalent` } : rel ? { tone: REL_TEXT[rel].tone, text: REL_TEXT[rel].short } : null
             return (
               <button type="button" key={e.event.id} className={cx('po-row', 'po-btn', 'hoverable', focus === e.event.id && 'sel')} style={focus === e.event.id ? { background: 'var(--color-accent-bg)' } : undefined}
                 onClick={() => openEvent(e.event.id)} aria-label={`${e.event.name}, ${e.positions.length} contract${e.positions.length > 1 ? 's' : ''}: view event exposure`}>
-                <div className="mk">{e.platforms.map((p) => <PlatformBadge key={p} p={p} />)}<div><b>{e.event.name}</b><span className="row" style={{ marginTop: 'var(--space-1)', gap: 'var(--space-1)' }}><Chip tone={e.side === 'YES' ? 'yes' : 'no'}>{e.side}</Chip>{chip && <Chip tone={chip.tone}>{chip.text}</Chip>}</span></div></div>
+                <div className="mk">{e.platforms.map((p) => <PlatformBadge key={p} p={p} />)}<div><b>{e.event.name}</b><span className="row" style={{ marginTop: 'var(--space-1)', gap: 'var(--space-1)' }}><Chip tone={e.side === 'YES' ? 'yes' : e.side === 'NO' ? 'no' : 'warn'}>{e.side === 'Mixed' ? 'YES + NO' : e.side}</Chip>{chip && <Chip tone={chip.tone}>{chip.text}</Chip>}</span></div></div>
                 <span>{fmtDate(e.resolves)}<br /><small className="t3">in {e.days} days</small></span>
-                <div className="po"><div className="bar"><i style={{ width: `${(e.pnlFor / 8000) * 100}%`, background: 'var(--color-gain-fg)' }} /></div><span className="gain">{sfmt(e.pnlFor)}</span></div>
-                <div className="po"><div className="bar"><i style={{ width: `${(e.cost / 8000) * 100}%`, background: 'var(--color-loss-fg)' }} /></div><span className="loss">{sfmt(e.pnlAgainst)}</span></div>
+                {[e.best, e.worst].map((x) => (
+                  <div className="po" key={x.outcome} title={outcomeLabel(e, x.outcome)}><div className="bar"><i style={{ width: `${(Math.abs(x.pnl) / poScale) * 100}%`, background: x.pnl >= 0 ? 'var(--color-gain-fg)' : 'var(--color-loss-fg)' }} /></div>
+                    <span className={x.pnl > 0 ? 'gain' : x.pnl < 0 ? 'loss' : 't2'}>{sfmt(x.pnl)}<small className="t3 po-o">{x.outcome}</small></span></div>
+                ))}
                 <span className="r" style={shareOf(e.cost) > limit ? { color: 'var(--color-warn-fg)' } : undefined}>{shareOf(e.cost).toFixed(1)}%</span>
               </button>
             )
           })}
           {table && <div className="po-row t"><span>{filter === 'All events' ? 'Whole portfolio' : `${rows.length} event${rows.length > 1 ? 's' : ''} shown (subtotal)`} · feasible range</span><span /><span className="gain r">{sfmt(table.max)} <small className="t3">best case</small></span><span className="loss r">{sfmt(table.min)} <small className="t3">worst case</small></span><span className="r">{pct(rows.reduce((a, e) => a + shareOf(e.cost), 0), 0)}</span></div>}
           <div className="foot"><span>
-            Best and worst cases search every joint outcome of the events {filter === 'All events' ? 'in the portfolio' : 'shown'} and skip impossible ones{table?.excluded ? ` (${table.excluded} combinations excluded because BTC and ETH are mutually exclusive)` : ''}.{filter !== 'All events' && ` Portfolio-wide: ${sfmt(portfolio.min)} to ${sfmt(portfolio.max)}.`}
+            Best and worst cases search every joint outcome of the events {filter === 'All events' ? 'in the portfolio' : 'shown'} and skip impossible ones{table?.excluded ? ` (${table.excluded} combinations excluded because BTC and ETH are mutually exclusive)` : ''}.{filter !== 'All events' && ` Portfolio-wide: ${portfolio ? `${sfmt(portfolio.min)} to ${sfmt(portfolio.max)}` : na}.`}
             {unclassifiedPair ? ' BTC × ETH is unclassified, so outcomes that may be unrealistic together are still included (unmodeled dependency).' : ''} Related events are never netted against each other.
           </span></div>
         </Card>
@@ -205,10 +213,10 @@ export default function Risk() {
               {exps.filter((e) => e.positions.length > 1).map((e) => (
                 <div className="rel" key={e.event.id}><div className="h"><button type="button" className="link" onClick={() => openEvent(e.event.id)}><b>{e.event.name}</b></button><Chip tone="yes">✓ Equivalent contract · confirmed</Chip></div>
                   {e.positions.map((p) => <div className="leg" key={p.id}><PlatformBadge p={p.platform} />{p.market} · {p.side}</div>)}
-                  <p>Same source and date, combined as one event. If it resolves against you: <span className="loss">{sfmt(e.pnlAgainst)}</span>.</p></div>
+                  <p>Same source and date, combined as one event. If it resolves {e.worst.outcome}: <span className={e.worst.pnl < 0 ? 'loss' : 'gain'}>{sfmt(e.worst.pnl)}</span>.</p></div>
               ))}
               <div className="rel"><div className="h"><b>US macro outlook</b><Chip tone="info">{REL_TEXT.related.label}</Chip></div>
-                <p>{exps.filter((e) => MACRO.includes(e.event.id)).map((e) => `${e.event.short} (${e.side})`).join(' · ')}. These share drivers but settle on different rules, so all combinations stay possible and nothing is netted. <button type="button" className="link" onClick={() => nav(`/scenario-lab?addEvent=${MACRO.join(',')}`)} title="Choose a scenario and which of these holdings to add">Model them together in Scenario Lab…</button></p></div>
+                <p>{exps.filter((e) => MACRO.includes(e.event.id)).map((e) => `${e.event.short} (${e.side})`).join(' · ')}. These share drivers but settle on different rules, so all combinations stay possible and nothing is netted. <button type="button" className="link" onClick={() => nav(handoffPath(exps.filter((e) => MACRO.includes(e.event.id)).flatMap((e) => e.positions.map((p) => p.id)), 'Risk · US macro outlook (related events) · all platforms'))} title="Choose a scenario and which of these holdings to add">Model them together in Scenario Lab…</button></p></div>
               <div className={cx('rel', crypto === 'unknown' && 'unk')}><div className="h"><b>BTC year-end · ETH ETF flows</b><Chip tone={REL_TEXT[crypto].tone}>{REL_TEXT[crypto].label}</Chip></div>
                 <p>{crypto === 'unknown' ? <>Probably connected, but not confirmed. Totals keep every combination possible and are marked <i>unmodeled dependency</i>.</> : `Classified by you as “${REL_TEXT[crypto].label}”. Scenario Lab uses the same setting.`} <button type="button" className="link" onClick={() => setClassify(true)}>{crypto === 'unknown' ? 'Classify' : 'Change'}</button></p></div>
               <p className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>Other event pairs are unclassified: every combination is treated as possible.</p>
@@ -218,7 +226,7 @@ export default function Risk() {
             <CardHeader title="Resolution calendar" sub="When capital is released or lost · circle area = capital at stake" right={<Seg label="Range" options={['90 days', '12 months'] as const} value={range} onChange={setRange} />} />
             <div className="card-b">
               <Calendar exps={exps} range={range} hot={hotCal} setHot={setHotCal} onPick={openEvent} />
-              {week.n > 1 && <div style={{ marginTop: 'var(--space-3)' }}><Callout tone="warn"><b>{fmt(week.cost)}</b> resolves between {fmtDate(week.from)} and {fmtDate(week.to)}. If those {week.n} events all went against you, you’d lose {pct((week.cost / acct.totalValue) * 100, 0)} of portfolio value.</Callout></div>}
+              {week.n > 1 && <div style={{ marginTop: 'var(--space-3)' }}><Callout tone="warn"><b>{fmt(week.cost)}</b> resolves between {fmtDate(week.from)} and {fmtDate(week.to)}. If those {week.n} events all settled against you, you’d lose {fmt(week.loss)} ({pct((week.loss / acct.totalValue) * 100, 0)} of portfolio value).</Callout></div>}
             </div>
           </Card>
         </div>

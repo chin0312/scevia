@@ -24,8 +24,51 @@ export function useFocusTrap(ref: React.RefObject<HTMLElement | null>) {
       else if (!e.shiftKey && i === els.length - 1) { e.preventDefault(); els[0].focus() }
     }
     root.addEventListener('keydown', onKey)
-    return () => { root.removeEventListener('keydown', onKey); previous?.focus?.() }
+    // Return focus to where the user was, if that element still exists (it may have been re-rendered away).
+    return () => { root.removeEventListener('keydown', onKey); if (previous?.isConnected) previous.focus() }
   }, [ref])
+}
+
+/* ── Layer stack ──────────────────────────────────────────────
+   Every modal layer (modal, drawer, palette) registers here, in opening order. One listener sends Esc to the
+   topmost layer only; layers underneath are made inert so focus and clicks can't reach them; the page's scroll
+   is locked once while any layer is open and restored when the last one closes. */
+interface LayerEntry { id: number; el: HTMLElement; close: () => void }
+const layers: LayerEntry[] = []
+let savedOverflow: string | null = null
+let nextLayerId = 1
+function syncLayers() {
+  layers.forEach((l, i) => { if (i === layers.length - 1) l.el.removeAttribute('inert'); else l.el.setAttribute('inert', '') })
+}
+function onLayerKey(e: KeyboardEvent) {
+  if (e.key !== 'Escape' || !layers.length) return
+  e.preventDefault(); e.stopPropagation()
+  layers[layers.length - 1].close()
+}
+function pushLayer(entry: LayerEntry) {
+  if (!layers.length) {
+    savedOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    document.addEventListener('keydown', onLayerKey, true)
+  }
+  layers.push(entry); syncLayers()
+}
+function removeLayer(id: number) {
+  const i = layers.findIndex((l) => l.id === id)
+  if (i >= 0) layers.splice(i, 1)
+  syncLayers()
+  if (!layers.length) {
+    document.body.style.overflow = savedOverflow ?? ''
+    savedOverflow = null
+    document.removeEventListener('keydown', onLayerKey, true)
+  }
+}
+/** Number of open modal layers (for tests and diagnostics). */
+export const openLayerCount = () => layers.length
+/** Move focus to the topmost layer (e.g. after its content was replaced). */
+export function focusTopLayer() {
+  const top = layers[layers.length - 1]?.el.querySelector<HTMLElement>('.layer-inner')
+  top?.focus({ preventScroll: true })
 }
 
 /* Dropdown menu anchored to a trigger. Arrow keys move between items; Esc closes and refocuses the trigger. */
@@ -76,17 +119,17 @@ export function InfoTip({ text }: { text: string }) {
 
 /* Modal + Drawer + palette share a portal, scrim, Esc handling and focus trap. */
 export function Layer({ onClose, children, kind, label }: { onClose: () => void; children: ReactNode; kind: 'modal' | 'drawer' | 'palette'; label: string }) {
-  const ref = useRef<HTMLDivElement>(null)
-  useFocusTrap(ref)
+  const ref = useRef<HTMLDivElement>(null), outer = useRef<HTMLDivElement>(null)
+  const closeRef = useRef(onClose)
+  useEffect(() => { closeRef.current = onClose })
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); onClose() } }
-    document.addEventListener('keydown', onKey)
-    const prev = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    return () => { document.removeEventListener('keydown', onKey); document.body.style.overflow = prev }
-  }, [onClose])
+    const id = nextLayerId++
+    pushLayer({ id, el: outer.current!, close: () => closeRef.current() })
+    return () => removeLayer(id)
+  }, [])
+  useFocusTrap(ref)
   return createPortal(
-    <div className={`layer layer-${kind}`} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+    <div ref={outer} className={`layer layer-${kind}`} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div ref={ref} role="dialog" aria-modal="true" aria-label={label} tabIndex={-1} className="layer-inner">{children}</div>
     </div>,
     document.body,

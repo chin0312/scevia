@@ -6,7 +6,8 @@ import { useConnect } from '../components/ConnectSources'
 import { Icon } from '../components/Icon'
 import { Drawer } from '../components/overlays'
 import { useDetails } from '../components/details'
-import { SectionRail, useHashScroll, type RailSection } from '../components/shell'
+import { handoffPath } from '../lib/handoff'
+import { SectionRail, scrollToSection, useHashScroll, type RailSection } from '../components/shell'
 import { Button, Callout, Card, CardHeader, Chip, Delta, HeroFigure, Legend, PageHead, Pills, PlatformBadge, Seg, SideChip, Tabs, Tile, cx } from '../components/ui'
 import { CLOSED_TRADES, LAST_VISIT, TODAY } from '../data/portfolio'
 import { CATEGORIES, CAT_COLOR, PLATFORM_NAME } from '../data/labels'
@@ -41,7 +42,7 @@ export default function Overview() {
   const [hotSlice, setHotSlice] = useState<string | null>(null)
   const [feeReview, setFeeReview] = useState(false)
   const details = useDetails()
-  const openPos = (p: Position) => details.open({ kind: 'position', id: p.id })
+  const openPos = (p: Position) => details.open({ kind: 'position', id: p.id, scope: f })
 
   const f = toFilter(plat)
   const acct = useMemo(() => account(f), [f])
@@ -77,7 +78,10 @@ export default function Overview() {
   const hot = alloc.find((x) => x.key === hotSlice)
   const singleHeavy = allocBy === 'Category' && !active ? alloc.find((a) => a.positions.length === 1 && a.share > 0.2) : undefined
   const select = (key: string) => setSel((cur) => (cur && cur.by === allocBy && cur.key === key ? null : { by: allocBy, key }))
-  const showInHoldings = () => { setHoldTab('Open positions'); const el = document.getElementById('holdings'); el?.scrollIntoView({ behavior: 'smooth', block: 'start' }); el?.focus({ preventScroll: true }) }
+  // Programmatic jumps go through the section rail so its active entry follows (and the target is focused + highlighted).
+  const showInHoldings = () => { setHoldTab('Open positions'); scrollToSection('holdings') }
+  const shownBy = active && active.by === allocBy ? active : null
+  const hoverOnly = (fn: () => void) => (e: React.PointerEvent) => { if (e.pointerType === 'mouse') fn() } // no sticky hover on touch
 
   const recentClosed = useMemo(() => CLOSED_TRADES.filter((t) => f === 'all' || t.platform === f).sort((a, b) => (a.closed < b.closed ? 1 : -1)).slice(0, 8), [f])
   const activity = useMemo(() => [
@@ -161,10 +165,10 @@ export default function Overview() {
               <ul className="changes">
                 {movers.slice(0, 1).map(({ p, move }) => (
                   <li key={p.id}><span className="ic" style={{ background: move >= 0 ? 'var(--color-gain-bg)' : 'var(--color-loss-bg)', color: move >= 0 ? 'var(--color-gain-fg)' : 'var(--color-loss-fg)' }}>{move >= 0 ? '▲' : '▼'}</span>
-                    <div><b>{p.market} {p.side}</b> moved {p.markAtLastVisit.toFixed(2)} → {p.mark.toFixed(2)} ({sfmt(move)}).<br /><button type="button" className="link" onClick={() => openPos(p)}>View position</button> <Link to={`/scenario-lab?add=${p.id}`}>Simulate in Scenario Lab →</Link></div></li>
+                    <div><b>{p.market} {p.side}</b> moved {p.markAtLastVisit.toFixed(2)} → {p.mark.toFixed(2)} ({sfmt(move)}).<br /><button type="button" className="link" onClick={() => openPos(p)}>View position</button> <Link to={handoffPath([p.id], `${p.market} · ${PLATFORM_NAME[p.platform]}`)}>Simulate in Scenario Lab →</Link></div></li>
                 ))}
-                {soon.length > 0 && <li><span className="ic" style={{ background: 'var(--color-warn-bg)', color: 'var(--color-warn-fg)' }}>!</span><div><b>{fmt(soonCost)} resolves within 30 days</b> across {soon.length} event{soon.length > 1 ? 's' : ''}, {pct((soonCost / acct.committed) * 100, 0)} of committed capital.<br /><button type="button" className="link" onClick={() => document.getElementById('upcoming') && (document.getElementById('upcoming')!.scrollIntoView({ behavior: 'smooth', block: 'start' }), document.getElementById('upcoming')!.focus({ preventScroll: true }))}>See upcoming resolutions</button> <Link to="/risk#calendar">Analyze in Risk →</Link></div></li>}
-                {crossPlatform && <li><span className="ic" style={{ background: 'var(--color-accent-bg)', color: 'var(--color-accent-fg)' }}>⇄</span><div>Same {crossPlatform.event.short} outcome on <b>two platforms</b>. If it resolves against you: <b className="loss">{sfmt(crossPlatform.pnlAgainst)}</b> combined.<br /><button type="button" className="link" onClick={() => details.open({ kind: 'event', id: crossPlatform.event.id })}>View event exposure</button></div></li>}
+                {soon.length > 0 && <li><span className="ic" style={{ background: 'var(--color-warn-bg)', color: 'var(--color-warn-fg)' }}>!</span><div><b>{fmt(soonCost)} resolves within 30 days</b> across {soon.length} event{soon.length > 1 ? 's' : ''}, {pct((soonCost / acct.committed) * 100, 0)} of committed capital.<br /><button type="button" className="link" onClick={() => scrollToSection('upcoming')}>See upcoming resolutions</button> <Link to="/risk#calendar">Analyze in Risk →</Link></div></li>}
+                {crossPlatform && <li><span className="ic" style={{ background: 'var(--color-accent-bg)', color: 'var(--color-accent-fg)' }}>⇄</span><div>Same {crossPlatform.event.short} outcome on <b>two platforms</b>. If it resolves {crossPlatform.worst.outcome}: <b className={crossPlatform.worst.pnl < 0 ? 'loss' : 'gain'}>{sfmt(crossPlatform.worst.pnl)}</b> combined.<br /><button type="button" className="link" onClick={() => details.open({ kind: 'event', id: crossPlatform.event.id, scope: f })}>View event exposure</button></div></li>}
               </ul>
             </div>
           </div>
@@ -183,24 +187,31 @@ export default function Overview() {
             <CardHeader title="Allocation" sub={`Share of open-position market value (cash excluded) · ${scope}`} right={<Seg label="Group by" options={['Category', 'Platform'] as const} value={allocBy} onChange={setAllocBy} />} />
             <div className="card-b alloc">
               {alloc.length === 0 ? <div className="empty" style={{ gridColumn: '1 / -1' }}><p>No open positions in {scope}.</p></div> : <>
-              <Donut parts={alloc.map((a) => ({ key: a.key, value: a.value, color: a.color }))} active={hotSlice ?? (active?.by === allocBy ? active.key : null)} onHover={setHotSlice} onSelect={select}
-                center={<div><b>{fmt(hot ? hot.value : allocTotal)}</b><span className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>{hot ? hot.label : `${pos.length} positions`}</span></div>} />
+              <Donut parts={alloc.map((a) => ({ key: a.key, value: a.value, color: a.color }))} active={hotSlice ?? shownBy?.key ?? null} onHover={setHotSlice} onSelect={select}
+                center={(() => { const c = hot ?? alloc.find((x) => x.key === shownBy?.key); return <div><b>{fmt(c ? c.value : allocTotal)}</b><span className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>{c ? `${c.label} · ${pct(c.share * 100, 0)}` : `${pos.length} positions`}</span></div> })()} />
               <div role="group" aria-label={`Allocation by ${allocBy.toLowerCase()}: select a segment to filter Holdings`}>
                 {alloc.map((a) => {
                   const on = active?.by === allocBy && active.key === a.key
                   return (
                     <button type="button" key={a.key} aria-pressed={on} className={cx('al-row al-btn', on && 'on')} style={{ opacity: (hotSlice && hotSlice !== a.key) || (active && active.by === allocBy && !on) ? 0.5 : 1 }}
-                      onMouseEnter={() => setHotSlice(a.key)} onMouseLeave={() => setHotSlice(null)} onFocus={() => setHotSlice(a.key)} onBlur={() => setHotSlice(null)} onClick={() => select(a.key)}>
+                      onPointerEnter={hoverOnly(() => setHotSlice(a.key))} onPointerLeave={() => setHotSlice(null)} onFocus={() => setHotSlice(a.key)} onBlur={() => setHotSlice(null)} onClick={() => select(a.key)}>
                       <i style={{ background: a.color }} /><span>{a.label}</span><span>{fmt(a.value)}</span><span className="t3 r">{pct(a.share * 100, 0)}</span>
                     </button>
                   )
                 })}
-                {active && selSeg && (
+                {active && !shownBy && (
+                  <div className="seg-detail" role="status">
+                    <div className="row"><span className="t2">Holdings are filtered by {active.by.toLowerCase()}: <b>{segLabel(active.by, active.key)}</b></span></div>
+                    <div className="row"><Button size="sm" onClick={() => setAllocBy(active.by)}>Show by {active.by.toLowerCase()}</Button><button type="button" className="link" onClick={() => setSel(null)}>Clear filter</button></div>
+                  </div>
+                )}
+                {shownBy && selSeg && (
                   <div className="seg-detail">
-                    <div className="row"><b>{segLabel(active.by, active.key)}</b><span className="t3">· {selSeg.positions.length} position{selSeg.positions.length > 1 ? 's' : ''}</span><span className="spacer" /><button type="button" className="link" onClick={() => setSel(null)}>Clear</button></div>
+                    <div className="row"><b>{segLabel(shownBy.by, shownBy.key)}</b><span className="t3">· {selSeg.positions.length} position{selSeg.positions.length > 1 ? 's' : ''}</span><span className="spacer" /><button type="button" className="link" onClick={() => setSel(null)}>Clear</button></div>
                     {selSeg.positions.slice(0, 3).map(({ p, shareOfSegment }) => (
-                      <button type="button" key={p.id} className="seg-pos" onClick={() => openPos(p)}><span>{p.market}</span><span className="t3">{pct(shareOfSegment * 100, 0)}</span></button>
+                      <button type="button" key={p.id} className="seg-pos" onClick={() => openPos(p)}><span>{p.market}</span><span className="t3" title={`Share of ${segLabel(shownBy.by, shownBy.key)}`}>{pct(shareOfSegment * 100, 0)}</span></button>
                     ))}
+                    <p className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>% = share of {segLabel(shownBy.by, shownBy.key)} · {fmt(selSeg.value)} is {pct(selSeg.share * 100, 0)} of open value in {scope}</p>
                     {selSeg.positions.length === 1 && <p className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>A single position: its whole value rides on one contract.</p>}
                     <Button size="sm" onClick={showInHoldings}>{selSeg.positions.length > 3 ? `Show all ${selSeg.positions.length} in Holdings` : 'Show in Holdings'}</Button>
                   </div>
@@ -217,9 +228,9 @@ export default function Overview() {
             <div className="card-b">
               {exps.filter((e) => e.days <= 40).length === 0 && <div className="empty"><p>Nothing resolves in the next 40 days.</p></div>}
               {exps.filter((e) => e.days <= 40).sort((a, b) => a.days - b.days).map((e) => (
-                <button type="button" key={e.event.id} className="tl-row tl-btn" aria-label={`${e.event.name}: view event exposure`} onClick={() => details.open({ kind: 'event', id: e.event.id })}>
+                <button type="button" key={e.event.id} className="tl-row tl-btn" aria-label={`${e.event.name}: view event exposure`} onClick={() => details.open({ kind: 'event', id: e.event.id, scope: f })}>
                   <div className="date"><b>{fmtDate(e.resolves, { day: 'numeric' })}</b><span>{fmtDate(e.resolves, { month: 'short' })}</span></div>
-                  <div className="t">{e.event.name} {e.positions.length > 1 && <Chip tone="accent">{e.positions.length} contracts</Chip>}<small>{e.platforms.map((p) => PLATFORM_NAME[p]).join(' + ')} · {e.side} · in {e.days} days</small></div>
+                  <div className="t">{e.event.name} {e.positions.length > 1 && <Chip tone="accent">{e.positions.length} contracts</Chip>}<small>{e.platforms.map((p) => PLATFORM_NAME[p]).join(' + ')} · {e.side === 'Mixed' ? 'YES + NO' : e.side} · in {e.days} days</small></div>
                   <span>{fmt(e.cost)}</span>
                 </button>
               ))}
@@ -280,13 +291,13 @@ export default function Overview() {
                           <span className="gain" style={{ fontSize: 'var(--font-size-xs)' }}>+{kfmt(p.ifWin).slice(1)}</span>
                         </div></td>
                         <td className="t2">{fmtDate(p.resolves)}</td>
-                        <td className="r"><span className="row-act" onClick={(e) => e.stopPropagation()}><Button size="sm" icon="flask" title="Open Scenario Lab and choose a scenario to add this position to" onClick={() => nav(`/scenario-lab?add=${p.id}`)}>Simulate</Button></span></td>
+                        <td className="r"><span className="row-act" onClick={(e) => e.stopPropagation()}><Button size="sm" icon="flask" title="Open Scenario Lab and choose a scenario to add this position to" onClick={() => nav(handoffPath([p.id], `${p.market} · ${PLATFORM_NAME[p.platform]}`))}>Simulate</Button></span></td>
                       </tr>
                     )
                   })}
                 </tbody>
               </table></div>
-              <div className="foot"><span>Mark = last traded price on the platform. Values exclude estimated exit fees. Weight = share of open-position market value. Click a row or press Enter for fills and payoff.</span><span>Sorted by {sort.key} {sort.dir === 1 ? '↑' : '↓'}</span></div>
+              <div className="foot"><span>Mark = last traded price on the platform. Values exclude estimated exit fees. Weight = share of all open-position market value in {scope}, also when Holdings are filtered. Click a row or press Enter for fills and payoff.</span><span>Sorted by {sort.key} {sort.dir === 1 ? '↑' : '↓'}</span></div>
             </>
           )}
           {holdTab === 'Resolved' && (

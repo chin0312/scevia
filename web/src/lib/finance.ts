@@ -241,11 +241,19 @@ export function isFeasible(o: Record<string, Outcome>, rels: Relation[]) {
     return true
   })
 }
+/** Exhaustive enumeration is exponential (2^n joint outcomes) and uses 32-bit masks, so it is capped.
+ *  Above the cap, ranges are reported as unavailable instead of approximated. A bounded or decomposed engine is
+ *  required before unrestricted real portfolios (see docs/METHODOLOGY.md). */
+export const MAX_JOINT_EVENTS = 16
 export function* jointOutcomes(ids: string[]): Generator<Record<string, Outcome>> {
-  for (let mask = 0; mask < 1 << ids.length; mask++) yield Object.fromEntries(ids.map((id, i) => [id, (mask >> i) & 1 ? 'YES' : 'NO'])) as Record<string, Outcome>
+  if (ids.length > MAX_JOINT_EVENTS) throw new RangeError(`jointOutcomes: ${ids.length} events exceeds ${MAX_JOINT_EVENTS}`)
+  for (let mask = 0; mask < 2 ** ids.length; mask++) yield Object.fromEntries(ids.map((id, i) => [id, Math.floor(mask / 2 ** i) % 2 ? 'YES' : 'NO'])) as Record<string, Outcome>
 }
-/** Min/max of `fn` over feasible joint outcomes only. Impossible combinations are excluded, never patched afterwards. */
-export function outcomeRange(ids: string[], rels: Relation[], fn: (o: Record<string, Outcome>) => number) {
+export interface OutcomeRange { min: number; max: number; argmin: Record<string, Outcome>; argmax: Record<string, Outcome>; feasible: number; excluded: number }
+/** Min/max of `fn` over feasible joint outcomes only. Impossible combinations are excluded, never patched afterwards.
+ *  Returns null when there are too many events to enumerate exactly. */
+export function outcomeRange(ids: string[], rels: Relation[], fn: (o: Record<string, Outcome>) => number): OutcomeRange | null {
+  if (ids.length > MAX_JOINT_EVENTS) return null
   let min = Infinity, max = -Infinity, argmin: Record<string, Outcome> = {}, argmax: Record<string, Outcome> = {}, feasible = 0, excluded = 0
   for (const o of jointOutcomes(ids)) {
     if (!isFeasible(o, rels)) { excluded++; continue }
@@ -265,22 +273,46 @@ const payout = (h: Holding, o: Outcome) => (h.side === o ? h.shares : 0)
 /** P&L of an event's holdings vs. their cost basis if the event resolves `o` (excludes fees already paid). */
 export const eventPnl = (hs: Holding[], eventId: string, o: Outcome) => sum(hs.filter((h) => h.eventId === eventId), (h) => payout(h, o) - h.cost)
 
+/** Exposure to one binary event, combining every holding on it (any platform, either side).
+ *  `cost` is gross capital committed; settlement P&L is computed per outcome from each holding's own side,
+ *  so opposing YES/NO holdings offset. `side` is 'Mixed' when the holdings don't all share one side. */
 export interface EventExposure {
-  event: RiskEvent; positions: Position[]; platforms: Platform[]; side: Side; cost: number
-  pnlFor: number; pnlAgainst: number; forOutcome: Outcome; days: number; resolves: string; share: number
+  event: RiskEvent; positions: Position[]; platforms: Platform[]; side: Side | 'Mixed'; cost: number
+  /** P&L at settlement vs. cost basis for each outcome (fees already paid not included). */
+  pnl: Record<Outcome, number>
+  best: { outcome: Outcome; pnl: number }; worst: { outcome: Outcome; pnl: number }
+  /** Most the event can lose at settlement (0 when every outcome is at or above cost). */
+  maxLoss: number
+  days: number; resolves: string; share: number
+}
+export const opposite = (o: Outcome): Outcome => (o === 'YES' ? 'NO' : 'YES')
+/** Pure: exposure for a set of holdings on one event. */
+export function eventExposureOf(event: RiskEvent, ps: Position[], totalCost: number): EventExposure {
+  const cost = sum(ps, (p) => p.cost)
+  const pnl: Record<Outcome, number> = { YES: sum(ps, (p) => (p.side === 'YES' ? p.shares : 0)) - cost, NO: sum(ps, (p) => (p.side === 'NO' ? p.shares : 0)) - cost }
+  const sides = new Set(ps.map((p) => p.side))
+  const side: Side | 'Mixed' = sides.size === 1 ? ps[0].side : 'Mixed'
+  // Single-sided: "best" is the held side. Mixed: whichever outcome pays more (ties → YES).
+  const bestO: Outcome = side === 'Mixed' ? (pnl.YES >= pnl.NO ? 'YES' : 'NO') : side
+  const worstO = opposite(bestO)
+  return {
+    event, positions: ps, platforms: [...new Set(ps.map((p) => p.platform))], side, cost, pnl,
+    best: { outcome: bestO, pnl: pnl[bestO] }, worst: { outcome: worstO, pnl: pnl[worstO] }, maxLoss: Math.max(0, -Math.min(pnl.YES, pnl.NO)),
+    days: ps[0].days, resolves: ps[0].resolves, share: totalCost ? cost / totalCost : 0,
+  }
 }
 export function exposures(f: PlatformFilter = 'all'): EventExposure[] {
   const pos = positionsFor(f), total = sum(pos, (p) => p.cost)
   return EVENTS.map((event) => {
     const ps = pos.filter((p) => p.eventId === event.id)
-    if (!ps.length) return null
-    const side = ps[0].side, cost = sum(ps, (p) => p.cost), shares = sum(ps, (p) => p.shares)
-    return { event, positions: ps, platforms: [...new Set(ps.map((p) => p.platform))], side, cost, pnlFor: shares - cost, pnlAgainst: -cost, forOutcome: side, days: ps[0].days, resolves: ps[0].resolves, share: cost / total }
+    return ps.length ? eventExposureOf(event, ps, total) : null
   }).filter((x): x is EventExposure => x !== null).sort((a, b) => b.cost - a.cost)
 }
+/** How to name an outcome for an exposure: relative to the user's side when single-sided, plain YES/NO when mixed. */
+export const outcomeLabel = (e: Pick<EventExposure, 'side'>, o: Outcome) => (e.side === 'Mixed' ? `If ${o}` : `If ${o} (${o === e.side ? 'for you' : 'against you'})`)
 
 /** Settlement range over feasible joint outcomes (P&L vs. cost basis) for the given holdings. */
-export function settlementRange(hs: Holding[], rels: Relation[]) {
+export function settlementRange(hs: Holding[], rels: Relation[]): OutcomeRange | null {
   const ids = [...new Set(hs.filter((h) => h.shares > 0).map((h) => h.eventId))]
   return outcomeRange(ids, rels, (o) => sum(ids, (id) => eventPnl(hs, id, o[id])))
 }
@@ -344,7 +376,9 @@ export function simulate(adjs: Adjustment[], opts: { includeFees: boolean }): Si
 
 export interface ScenarioMetrics {
   cash: number; positionsValue: number; totalValue: number; committed: number; realized: number; fees: number
-  worstValue: number; bestValue: number; worst: Record<string, Outcome>; best: Record<string, Outcome>; excluded: number
+  /** null when the joint-outcome range can't be computed exactly (too many events). */
+  worstValue: number | null; bestValue: number | null; worst: Record<string, Outcome>; best: Record<string, Outcome>; excluded: number
+  /** Largest settlement loss of a single event, with opposing holdings netted. */
   largestEventLoss: number
   /** No invalid inputs. */
   valid: boolean
@@ -359,12 +393,13 @@ export function scenarioMetrics(sim: Simulation, rels: Relation[]): ScenarioMetr
   const positionsValue = sum(hs, (h) => h.shares * h.mark)
   const committed = sum(hs, (h) => h.cost)
   const ids = [...new Set(hs.map((h) => h.eventId))]
-  const range = outcomeRange(ids, rels, (o) => sum(hs, (h) => payout(h, o[h.eventId])))
-  const largestEventLoss = Math.max(0, ...ids.map((id) => sum(hs.filter((h) => h.eventId === id), (h) => h.cost)))
+  const range = ids.length ? outcomeRange(ids, rels, (o) => sum(hs, (h) => payout(h, o[h.eventId]))) : { min: 0, max: 0, argmin: {}, argmax: {}, feasible: 1, excluded: 0 }
+  // Worst settlement of each event on its own, using each holding's side (opposing holdings offset).
+  const largestEventLoss = Math.max(0, ...ids.map((id) => -Math.min(eventPnl(hs, id, 'YES'), eventPnl(hs, id, 'NO'))))
   return {
     cash, positionsValue, totalValue: cash + positionsValue, committed, realized: sim.realized, fees: sim.fees,
-    worstValue: cash + (ids.length ? range.min : 0), bestValue: cash + (ids.length ? range.max : 0), worst: range.argmin, best: range.argmax,
-    excluded: range.excluded, largestEventLoss, valid: Object.keys(sim.errors).length === 0, shortfall: sim.shortfall.pm + sim.shortfall.ks,
+    worstValue: range ? cash + range.min : null, bestValue: range ? cash + range.max : null, worst: range?.argmin ?? {}, best: range?.argmax ?? {},
+    excluded: range?.excluded ?? 0, largestEventLoss, valid: Object.keys(sim.errors).length === 0, shortfall: sim.shortfall.pm + sim.shortfall.ks,
   }
 }
 

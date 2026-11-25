@@ -1,10 +1,12 @@
 # Product context — Scevia
 
-**What:** Prediction-market portfolio intelligence. Read-only: it never places trades or holds funds. The full concept and validation plan are kept in an internal document outside this repo.
+**What:** Privacy-first, user-controlled, read-only portfolio intelligence for prediction markets. It never places trades, holds funds or takes custody. It is not a trading terminal, prediction engine, market-discovery site or advisory service. The full concept and validation plan are kept in an internal document outside this repo.
 
-**Users:** Active, non-quant traders on Polymarket and/or Kalshi. They understand prices as probabilities but don't run their own data stack. They're cautious about API keys and accuracy.
+**Users:** Active, non-quant prediction-market traders (Polymarket, Kalshi and other markets over time). They understand prices as probabilities but don't run their own data stack. They're cautious about credentials, privacy and accuracy.
 
-**Jobs:** Track (what do I hold?) · Understand (where did P&L come from?) · Diagnose (where could I lose most?) · Explore (what if I resize a position?).
+**Jobs:** Track (what do I hold, across the sources I chose?) · Understand (where did P&L come from?) · Diagnose (where could I lose most, event by event?) · Construct (what if I changed or added positions, and how do alternatives compare?).
+
+**Differentiation:** reliable portfolio tracking + prediction-market-specific financial intelligence (settlement payoffs, event-level exposure, feasible outcomes) + interactive portfolio simulation. Privacy and user control are foundations, not features.
 
 **The one thing to get right:** trust. A plain, correct number beats a beautiful wrong one. Every figure can explain its definition, source, and coverage.
 
@@ -13,7 +15,7 @@
 **Hard product rules (affect UI):**
 - Simulation ≠ forecast. Never show the probability of an outcome as Scevia's opinion. Show payoffs *if* YES / *if* NO.
 - Say what isn't covered: partial data, unknown event relationships, stale sync.
-- Only label a view "entire portfolio" when every platform is connected.
+- "Portfolio" means the sources the user chose and that are sufficiently covered, not every market Scevia supports. A user may track one provider only, or imported files only. Say which sources a figure covers; never imply coverage of sources that aren't connected.
 - No trade-execution affordances (no Buy/Sell buttons that look real).
 
 **Accessibility:** WCAG 2.1 AA. Colour never carries meaning alone (YES/NO and gain/loss always have a sign, label, or icon). Fully keyboard operable. Respect reduced motion.
@@ -22,8 +24,87 @@
 
 ## Scope
 
-- **In scope:** tracking positions and value, performance review, event-level risk, and hypothetical position changes, across Polymarket and Kalshi, read-only.
-- **Out of scope:** trade execution, copy trading, signals or advice, probability forecasts, tax reporting, custody.
+- **In scope:**
+  - tracking positions and value across user-selected sources;
+  - performance review;
+  - event-level risk;
+  - hypothetical portfolio construction and comparison.
+
+  All of it is read-only.
+- **Out of scope:**
+  - trade execution, copy trading, custody or access to funds;
+  - signals or advice, probability forecasts;
+  - tax reporting;
+  - a separate market-browsing module.
+
+## Data sources (user-selected)
+
+Users choose how they provide data. No source is required, and each one can be added or removed independently.
+- **Polymarket — public wallet address.**
+  - Tracking is read-only.
+  - An optional wallet connection may be used only to retrieve the address or verify ownership where appropriate.
+  - A public address is a tracking identifier, not proof of ownership.
+  - Never request private keys, seed phrases or transaction permissions.
+- **Kalshi — authenticated, read-only account access**, with explicit consent and least-privilege permissions. The provider's actual mechanisms and terms are verified during integration.
+- **File import (CSV) — a first-class source, not a fallback.** It covers:
+  - historical records;
+  - manually maintained records;
+  - providers without direct support;
+  - filling gaps in provider history.
+- **Other prediction markets** (e.g. Predict.fun) join through the same provider-neutral contracts. Don't hard-code Polymarket and Kalshi as the only possible platforms in new contracts.
+- **Sample portfolio:**
+  - an optional exploration mode;
+  - always labelled "Sample portfolio".
+
+## Privacy and user control
+
+The long-term product is a privacy-first **cloud workspace**: continuity across devices for sources, imported records, saved scenarios and preferences, without collecting more than needed.
+
+**Principles:**
+- explicit connections;
+- read-only, least-privilege access;
+- data minimization;
+- account isolation;
+- transparent sync and freshness;
+- user-controlled disconnection, export and deletion;
+- no sale of financial data, no advertising profiles, no AI training on private records;
+- no trading, custody or access to funds.
+
+**Keep these apart:**
+- public market metadata;
+- public wallet information;
+- the user's private association with a wallet or account;
+- private portfolio records;
+- uploaded files and the transactions normalized from them;
+- saved scenarios and analytical preferences;
+- authentication and provider credentials.
+
+**Identity and recovery:**
+- A user's Scevia identity is separate from their provider identities.
+- Re-entering a public address rebuilds only currently public data. It never grants access to someone else's workspace.
+- Reconnecting a provider doesn't restore imported files, saved scenarios, or history the provider no longer exposes.
+
+**Honest communication:**
+- In-product privacy text describes what the build does today.
+- Don't claim encryption, export, deletion or cloud controls before they exist.
+- Future policies and the data lifecycle live in internal docs.
+
+## Scenario Lab (direction)
+
+Scenario Lab is for **portfolio construction and comparison**, not only resizing. Hypothetical positions can come from three places:
+1. an existing holding;
+2. a market or outcome found through supported provider data (lookup serves scenario construction; it is not a browsing module);
+3. a pasted link to a supported market or event, resolved by the backend through trusted provider endpoints, never by scraping. When a link covers several markets or outcomes, the user picks one.
+
+**Hypothetical vs. actual:**
+- Hypothetical positions never enter actual holdings or transaction history.
+- A scenario records, for each position:
+  - the instrument reference;
+  - quantity;
+  - the assumed execution price;
+  - a reference mark and its timestamp;
+  - funding and fee assumptions.
+- The current build supports existing holdings only. The model's extension path is in `docs/DEVELOPMENT.md`.
 
 ## Interaction principles
 
@@ -32,7 +113,8 @@
 - **No navigation just to see data.** Anything shown in one module that is defined in another (an event's exposure, a position's fills) is inspectable in place.
 - **Scenario state only changes on purpose.** Nothing outside Scenario Lab edits a scenario. Hand-offs ask which scenario and which holdings to add; new positions start at the current holding and mark; Cancel changes nothing; reloading never repeats a hand-off.
 - **One copy of every assumption.** Relationship classifications and guardrails are shared state, editable wherever they are used.
-- **Drill-downs keep scope.** A panel opened from a filtered view says which period and platform scope it reflects.
+- **Drill-downs keep scope.** A panel opened from a filtered view starts in that view's period and platform scope. It says so, and it offers the wider (e.g. all-platform) view explicitly. A metric never silently changes meaning between an aggregate and its details.
+- **Hand-offs carry exact holdings.** "Simulate in Scenario Lab" sends the specific positions in the current scope, plus a note of where they came from. The Lab shows platforms and lets the user confirm.
 
 ## Terminology (use these words in the UI)
 

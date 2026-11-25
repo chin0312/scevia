@@ -11,6 +11,12 @@ App: `web/` (Vite + React + TS). Run `npm run dev` in `web/`. Current state, lim
 5. Never present an outcome probability as Scevia's forecast. Never add trade-execution controls.
 6. To change a value, edit `tokens.json`, then run `node design-system/tokens/build.mjs`.
 
+## Interaction invariants
+- Inspecting (detail panels, search, notifications) never navigates or changes a scenario. Scenario hand-offs go through `handoffPath()` and the Lab's confirmation.
+- Detail panels start in the scope they were opened from (`scope`), and wider views are explicit.
+- Overlays use the shared layer stack in `overlays.tsx`. Don't add page-level Esc or scroll-lock handlers.
+- Browser storage goes through `lib/storage.ts` (`scevia-` keys only).
+
 ## Numbers
 - Every figure comes from `web/src/lib/finance.ts`, which reads data only via `web/src/data/portfolio.ts`. Never hard-code a metric, summary sentence or insight in a page, and never import `data/sample.ts` directly.
 - Changing a calculation means updating `docs/METHODOLOGY.md` and the tests in the same change.

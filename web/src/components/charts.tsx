@@ -102,7 +102,7 @@ export function Donut({ parts, size = 132, thickness = 14, center, active, onHov
             <circle key={p.key} className={cx('hoverable', active === p.key && 'hot')} cx={size / 2} cy={size / 2} r={r} fill="none"
               style={{ stroke: p.color }} strokeWidth={active === p.key ? thickness + 4 : thickness}
               strokeDasharray={`${Math.max(len - 3, 0)} ${c}`} strokeDashoffset={-off}
-              onMouseEnter={() => onHover?.(p.key)} onMouseLeave={() => onHover?.(null)} onClick={() => onSelect?.(p.key)} />
+              onPointerEnter={(e) => e.pointerType === 'mouse' && onHover?.(p.key)} onPointerLeave={() => onHover?.(null)} onClick={() => onSelect?.(p.key)} />
           )
         })}
       </svg>

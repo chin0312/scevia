@@ -73,6 +73,13 @@ Analytics shows a pattern only when it has at least 5 trades. It always shows th
 
 - **Payoff:** a contract pays $1 per share if its side wins, otherwise $0.
 - **Event P&L for an outcome:** Σ payout − cost basis of that event's positions (fees already paid are excluded).
+- **Event exposure** (`eventExposureOf`) evaluates **both outcomes explicitly**. For each outcome, every holding is paid by its own side: P&L(YES) = Σ YES shares − cost, P&L(NO) = Σ NO shares − cost. Opposing holdings on the same event therefore offset at settlement.
+  - Capital committed stays the gross cost. Example: 100 YES @ $0.60 + 60 NO @ $0.40 → cost $84, P&L(YES) = +$16, P&L(NO) = −$24.
+  - **Single-sided** events are labelled for / against the user.
+  - **Mixed** events (side `Mixed`) are labelled by outcome (If YES / If NO), and "best" / "worst" are simply the better and worse outcome.
+  - **Max loss** = max(0, −min(P&L(YES), P&L(NO))). It is used by the downside ladder, the top-3 / busiest-week losses and the largest single-event loss in scenarios. Concentration and guardrails stay on gross capital committed.
+  - The same per-holding payout rule drives portfolio best/worst cases, so event and portfolio figures agree (tested).
+- **Binary assumption:** every contract settles at $1 or $0 on YES/NO. Multi-outcome markets, partial or non-$1 settlements (which the backend models; see `backend/docs/FRONTEND_INTEGRATION.md` in PR #3), and automated cross-platform matching are not modelled. They will follow provider data.
 
 Relationship classes:
 
@@ -84,6 +91,12 @@ Relationship classes:
 | Unknown / unclassified | No constraint. Flagged as an unmodeled dependency. |
 
 **Best and worst cases** enumerate every joint outcome of the events in scope, skip infeasible ones, and take the max/min. Nothing is adjusted after the fact.
+
+**Enumeration cap.**
+- **The cost:** exact enumeration takes 2^n combinations for n events.
+- **The cap:** above `MAX_JOINT_EVENTS` (16 events), the range is reported as **unavailable**. It is never approximated, and the enumerator refuses to run.
+- **Why 16:** it keeps the count and the mask arithmetic far inside safe limits; JavaScript bitwise operators are 32-bit.
+- **Before unrestricted real portfolios:** a bounded or decomposed method is needed that preserves exactness. For example, events with no constraints between them separate, so their extremes add independently.
 
 - **Portfolio-level figures** (Risk tiles) always use every holding.
 - **Table filters** compute their own subtotal range and never change portfolio figures.

@@ -1,5 +1,6 @@
-/* Data sources panel: what the figures are based on, and which accounts are connected.
-   Account connections aren't available yet, so their actions are disabled rather than simulated. */
+/* Data sources panel: what the figures are based on, and the ways a user can provide their own data.
+   The user chooses their sources; none is required, and a file import is a source in its own right (any provider).
+   Connections and imports don't work in this build, so their actions are disabled rather than simulated. */
 import { createContext, useContext, useState, type ReactNode } from 'react'
 import { PLATFORM_NAME } from '../data/labels'
 import { PORTFOLIO } from '../data/portfolio'
@@ -13,7 +14,10 @@ import { Button, Callout, Chip, PlatformBadge, cx } from './ui'
 const Ctx = createContext<() => void>(() => {})
 export const useConnect = () => useContext(Ctx)
 
-const METHOD: Record<Platform, string> = { pm: 'Public wallet address (read-only)', ks: 'Account history import (read-only)' }
+const METHOD: Record<Platform, string> = {
+  pm: 'Track a public wallet address, read-only. An address identifies a wallet; it isn’t proof that you own it.',
+  ks: 'Read-only account access, with your explicit consent.',
+}
 
 export function ConnectProvider({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false)
@@ -27,7 +31,7 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
 
 function DataSources({ onClose }: { onClose: () => void }) {
   return (
-    <Modal title="Data sources" sub="Scevia only reads portfolio data. It never places trades or moves funds." onClose={onClose} width={600}
+    <Modal title="Data sources" sub="You choose which sources Scevia reads. It never places trades, moves funds, or asks for private keys or seed phrases." onClose={onClose} width={600}
       footer={<Button variant="primary" onClick={onClose}>Done</Button>}>
       {PORTFOLIO.isSample && (
         <div className="source-row active">
@@ -36,16 +40,22 @@ function DataSources({ onClose }: { onClose: () => void }) {
           <Chip tone="accent">Active</Chip>
         </div>
       )}
-      <h5 className="caps">Your accounts</h5>
+      <h5 className="caps">Your sources</h5>
       {(['pm', 'ks'] as Platform[]).map((p) => (
         <div className="source-row" key={p}>
           <PlatformBadge p={p} />
           <div><b className="sr-only">{PLATFORM_NAME[p]}</b><PlatformWordmark p={p} height={p === 'pm' ? 16 : 18} /><small>{METHOD[p]}</small></div>
           <span className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>Not connected</span>
-          <Button size="sm" disabled title="Connecting your own accounts isn’t available yet">Connect</Button>
+          <Button size="sm" disabled title="Not available in this version">Connect</Button>
         </div>
       ))}
-      <Callout icon="info">Connecting your own Polymarket and Kalshi accounts isn’t available yet. Until then you can explore every module with the sample portfolio.</Callout>
+      <div className="source-row">
+        <span className="plat file" aria-hidden="true"><Icon name="download" size={13} /></span>
+        <div><b>File import (CSV)</b><small>Your own transaction records, from any prediction market. Use it on its own or alongside a connection.</small></div>
+        <span className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>No files</span>
+        <Button size="sm" disabled title="Not available in this version">Import</Button>
+      </div>
+      <Callout icon="info">Connecting accounts and importing files aren’t available in this version. You can explore every module with the sample portfolio.</Callout>
       {PORTFOLIO.isSample && <SampleCoverage />}
     </Modal>
   )

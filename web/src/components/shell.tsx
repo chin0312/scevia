@@ -7,9 +7,10 @@ import { POSITIONS, account, exposures, fmtDate } from '../lib/finance'
 import { fmt, sfmt } from '../lib/format'
 import { ConnectProvider, useConnect } from './ConnectSources'
 import { DetailProvider, useDetails, type Detail } from './details'
+import { clearScevia, sceviaKeys } from '../lib/storage'
 import { Icon, type IconName } from './Icon'
 import { Layer, Menu, Modal, ToastProvider, useToast } from './overlays'
-import { Button, cx } from './ui'
+import { Button, Callout, cx } from './ui'
 
 const AREAS = [
   { to: '/overview', label: 'Overview' },
@@ -104,18 +105,34 @@ function TopNav({ onSearch, onInfo }: { onSearch: () => void; onInfo: (k: 'calc'
 }
 
 function InfoModal({ kind, onClose }: { kind: 'calc' | 'privacy'; onClose: () => void }) {
-  const toast = useToast()
   if (kind === 'calc') return (
     <Modal title="How Scevia calculates" sub="The same definitions are used on every page" onClose={onClose} width={600}>
       {DEFINITIONS.map(([k, v]) => <div className="list-row" key={k}><b style={{ minWidth: 170, fontWeight: 'var(--font-weight-medium)' }}>{k}</b><span className="t2">{v}</span></div>)}
     </Modal>
   )
+  return <PrivacyModal onClose={onClose} />
+}
+
+/* Describes what the app does today, not future cloud features. Clearing removes only Scevia's own keys, asks first,
+   and reports failure instead of claiming success. */
+function PrivacyModal({ onClose }: { onClose: () => void }) {
+  const toast = useToast()
+  const [confirm, setConfirm] = useState(false)
+  const held = sceviaKeys().length
+  const clear = () => {
+    const r = clearScevia()
+    if (!r.ok) { toast('Couldn’t clear Scevia’s saved data in this browser', 'info'); setConfirm(false); return }
+    onClose(); location.reload()
+  }
   return (
     <Modal title="Data & privacy" onClose={onClose} width={560}
-      footer={<><Button variant="ghost" onClick={onClose}>Close</Button><Button onClick={() => { sessionStorage.clear(); toast('Saved scenarios and settings cleared'); onClose(); location.reload() }}>Clear saved scenarios & settings</Button></>}>
-      <p className="t2">You’re viewing a <b>sample portfolio</b>: its positions and trades are fictional. Scevia isn’t connected to any Polymarket or Kalshi account and doesn’t send your activity anywhere.</p>
-      <p className="t2">Scenarios you save, your guardrail and relationship choices are kept in this browser tab and are cleared when it closes.</p>
-      <p className="t2">Scevia is read-only: it never places trades, holds funds or asks for keys that can trade.</p>
+      footer={confirm
+        ? <><Button variant="ghost" onClick={() => setConfirm(false)}>Cancel</Button><Button variant="primary" onClick={clear}>Clear and reload</Button></>
+        : <><Button variant="ghost" onClick={onClose}>Close</Button><Button onClick={() => setConfirm(true)} disabled={held === 0} title={held === 0 ? 'Nothing is saved in this tab' : undefined}>Clear saved scenarios & settings…</Button></>}>
+      <p className="t2">You’re viewing a <b>sample portfolio</b>: its positions and trades are fictional. No Polymarket, Kalshi or other account is connected, and no file has been imported.</p>
+      <p className="t2">Scenarios, your guardrail, relationship choices and fee setting are kept only in this browser tab (session storage) and are removed when the tab closes. They aren’t sent to a server.</p>
+      <p className="t2">Scevia is read-only. It never places trades, holds funds, or asks for private keys, seed phrases or trading permissions.</p>
+      {confirm && <Callout tone="warn" icon="alert">This removes your saved scenarios and settings in this tab ({held} item{held === 1 ? '' : 's'}). It can’t be undone. Other sites’ data isn’t affected.</Callout>}
     </Modal>
   )
 }
@@ -197,7 +214,23 @@ export function AppLayout() {
 export interface RailChild { id: string; label: string }
 export interface RailSection { id: string; label: string; icon: IconName; count?: number; flag?: number | string; children?: RailChild[] }
 
-const SPY_OFFSET = 160
+/** Distance from the top of the viewport at which a section counts as "current": below whatever is sticky
+ *  (top bar, and the rail itself when it becomes a horizontal bar on narrow screens) plus some reading room. */
+function spyOffset() {
+  const bottomIfSticky = (sel: string, wide = false) => {
+    const el = document.querySelector<HTMLElement>(sel)
+    if (!el || getComputedStyle(el).position !== 'sticky') return 0
+    const r = el.getBoundingClientRect()
+    return !wide || r.width > window.innerWidth / 2 ? r.bottom : 0
+  }
+  return Math.max(bottomIfSticky('.topbar'), bottomIfSticky('.rail', true)) + 96
+}
+const SECTION_EVENT = 'scevia:section'
+/** Jump to a section from anywhere on the page (e.g. "Show in Holdings"). Goes through the rail so its active
+ *  entry, focus and highlight behave exactly like a rail click. */
+export function scrollToSection(id: string) {
+  window.dispatchEvent(new CustomEvent(SECTION_EVENT, { detail: id }))
+}
 function flash(el: HTMLElement) {
   if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '-1')
   el.focus({ preventScroll: true })
@@ -234,7 +267,8 @@ export function SectionRail({ title, sections, children }: { title?: string; sec
     const onScroll = () => {
       if (locked.current) return
       let cur = sections[0]?.id
-      for (const s of sections) { const el = document.getElementById(s.id); if (el && el.getBoundingClientRect().top < SPY_OFFSET) cur = s.id }
+      const offset = spyOffset()
+      for (const s of sections) { const el = document.getElementById(s.id); if (el && el.getBoundingClientRect().top < offset) cur = s.id }
       setActive((a) => (a.group === cur ? a : { group: cur, child: null }))
     }
     const release = () => { locked.current = false }
@@ -244,8 +278,23 @@ export function SectionRail({ title, sections, children }: { title?: string; sec
     window.addEventListener('wheel', release, { passive: true })
     window.addEventListener('touchmove', release, { passive: true })
     window.addEventListener('keydown', releaseKeys)
-    return () => { window.removeEventListener('scroll', onScroll); window.removeEventListener('wheel', release); window.removeEventListener('touchmove', release); window.removeEventListener('keydown', releaseKeys) }
+    // Dragging the page scrollbar (a press on the document itself) and Back/Forward are the user's own navigation too.
+    const releaseBar = (e: PointerEvent) => { if (e.target === document.documentElement) release() }
+    const releaseNav = () => { release(); onScroll() }
+    window.addEventListener('pointerdown', releaseBar)
+    window.addEventListener('popstate', releaseNav)
+    return () => {
+      window.removeEventListener('scroll', onScroll); window.removeEventListener('wheel', release); window.removeEventListener('touchmove', release); window.removeEventListener('keydown', releaseKeys)
+      window.removeEventListener('pointerdown', releaseBar); window.removeEventListener('popstate', releaseNav)
+    }
   }, [sections])
+
+  // Programmatic jumps from page content.
+  useEffect(() => {
+    const onJump = (e: Event) => { const id = (e as CustomEvent<string>).detail; if (resolve(id)) { history.replaceState(null, '', `${location.pathname}${location.search}#${id}`); go(id) } else document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' }) }
+    window.addEventListener(SECTION_EVENT, onJump)
+    return () => window.removeEventListener(SECTION_EVENT, onJump)
+  }, [resolve, go])
 
   // Direct links (#section) use the same path as clicks.
   useEffect(() => {

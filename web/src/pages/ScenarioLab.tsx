@@ -7,6 +7,7 @@ import { RelationshipModal } from '../components/relationships'
 import { SectionRail, useHashScroll, type RailSection } from '../components/shell'
 import { Button, Callout, Card, CardHeader, Chip, PlatformBadge, SideChip, Tabs, cx } from '../components/ui'
 import { EVENTS, FEE_RATE } from '../data/portfolio'
+import { PLATFORM_NAME } from '../data/labels'
 import type { RiskEvent } from '../data/types'
 import { REL_TEXT, useRelations } from '../data/relations'
 import {
@@ -14,8 +15,9 @@ import {
   type Adjustment, type Outcome, type ScenarioMetrics, type Simulation,
 } from '../lib/finance'
 import { fmt, int, kfmt, sfmt } from '../lib/format'
+import { claimHandoff, readHandoff } from '../lib/handoff'
 import * as SC from '../lib/scenarios'
-import { useSessionState } from '../lib/useSessionState'
+import { useSessionState, useStorageHealthy } from '../lib/useSessionState'
 import type { Scenario } from '../lib/scenarios'
 
 
@@ -32,9 +34,9 @@ const TEMPLATE: Record<string, Adjustment[]> = {
   shut: [{ id: 'shut', to: 3500, price: 0.47 }],
 }
 const INITIAL: Scenario[] = [
-  { key: 'draft', name: 'Trim crypto, add to Fed', adjs: TEMPLATE.draft, saved: null, savedAt: null, color: COLORS[0] },
-  { key: 'sports', name: 'Exit sports longshots', adjs: TEMPLATE.sports, saved: { name: 'Exit sports longshots', adjs: TEMPLATE.sports }, savedAt: '2026-11-21', color: COLORS[1] },
-  { key: 'shut', name: 'Hedge the shutdown', adjs: TEMPLATE.shut, saved: { name: 'Hedge the shutdown', adjs: TEMPLATE.shut }, savedAt: '2026-11-18', color: COLORS[2] },
+  { key: 'draft', name: 'Trim crypto, add to Fed', adjs: TEMPLATE.draft, saved: null, savedAt: null, color: COLORS[0], start: TEMPLATE.draft },
+  { key: 'sports', name: 'Exit sports longshots', adjs: TEMPLATE.sports, saved: { name: 'Exit sports longshots', adjs: TEMPLATE.sports }, savedAt: '2026-11-21', color: COLORS[1], start: TEMPLATE.sports },
+  { key: 'shut', name: 'Hedge the shutdown', adjs: TEMPLATE.shut, saved: { name: 'Hedge the shutdown', adjs: TEMPLATE.shut }, savedAt: '2026-11-18', color: COLORS[2], start: TEMPLATE.shut },
 ]
 const NO_ADJ: Adjustment[] = []
 const maxFor = (sh: number) => Math.max(1000, Math.ceil((sh * 1.5) / 1000) * 1000)
@@ -50,7 +52,7 @@ const ROWS: Row[] = [
   { label: 'Est. fees on these trades', key: 'fees', tone: 'down', info: 'Estimated at each platform’s fee rate when “Trading fees” is on. Fees already paid on existing positions aren’t included.' },
   { label: 'Value if worst feasible outcome', key: 'worstValue', tone: 'up', info: 'Cash + $1 per winning share in the worst joint outcome that’s possible given confirmed relationships. Any extra funding the scenario needs is subtracted (cash can be negative).' },
   { label: 'Value if best feasible outcome', key: 'bestValue', tone: 'up', info: 'Cash + $1 per winning share in the best possible joint outcome, net of any extra funding needed.' },
-  { label: 'Largest single-event loss', key: 'largestEventLoss', tone: 'down', info: 'Biggest cost basis riding on one event (what you’d lose if it went against you).' },
+  { label: 'Largest single-event loss', key: 'largestEventLoss', tone: 'down', info: 'Largest settlement loss of a single event. Holdings on opposite sides of the same event offset each other.' },
 ]
 
 export default function ScenarioLab() {
@@ -58,8 +60,14 @@ export default function ScenarioLab() {
   const toast = useToast()
   const [params, setParams] = useSearchParams()
   const { crypto, rels } = useRelations()
-  const [scenarios, setScenarios] = useSessionState<Scenario[]>('scevia-scenarios-v3', INITIAL)
-  const [activeKey, setActiveKey] = useSessionState<string>('scevia-active-v3', 'draft')
+  const [scenarios, setScenarios] = useSessionState<Scenario[]>('scevia-scenarios-v3', INITIAL, (raw) => {
+    const r = SC.sanitize(raw, (id) => !!POS_BY_ID[id])
+    return r ? r.scenarios.map((x) => ({ ...x, color: x.color || COLORS[0], start: x.start ?? TEMPLATE[x.key] ?? [] })) : null
+  })
+  const [storedActive, setActiveKey] = useSessionState<string>('scevia-active-v3', 'draft', (v) => (typeof v === 'string' ? v : null))
+  // A stored selection that no longer exists falls back to the current portfolio instead of a blank page.
+  const activeKey = storedActive === 'base' || scenarios.some((x) => x.key === storedActive) ? storedActive : 'base'
+  const storageOk = useStorageHealthy()
   const [includeFees, setIncludeFees] = useSessionState('scevia-fees', true)
   const [renaming, setRenaming] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -71,22 +79,22 @@ export default function ScenarioLab() {
   const active = scenarios.find((s) => s.key === activeKey)
   const adjs = active?.adjs ?? NO_ADJ
 
-  // ?add=<positionIds> / ?addEvent=<eventIds> from other modules: ask before changing anything.
-  // The request is read once (ref guards StrictMode) and removed from the URL, so reloads and Back never re-add.
-  const [pending, setPending] = useState<string[] | null>(null)
+  // Hand-offs from other modules (see lib/handoff.ts): ask before changing anything. Each request id is handled once,
+  // so StrictMode, reload and Back/Forward never repeat it, while a new deliberate request (new id) always opens the dialog.
+  const [pending, setPending] = useState<{ ids: string[]; from: string | null } | null>(null)
   const [editRel, setEditRel] = useState(false)
   const handled = useRef<string | null>(null)
   useEffect(() => {
-    const add = params.get('add'), addEvent = params.get('addEvent')
-    if (!add && !addEvent) return
-    const sig = params.toString()
+    const h = readHandoff(params)
+    if (!h) return
+    const sig = h.req ?? params.toString()
     if (handled.current === sig) return
     handled.current = sig
     setParams({}, { replace: true })
-    const evIds = (addEvent ?? '').split(',').filter(Boolean)
-    const ids = [...new Set([...(add ?? '').split(',').filter((id) => POS_BY_ID[id]), ...POSITIONS.filter((p) => evIds.includes(p.eventId)).map((p) => p.id)])]
+    if (!claimHandoff(h.req)) return
+    const ids = [...new Set([...h.ids.filter((id) => POS_BY_ID[id]), ...POSITIONS.filter((p) => h.events.includes(p.eventId)).map((p) => p.id)])]
     if (!ids.length) { toast('Those holdings aren’t in your portfolio', 'info'); return }
-    setPending(ids)
+    setPending({ ids, from: h.from ?? (h.events.length ? 'Event link · all platforms' : null) })
   }, [params, setParams, toast])
   const confirmAdd = (target: string, ids: string[]) => {
     const adds = ids.map((id) => ({ id, to: POS_BY_ID[id].shares, price: POS_BY_ID[id].mark }))
@@ -120,7 +128,7 @@ export default function ScenarioLab() {
   const heldEvents = exposures('all').map((e) => e.event)
   const evA = EVENTS.find((e) => e.id === mxA)!, evB = EVENTS.find((e) => e.id === mxB)!
   const rel = pairRelation(mxA, mxB, rels)
-  const sideOf = (e: RiskEvent) => POSITIONS.find((p) => p.eventId === e.id)?.side ?? 'YES'
+  const sideOf = heldSide
   const cells = (['YES', 'NO'] as Outcome[]).flatMap((oa) => (['YES', 'NO'] as Outcome[]).map((ob) => {
     const o = { [mxA]: oa, [mxB]: ob }
     return { oa, ob, before: groupPnl(base, [mxA, mxB], o), after: groupPnl(S, [mxA, mxB], o), impossible: !isFeasible(o, rels) }
@@ -149,7 +157,7 @@ export default function ScenarioLab() {
   }
   const revert = () => {
     if (!active) return
-    setScenarios((ss) => ss.map((s) => (s.key === active.key ? SC.revert(s, TEMPLATE[s.key]) : s)))
+    setScenarios((ss) => ss.map((s) => (s.key === active.key ? SC.revert(s) : s)))
     toast(active.saved ? 'Reverted to the saved version' : 'Reset to the starting adjustments', 'info')
   }
   const remove = () => {
@@ -158,13 +166,14 @@ export default function ScenarioLab() {
     toast(`Deleted “${active.name}”`, 'info')
   }
 
-  const change = (r: Row, a: number, b: number) => {
+  const change = (r: Row, a: number | null, b: number | null) => {
+    if (a == null || b == null) return <span className="delta flat">—</span>
     const d = a - b
     if (Math.abs(d) < 0.5) return <span className="delta flat">—</span>
     const good = r.tone === 'neutral' ? null : r.tone === 'up' ? d > 0 : d < 0
     return <span className={cx('delta', good == null ? 'flat' : good ? 'good' : 'bad')}>{sfmt(d)}</span>
   }
-  const value = (r: Row, m: ScenarioMetrics) => (r.key === 'largestEventLoss' ? sfmt(-m.largestEventLoss) : r.key === 'realized' || r.key === 'fees' ? (Math.abs(m[r.key] as number) < 0.005 ? '$0' : r.key === 'fees' ? fmt(m.fees, 2) : sfmt(m.realized, 2)) : fmt(m[r.key] as number))
+  const value = (r: Row, m: ScenarioMetrics) => (m[r.key] == null ? 'Unavailable' : r.key === 'largestEventLoss' ? sfmt(-m.largestEventLoss) : r.key === 'realized' || r.key === 'fees' ? (Math.abs(m[r.key] as number) < 0.005 ? '$0' : r.key === 'fees' ? fmt(m.fees, 2) : sfmt(m.realized, 2)) : fmt(m[r.key] as number))
 
   return (
     <div className="shell">
@@ -193,12 +202,13 @@ export default function ScenarioLab() {
           </div>
           <div className="actions">
             {!isBase && <Button variant="ghost" icon="trash" onClick={() => setConfirmDelete(true)}>Delete</Button>}
-            <Button variant="ghost" icon="reset" onClick={revert} disabled={isBase || !active || !SC.canRevert(active, TEMPLATE[active.key])}>{active?.saved ? 'Revert' : 'Reset'}</Button>
+            <Button variant="ghost" icon="reset" onClick={revert} disabled={isBase || !active || !SC.canRevert(active)}>{active?.saved ? 'Revert' : 'Reset'}</Button>
             <Button icon="copy" onClick={duplicate} disabled={isBase}>Duplicate</Button>
             <Button variant="primary" icon="save" onClick={save} disabled={isBase || !active || !SC.isDirty(active) || errorCount > 0} title={errorCount ? 'Fix the highlighted inputs first' : undefined}>{!isBase && active && !SC.isDirty(active) ? 'Saved' : 'Save scenario'}</Button>
           </div>
         </section>
         <Callout icon="shield"><b>Hypothetical only.</b> No orders are placed. Prices are what <i>you</i> assume you could trade at, not guaranteed fills. Outcomes are shown without probabilities.</Callout>
+        {!storageOk && <Callout tone="warn" icon="alert">This browser isn’t letting Scevia keep data in this tab, so scenarios and settings will be lost when you reload or leave the page.</Callout>}
         {errorCount > 0 && <Callout tone="warn"><b>{errorCount} adjustment{errorCount > 1 ? 's have' : ' has'} invalid input</b> and {errorCount > 1 ? 'are' : 'is'} left out of the results below. Fix the highlighted fields to include {errorCount > 1 ? 'them' : 'it'}.</Callout>}
         {A.shortfall > 0 && <Callout tone="warn" icon="alert"><b>Needs {fmt(A.shortfall, 2)} more cash than you hold</b> ({(['pm', 'ks'] as const).filter((p) => S.shortfall[p] > 0).map((p) => `${p === 'pm' ? 'Polymarket' : 'Kalshi'} ${fmt(S.shortfall[p], 2)}`).join(', ')}). Results show the purchases as if funded; the extra funding is subtracted from cash, so values stay comparable. With current balances this allocation isn’t reachable without a deposit or selling something else.</Callout>}
 
@@ -274,9 +284,9 @@ export default function ScenarioLab() {
                         : 'Nobody has classified this pair: all four combinations are shown as possible (unmodeled dependency).'}</p>
                 <div className="matrix">
                   <div />
-                  {(['YES', 'NO'] as Outcome[]).map((ob) => <div className="mh" key={ob}><span><b>{evB.short}</b> resolves {ob}<br /><small>{ob === sideOf(evB) ? 'for you' : 'against you'}</small></span></div>)}
+                  {(['YES', 'NO'] as Outcome[]).map((ob) => <div className="mh" key={ob}><span><b>{evB.short}</b> resolves {ob}<br /><small>{sideOf(evB) ? (ob === sideOf(evB) ? 'for you' : 'against you') : 'both sides held'}</small></span></div>)}
                   {(['YES', 'NO'] as Outcome[]).map((oa) => (
-                    <MatrixRow key={oa} label={<><b>{evA.short}</b> resolves {oa}<br /><small>{oa === sideOf(evA) ? 'for you' : 'against you'}</small></>} cells={cells.filter((c) => c.oa === oa)} />
+                    <MatrixRow key={oa} label={<><b>{evA.short}</b> resolves {oa}<br /><small>{sideOf(evA) ? (oa === sideOf(evA) ? 'for you' : 'against you') : 'both sides held'}</small></>} cells={cells.filter((c) => c.oa === oa)} />
                   ))}
                 </div>
                 <div style={{ marginTop: 'var(--space-4)' }}>
@@ -347,7 +357,7 @@ export default function ScenarioLab() {
       </main>
 
       {editRel && <RelationshipModal current={crypto} onClose={() => setEditRel(false)} />}
-      {pending && <AddToScenarioModal ids={pending} scenarios={scenarios} defaultTarget={!isBase && active ? active.key : scenarios[0]?.key ?? 'new'} onCancel={() => setPending(null)} onConfirm={confirmAdd} />}
+      {pending && <AddToScenarioModal ids={pending.ids} from={pending.from} scenarios={scenarios} defaultTarget={!isBase && active ? active.key : scenarios[0]?.key ?? 'new'} onCancel={() => setPending(null)} onConfirm={confirmAdd} />}
       {confirmDelete && active && (
         <Modal title={`Delete “${active.name}”?`} sub="This can’t be undone" onClose={() => setConfirmDelete(false)}
           footer={<><Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancel</Button><Button variant="primary" onClick={remove}>Delete scenario</Button></>}>
@@ -356,6 +366,12 @@ export default function ScenarioLab() {
       )}
     </div>
   )
+}
+
+/** The one side an event is held on, or null when it is held on both sides. */
+function heldSide(e: RiskEvent): Outcome | null {
+  const sides = new Set(POSITIONS.filter((p) => p.eventId === e.id).map((p) => p.side))
+  return sides.size === 1 ? [...sides][0] : null
 }
 
 /** P&L of one position's event for an outcome, including the scenario's own trades on that position. */
@@ -421,9 +437,10 @@ function MatrixRow({ label, cells }: { label: React.ReactNode; cells: { before: 
 }
 
 function Dumbbell({ events, base, S }: { events: RiskEvent[]; base: Simulation; S: Simulation }) {
-  const sideOf = (e: RiskEvent) => POSITIONS.find((p) => p.eventId === e.id)?.side ?? 'YES'
-  const val = (sim: Simulation, e: RiskEvent, forYou: boolean) => { const s = sideOf(e); return groupPnl(sim, [e.id], { [e.id]: forYou ? s : s === 'YES' ? 'NO' : 'YES' }) }
-  const vals = events.flatMap((e) => [true, false].flatMap((w) => [val(base, e, w), val(S, e, w)]))
+  // Rows are settlement outcomes. Single-sided events are labelled for/against the user; events held on both sides as YES/NO.
+  const rowsOf = (e: RiskEvent): [Outcome, string][] => { const s = heldSide(e); return s ? [[s, 'if for you'], [s === 'YES' ? 'NO' : 'YES', 'if against']] : [['YES', 'if YES'], ['NO', 'if NO']] }
+  const val = (sim: Simulation, e: RiskEvent, o: Outcome) => groupPnl(sim, [e.id], { [e.id]: o })
+  const vals = events.flatMap((e) => (['YES', 'NO'] as Outcome[]).flatMap((o) => [val(base, e, o), val(S, e, o)]))
   const lim = Math.ceil(Math.max(3000, ...vals.map(Math.abs)) / 1000) * 1000
   const [wrap, W] = useWidth<HTMLDivElement>(600)
   // Narrow: event names sit above their rows instead of in a left column.
@@ -432,15 +449,15 @@ function Dumbbell({ events, base, S }: { events: RiskEvent[]; base: Simulation; 
   const maxName = compact ? Math.floor(W / 8) : 26
   return (
     <div className="chart" ref={wrap}>
-      <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ overflow: 'visible' }} role="img" aria-label={events.map((e) => `${e.short}: if for you ${sfmt(val(base, e, true))} → ${sfmt(val(S, e, true))}; if against ${sfmt(val(base, e, false))} → ${sfmt(val(S, e, false))}`).join('. ')}>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ overflow: 'visible' }} role="img" aria-label={events.map((e) => `${e.short}: ${rowsOf(e).map(([o, lab]) => `${lab} ${sfmt(val(base, e, o))} → ${sfmt(val(S, e, o))}`).join('; ')}`).join('. ')}>
         <g className="axis">{[-lim, -lim / 2, 0, lim / 2, lim].map((t) => <g key={t}><line className={t ? 'grid-l' : 'zero'} x1={X(t)} x2={X(t)} y1={4} y2={H - 26} strokeDasharray={t ? '2 4' : undefined} /><text x={X(t)} y={H - 8} textAnchor="middle">{t ? `${t > 0 ? '+' : ''}${kfmt(t)}` : '$0'}</text></g>)}</g>
         {events.map((e, i) => {
           const y0 = 20 + i * rowH + top
           return (
             <g key={e.id}>
               <text className="name" x={0} y={compact ? y0 - 14 : y0 + 18}>{e.name.length > maxName ? `${e.name.slice(0, maxName - 1)}…` : e.name}</text>
-              {([[true, 'if for you', y0], [false, 'if against', y0 + 28]] as const).map(([w, lab, yy]) => {
-                const b = val(base, e, w), a = val(S, e, w)
+              {rowsOf(e).map(([o, lab], k) => {
+                const yy = y0 + k * 28, b = val(base, e, o), a = val(S, e, o)
                 return (
                   <g key={lab}>
                     <text className="ax" x={X(-lim) - 14} y={yy + 4} textAnchor="end">{lab}</text>
@@ -460,8 +477,8 @@ function Dumbbell({ events, base, S }: { events: RiskEvent[]; base: Simulation; 
 }
 
 /** Confirms an incoming “add to scenario” request: which scenario, and which holdings. Nothing changes until Add. */
-function AddToScenarioModal({ ids, scenarios, defaultTarget, onCancel, onConfirm }: {
-  ids: string[]; scenarios: Scenario[]; defaultTarget: string; onCancel: () => void; onConfirm: (target: string, ids: string[]) => void
+function AddToScenarioModal({ ids, from, scenarios, defaultTarget, onCancel, onConfirm }: {
+  ids: string[]; from: string | null; scenarios: Scenario[]; defaultTarget: string; onCancel: () => void; onConfirm: (target: string, ids: string[]) => void
 }) {
   const [target, setTarget] = useState(defaultTarget)
   const [picked, setPicked] = useState<string[]>(ids)
@@ -476,7 +493,8 @@ function AddToScenarioModal({ ids, scenarios, defaultTarget, onCancel, onConfirm
           <option value="new">New scenario</option>
         </select>
       </label>
-      <fieldset className="add-list"><legend className="l">Holdings</legend>
+      {from && <p className="t2" style={{ fontSize: 'var(--font-size-sm)' }}><span className="t3">From </span>{from}</p>}
+      <fieldset className="add-list"><legend className="l">Holdings · {[...new Set(ids.map((id) => PLATFORM_NAME[POS_BY_ID[id].platform]))].join(' + ')}</legend>
         {ids.map((id) => {
           const p = POS_BY_ID[id], already = present.has(id)
           return (

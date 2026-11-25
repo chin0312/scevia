@@ -1,21 +1,23 @@
 /* Shared, context-preserving detail panels for positions, events, groups of holdings and closed trades.
    Inspecting never navigates or changes scenario state; cross-module actions are explicit buttons.
    Panels stack (event → position) with a Back button and return focus to where the user was. */
-import { createContext, useCallback, useContext, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { PLATFORM_NAME } from '../data/labels'
 import { REL_TEXT, useRelations } from '../data/relations'
-import type { ClosedTrade, Platform } from '../data/types'
-import { POS_BY_ID, coverage, eventRelations, exposures, fmtDate, sourceOf, tradeNet, type Position } from '../lib/finance'
+import type { ClosedTrade } from '../data/types'
+import { POS_BY_ID, coverage, eventRelations, exposures, fmtDate, outcomeLabel, sourceOf, tradeNet, type EventExposure, type PlatformFilter, type Position } from '../lib/finance'
+import { handoffPath } from '../lib/handoff'
 import { fmt, int, pct, sfmt } from '../lib/format'
 import { Icon } from './Icon'
-import { Drawer } from './overlays'
+import { Drawer, focusTopLayer } from './overlays'
 import { RelationshipModal } from './relationships'
-import { Button, Callout, Chip, PlatformBadge, SideChip, cx } from './ui'
+import { Button, Callout, Chip, PlatformBadge, Seg, SideChip, cx } from './ui'
 
 export type Detail =
-  | { kind: 'position'; id: string }
-  | { kind: 'event'; id: string }
+  /** `scope` is the platform scope of the view the panel was opened from; figures start in that scope. */
+  | { kind: 'position'; id: string; scope?: PlatformFilter }
+  | { kind: 'event'; id: string; scope?: PlatformFilter }
   | { kind: 'group'; title: string; sub: string; ids: string[] }
   | { kind: 'trades'; title: string; sub: string; trades: ClosedTrade[] }
 
@@ -37,14 +39,18 @@ export function DetailProvider({ children }: { children: ReactNode }) {
 }
 
 function DetailDrawer({ d, depth, onBack, onClose, open }: { d: Detail; depth: number; onBack: () => void; onClose: () => void; open: (d: Detail) => void }) {
+  // The drawer stays mounted while its content changes (nested panel, Back): move focus into the new content
+  // so it doesn't fall back to the page behind the overlay.
+  const first = useRef(true)
+  useEffect(() => { if (first.current) { first.current = false; return } focusTopLayer() }, [d])
   const title = d.kind === 'position' ? POS_BY_ID[d.id]?.market ?? 'Position'
     : d.kind === 'event' ? exposures('all').find((e) => e.event.id === d.id)?.event.name ?? 'Event' : d.title
-  const sub = d.kind === 'position' ? positionSub(POS_BY_ID[d.id]) : d.kind === 'event' ? 'Event exposure across platforms' : d.sub
+  const sub = d.kind === 'position' ? positionSub(POS_BY_ID[d.id]) : d.kind === 'event' ? 'Event exposure · settlement outcomes YES / NO' : d.sub
   return (
     <Drawer title={title} sub={sub} onClose={onClose}>
       {depth > 1 && <button type="button" className="link back-link" onClick={onBack}><Icon name="arrowRight" size={12} className="flip" /> Back</button>}
-      {d.kind === 'position' && <PositionBody p={POS_BY_ID[d.id]} open={open} close={onClose} />}
-      {d.kind === 'event' && <EventBody id={d.id} open={open} close={onClose} />}
+      {d.kind === 'position' && <PositionBody p={POS_BY_ID[d.id]} scope={d.scope ?? 'all'} open={open} close={onClose} />}
+      {d.kind === 'event' && <EventBody key={d.id} id={d.id} scope={d.scope ?? 'all'} open={open} close={onClose} />}
       {d.kind === 'group' && <GroupBody ids={d.ids} open={open} />}
       {d.kind === 'trades' && <TradesBody trades={d.trades} />}
     </Drawer>
@@ -59,11 +65,12 @@ function useSimulate(close: () => void) {
   const onLab = pathname.startsWith('/scenario-lab')
   return {
     label: onLab ? 'Add to a scenario…' : 'Simulate in Scenario Lab',
-    go: (q: string) => { close(); nav(`/scenario-lab?${q}`) },
+    /** Deliberate hand-off of exactly these holdings; `from` explains the scope in the Lab's confirmation. */
+    go: (ids: string[], from: string) => { close(); nav(handoffPath(ids, from)) },
   }
 }
 
-function PositionBody({ p, open, close }: { p?: Position; open: (d: Detail) => void; close: () => void }) {
+function PositionBody({ p, scope, open, close }: { p?: Position; scope: PlatformFilter; open: (d: Detail) => void; close: () => void }) {
   const sim = useSimulate(close)
   if (!p) return <div className="empty"><p>This position is no longer in the portfolio.</p></div>
   const src = sourceOf(p.platform)
@@ -78,8 +85,8 @@ function PositionBody({ p, open, close }: { p?: Position; open: (d: Detail) => v
     </div>
     <h5 className="caps">If it resolves</h5>
     <div className="cov-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
-      <div><span className="t3">For you ({p.side})</span><b className="gain">{sfmt(p.ifWin, 2)}</b><span className="t3">{int(p.shares)} × $1 − cost basis</span></div>
-      <div><span className="t3">Against you</span><b className="loss">{sfmt(p.ifLose, 2)}</b><span className="t3">the cost basis is lost</span></div>
+      <div><span className="t3">{p.side} (for you)</span><b className={tone(p.ifWin)}>{sfmt(p.ifWin, 2)}</b><span className="t3">{int(p.shares)} × $1 − cost basis</span></div>
+      <div><span className="t3">{p.side === 'YES' ? 'NO' : 'YES'} (against you)</span><b className={tone(p.ifLose)}>{sfmt(p.ifLose, 2)}</b><span className="t3">the cost basis is lost</span></div>
     </div>
     <h5 className="caps">Fills · how the average cost is calculated</h5>
     <table className="dt">
@@ -93,39 +100,41 @@ function PositionBody({ p, open, close }: { p?: Position; open: (d: Detail) => v
     <Callout>Average cost = Σ(shares × price) ÷ shares. Fees aren’t in the average cost; {p.fees ? `the ${fmt(p.fees, 2)} paid on these fills is subtracted once in net P&L.` : 'no fees were charged on these fills.'} The mark is the last traded price on {PLATFORM_NAME[p.platform]}.</Callout>
     {sameEvent && sameEvent.positions.length > 1 && <Callout icon="link">This contract is one of {sameEvent.positions.length} positions on <b>{sameEvent.event.name}</b>.</Callout>}
     <div className="drawer-actions">
-      <Button icon="shield" onClick={() => open({ kind: 'event', id: p.eventId })}>View event exposure</Button>
-      <Button variant="primary" icon="flask" onClick={() => sim.go(`add=${p.id}`)}>{sim.label}</Button>
+      <Button icon="shield" onClick={() => open({ kind: 'event', id: p.eventId, scope })}>View event exposure</Button>
+      <Button variant="primary" icon="flask" onClick={() => sim.go([p.id], `${p.market} · ${PLATFORM_NAME[p.platform]}`)}>{sim.label}</Button>
     </div>
   </>)
 }
 
-function EventBody({ id, open, close }: { id: string; open: (d: Detail) => void; close: () => void }) {
+const SCOPE_LABEL: Record<PlatformFilter, string> = { all: 'All platforms', pm: 'Polymarket only', ks: 'Kalshi only' }
+const tone = (v: number) => (v > 0.005 ? 'gain' : v < -0.005 ? 'loss' : undefined)
+
+function EventBody({ id, scope, open, close }: { id: string; scope: PlatformFilter; open: (d: Detail) => void; close: () => void }) {
   const sim = useSimulate(close)
   const nav = useNavigate(), { pathname } = useLocation()
   const { rels, crypto } = useRelations()
   const [classify, setClassify] = useState(false)
-  const all = exposures('all'), e = all.find((x) => x.event.id === id)
-  if (!e) return <div className="empty"><p>No open positions on this event.</p></div>
-  const committed = all.reduce((a, x) => a + x.cost, 0)
-  const value = e.positions.reduce((a, p) => a + p.value, 0)
-  const sides = [...new Set(e.positions.map((p) => p.side))]
+  const full = exposures('all').find((x) => x.event.id === id)
+  // Start in the scope the user came from; the full cross-platform event is one switch away and labelled as such.
+  const [view, setView] = useState<PlatformFilter>(scope)
+  const scoped = exposures(view)
+  const e = scoped.find((x) => x.event.id === id)
+  if (!full) return <div className="empty"><p>No open positions on this event.</p></div>
+  const outside = full.positions.filter((p) => !e?.positions.includes(p))
+  // The scope switch exists whenever the event has holdings outside the origin scope, whichever view is showing.
+  const canWiden = scope !== 'all' && full.positions.some((p) => p.platform !== scope)
+  const committed = scoped.reduce((a, x) => a + x.cost, 0)
   const related = eventRelations(id, rels)
-  const platforms = [...new Set(e.positions.map((p) => p.platform))] as Platform[]
   return (<>
-    <div className="row"><Chip>Resolves {fmtDate(e.resolves, { month: 'short', day: 'numeric', year: 'numeric' })} · in {e.days} days</Chip>{e.positions.length > 1 && <Chip tone="yes">{e.positions.length} contracts · equivalent</Chip>}</div>
-    <div className="cov-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
-      <div><span className="t3">Capital committed</span><b>{fmt(e.cost)}</b><span className="t3">{pct((e.cost / committed) * 100)} of portfolio</span></div>
-      <div><span className="t3">Value at mark</span><b>{fmt(value)}</b></div>
-      <div><span className="t3">Unrealized</span><b className={value - e.cost >= 0 ? 'gain' : 'loss'}>{sfmt(value - e.cost)}</b></div>
+    <div className="row" style={{ flexWrap: 'wrap' }}><Chip>Resolves {fmtDate(full.resolves, { month: 'short', day: 'numeric', year: 'numeric' })} · in {full.days} days</Chip>
+      {full.positions.length > 1 && <Chip tone="accent">{full.positions.length} contracts · treated as one event</Chip>}
+      <span className="spacer" />
+      {canWiden && <Seg label="Scope" options={[SCOPE_LABEL[scope], SCOPE_LABEL.all]} value={SCOPE_LABEL[view]} onChange={(v) => setView(v === SCOPE_LABEL.all ? 'all' : scope)} />}
     </div>
-    <h5 className="caps">Settlement payoff (vs. cost basis)</h5>
-    <div className="cov-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
-      <div><span className="t3">If it resolves {e.side} (for you)</span><b className="gain">{sfmt(e.pnlFor)}</b></div>
-      <div><span className="t3">If it resolves {e.side === 'YES' ? 'NO' : 'YES'} (against you)</span><b className="loss">{sfmt(e.pnlAgainst)}</b></div>
-    </div>
-    {sides.length > 1 && <Callout tone="warn">These positions hold different sides of the event; payoffs above use each position’s own side.</Callout>}
-    <h5 className="caps">Positions on this event</h5>
-    <PosList ps={e.positions} open={open} right={(p) => <><b>{fmt(p.value)}</b><small className="t3">cost {fmt(p.cost)}</small></>} />
+    {view !== 'all' && outside.length > 0 && (
+      <Callout icon="info">Showing your {SCOPE_LABEL[view].replace(' only', '')} holdings, as in the view you came from. You also hold this event on {[...new Set(outside.map((p) => PLATFORM_NAME[p.platform]))].join(' and ')} ({fmt(outside.reduce((a, p) => a + p.cost, 0))} committed); switch to All platforms to include it.</Callout>
+    )}
+    {!e ? <div className="empty"><p>No {SCOPE_LABEL[view].replace(' only', '')} holdings on this event.</p></div> : <EventFigures e={e} committed={committed} scopeLabel={view === 'all' ? 'all platforms' : SCOPE_LABEL[view].replace(' only', '')} open={open} />}
     <h5 className="caps">Relationships</h5>
     {related.length === 0 && <p className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>Not classified against other events: every combination with them is treated as possible.</p>}
     {related.map((r) => (
@@ -133,12 +142,32 @@ function EventBody({ id, open, close }: { id: string; open: (d: Detail) => void;
         {((id === 'btc' && r.other.id === 'eth') || (id === 'eth' && r.other.id === 'btc')) && <button type="button" className="link" onClick={() => setClassify(true)}>Change</button>}</span></div>
     ))}
     <h5 className="caps">Data</h5>
-    {platforms.map((pl) => { const s = sourceOf(pl), c = coverage(pl); return <div className="cov" key={pl}><PlatformBadge p={pl} /><span>{c.fills} fills · {c.settlements} settlements</span><span className={s.stale ? 'stale' : 't3'}>as of {fmtDate(s.asOf)}{s.stale ? ' · stale' : ''}</span></div> })}
+    {(e?.platforms ?? []).map((pl) => { const src = sourceOf(pl), c = coverage(pl); return <div className="cov" key={pl}><PlatformBadge p={pl} /><span>{c.fills} fills · {c.settlements} settlements</span><span className={src.stale ? 'stale' : 't3'}>as of {fmtDate(src.asOf)}{src.stale ? ' · stale' : ''}</span></div> })}
     <div className="drawer-actions">
       {!pathname.startsWith('/risk') && <Button icon="shield" onClick={() => { close(); nav(`/risk?event=${id}#payoffs`) }}>Analyze in Risk</Button>}
-      <Button variant="primary" icon="flask" onClick={() => sim.go(`addEvent=${id}`)}>{sim.label}</Button>
+      {e && <Button variant="primary" icon="flask" title={`Choose a scenario for these ${e.positions.length} position${e.positions.length > 1 ? 's' : ''}`}
+        onClick={() => sim.go(e.positions.map((p) => p.id), `${full.event.name} · ${SCOPE_LABEL[view]}`)}>{sim.label}{e.positions.length > 1 ? ` (${e.positions.length})` : ''}</Button>}
     </div>
     {classify && <RelationshipModal current={crypto} onClose={() => setClassify(false)} />}
+  </>)
+}
+
+/** Figures for one event's holdings in a given scope. Settlement is shown per outcome (YES / NO) from each holding's own side. */
+function EventFigures({ e, committed, scopeLabel, open }: { e: EventExposure; committed: number; scopeLabel: string; open: (d: Detail) => void }) {
+  const value = e.positions.reduce((a, p) => a + p.value, 0)
+  return (<>
+    <div className="cov-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
+      <div><span className="t3">Capital committed</span><b>{fmt(e.cost)}</b><span className="t3">{pct((e.cost / committed) * 100)} of committed · {scopeLabel}</span></div>
+      <div><span className="t3">Value at mark</span><b>{fmt(value)}</b></div>
+      <div><span className="t3">Unrealized</span><b className={tone(value - e.cost)}>{sfmt(value - e.cost)}</b></div>
+    </div>
+    <h5 className="caps">Settlement payoff (vs. cost basis)</h5>
+    <div className="cov-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+      {(['YES', 'NO'] as const).map((o) => <div key={o}><span className="t3">{outcomeLabel(e, o)}</span><b className={tone(e.pnl[o])}>{sfmt(e.pnl[o])}</b></div>)}
+    </div>
+    {e.side === 'Mixed' && <Callout tone="warn">You hold both sides of this event. Payoffs use each position’s own side, so opposing holdings offset; capital committed is still the gross amount paid.</Callout>}
+    <h5 className="caps">Positions on this event</h5>
+    <PosList ps={e.positions} open={open} right={(p) => <><b>{fmt(p.value)}</b><small className="t3">cost {fmt(p.cost)}</small></>} />
   </>)
 }
 

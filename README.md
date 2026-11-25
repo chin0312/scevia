@@ -12,14 +12,14 @@
 
 ## Why Scevia
 
-Active prediction-market traders often hold positions on Polymarket and Kalshi at the same time. Platform dashboards show balances and open contracts, but they leave the questions that matter most for the next decision hard to answer:
+Active prediction-market traders often hold positions across several markets, such as Polymarket and Kalshi. Platform dashboards show balances and open contracts, but they leave the questions that matter most for the next decision hard to answer:
 
 - What did I actually make after fees?
 - Where do my results come from?
 - Which single event could hurt me most?
 - What would change if I resized a position?
 
-Scevia brings those answers into one workspace. It is **read-only**: it never places trades, holds funds, or asks for keys that can trade.
+Scevia brings those answers into one workspace built around the sources you choose. It is **read-only** and privacy-first: it never places trades, holds funds, or asks for keys that can trade.
 
 ## Modules
 

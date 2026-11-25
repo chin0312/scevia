@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import { CASH_FLOWS, CLOSED_TRADES, FEE_RATE, OPEN_POSITIONS, TODAY } from '../data/portfolio'
 import {
-  POSITIONS, POS_BY_ID, account, allocation, attribution, baseHoldings, entryBuckets, eventPnl, eventRelations, groupPnl, insights, isFeasible, jointOutcomes,
+  MAX_JOINT_EVENTS, POSITIONS, POS_BY_ID, account, allocation, derivePosition, eventExposureOf, opposite, outcomeLabel, attribution, baseHoldings, entryBuckets, eventPnl, eventRelations, groupPnl, insights, isFeasible, jointOutcomes,
   exposures, netPnlAt, outcomeRange, periodRange, periodStats, relationsFor, scenarioMetrics, series, settlementRange, positionsFor, settlementRangeFor, simulate, tradesIn,
   type Outcome, type PlatformFilter,
 } from './finance'
 
-const close = (a: number, b: number, eps = 0.01) => expect(Math.abs(a - b)).toBeLessThan(eps)
+const close = (a: number | null | undefined, b: number | null | undefined, eps = 0.01) => { expect(a).toEqual(expect.any(Number)); expect(b).toEqual(expect.any(Number)); expect(Math.abs((a as number) - (b as number))).toBeLessThan(eps) }
+// Ranges are nullable (too many events); the sample is small enough that they always exist.
+const sr = (...a: Parameters<typeof settlementRange>) => settlementRange(...a)!
+const or = (...a: Parameters<typeof outcomeRange>) => outcomeRange(...a)!
 const F: PlatformFilter[] = ['all', 'pm', 'ks']
 
 describe('account identities', () => {
@@ -125,7 +128,7 @@ describe('relationships and feasible outcomes', () => {
   })
   it('excludes impossible combinations instead of adjusting afterwards', () => {
     const ids = ['x', 'y', 'z']
-    const r = outcomeRange(ids, [{ a: 'x', b: 'y', cls: 'mutex' }], (o) => (o.x === 'YES' ? 10 : 0) + (o.y === 'YES' ? 7 : 0) + (o.z === 'YES' ? 1 : 0))
+    const r = or(ids, [{ a: 'x', b: 'y', cls: 'mutex' }], (o) => (o.x === 'YES' ? 10 : 0) + (o.y === 'YES' ? 7 : 0) + (o.z === 'YES' ? 1 : 0))
     expect(r.excluded).toBe(2)
     expect(r.max).toBe(11) // x YES, y NO, z YES — not 18
     expect(r.min).toBe(0)
@@ -135,14 +138,14 @@ describe('relationships and feasible outcomes', () => {
     const ids = [...new Set(hs.map((h) => h.eventId))]
     let brute = -Infinity
     for (const o of jointOutcomes(ids)) if (isFeasible(o, rels)) brute = Math.max(brute, ids.reduce((s, id) => s + eventPnl(hs, id, o[id]), 0))
-    const r = settlementRange(hs, rels)
+    const r = sr(hs, rels)
     close(r.max, brute)
-    expect(r.max).toBeLessThan(settlementRange(hs, relationsFor('unknown')).max)
+    expect(r.max).toBeLessThan(sr(hs, relationsFor('unknown')).max)
     close(r.min, -account('all').committed) // everything against you is still possible
   })
   it('related and unknown relationships don’t constrain outcomes', () => {
     const hs = Object.values(baseHoldings())
-    const a = settlementRange(hs, relationsFor('unknown')), b = settlementRange(hs, relationsFor('related'))
+    const a = sr(hs, relationsFor('unknown')), b = sr(hs, relationsFor('related'))
     close(a.max, b.max); close(a.min, b.min); expect(a.excluded).toBe(0)
   })
 })
@@ -151,15 +154,15 @@ describe('risk scope', () => {
   const rels = relationsFor('mutex')
   const all = Object.values(baseHoldings())
   it('portfolio range is the same as the range over every event', () => {
-    const r = settlementRange(all, rels), f = settlementRangeFor(exposures().map((e) => e.event.id), rels)!
+    const r = sr(all, rels), f = settlementRangeFor(exposures().map((e) => e.event.id), rels)!
     close(f.min, r.min); close(f.max, r.max); expect(f.excluded).toBe(r.excluded)
   })
   it('a subset range is local and leaves the portfolio range untouched', () => {
-    const before = settlementRange(all, rels)
+    const before = sr(all, rels)
     const hot = exposures().find((e) => e.event.id === 'hot')!
     const sub = settlementRangeFor(['hot'], rels)!
-    close(sub.min, hot.pnlAgainst); close(sub.max, hot.pnlFor)
-    const after = settlementRange(all, rels)
+    close(sub.min, hot.pnl.NO); close(sub.max, hot.pnl.YES)
+    const after = sr(all, rels)
     close(after.min, before.min); close(after.max, before.max)
     expect(sub.min).toBeGreaterThan(before.min)
   })
@@ -188,7 +191,7 @@ describe('scenario simulation', () => {
     close(m.cash, base.cash - d * px - fee)
     close(m.committed, base.committed + d * px)
     close(m.totalValue - base.totalValue, d * (p.mark - px) - fee)
-    close(m.bestValue - base.bestValue, d * (1 - px) - fee) // only settlement can pay out
+    close(m.bestValue! - base.bestValue!, d * (1 - px) - fee) // only settlement can pay out
   })
   it('buying at the mark with fees off leaves portfolio value unchanged', () => {
     const p = POS_BY_ID.cel
@@ -249,7 +252,7 @@ describe('scenario simulation', () => {
   it('worst/best values use the same feasible outcomes as Risk', () => {
     const mutex = relationsFor('mutex')
     const m = scenarioMetrics(simulate([], { includeFees: true }), mutex)
-    const r = settlementRange(Object.values(baseHoldings()), mutex)
+    const r = sr(Object.values(baseHoldings()), mutex)
     const a = account('all')
     close(m.bestValue, a.cash + a.committed + r.max)
     close(m.worstValue, a.cash + a.committed + r.min)
@@ -303,5 +306,58 @@ describe('event details', () => {
   it('eventRelations follows the shared classification', () => {
     expect(eventRelations('btc', relationsFor('mutex')).map((r) => [r.other.id, r.cls])).toContainEqual(['eth', 'mutex'])
     expect(eventRelations('btc', relationsFor('related')).map((r) => r.cls)).toContain('related')
+  })
+})
+
+describe('event exposure with each holding’s own side', () => {
+  const ev = { id: 'x', name: 'Binary event', short: 'X', category: 'Economics' as const }
+  const pos = (id: string, side: 'YES' | 'NO', shares: number, price: number, platform: 'pm' | 'ks' = 'pm') =>
+    derivePosition({ id, market: id, eventId: 'x', category: 'Economics', platform, side, mark: price, markAtLastVisit: price, resolves: '2026-12-31', fills: [{ date: '2026-11-01', shares, price, fee: 0 }] })
+  const holdings = (ps: ReturnType<typeof pos>[]) => ps.map((p) => ({ id: p.id, eventId: p.eventId, platform: p.platform, side: p.side, shares: p.shares, cost: p.cost, mark: p.mark }))
+
+  it('opposing YES and NO holdings offset at settlement; committed capital stays gross', () => {
+    const e = eventExposureOf(ev, [pos('y', 'YES', 100, 0.6), pos('n', 'NO', 60, 0.4, 'ks')], 84)
+    close(e.cost, 84)
+    close(e.pnl.YES, 16)  // $100 payout − $84
+    close(e.pnl.NO, -24)  // $60 payout − $84
+    expect(e.side).toBe('Mixed')
+    expect(e.best.outcome).toBe('YES'); expect(e.worst.outcome).toBe('NO')
+    close(e.maxLoss, 24)
+    expect(outcomeLabel(e, 'YES')).toBe('If YES') // no misleading "for you" when both sides are held
+  })
+  it('a balanced position has no settlement gain or loss', () => {
+    const e = eventExposureOf(ev, [pos('y', 'YES', 100, 0.5), pos('n', 'NO', 100, 0.5)], 100)
+    close(e.pnl.YES, 0); close(e.pnl.NO, 0); close(e.maxLoss, 0)
+  })
+  it('single-sided exposure is unchanged: held side pays shares − cost, the other loses the cost', () => {
+    for (const e of exposures('all')) {
+      if (e.side === 'Mixed') continue
+      const shares = e.positions.reduce((a, p) => a + p.shares, 0)
+      close(e.pnl[e.side], shares - e.cost); close(e.pnl[opposite(e.side)], -e.cost)
+      expect(e.best.outcome).toBe(e.side); close(e.maxLoss, e.cost)
+      expect(outcomeLabel(e, e.side)).toContain('for you')
+    }
+  })
+  it('event exposure matches the settlement engine used for portfolio ranges', () => {
+    const hs = Object.values(baseHoldings())
+    for (const e of exposures('all')) for (const o of ['YES', 'NO'] as const) close(e.pnl[o], eventPnl(hs, e.event.id, o))
+    const ps = [pos('y', 'YES', 100, 0.6), pos('n', 'NO', 60, 0.4)], e = eventExposureOf(ev, ps, 84)
+    for (const o of ['YES', 'NO'] as const) close(e.pnl[o], eventPnl(holdings(ps), 'x', o))
+    const r = sr(holdings(ps), [])
+    close(r.min, -24); close(r.max, 16)
+  })
+  it('largest single-event loss nets opposing holdings', () => {
+    const ps = [pos('y', 'YES', 100, 0.6), pos('n', 'NO', 60, 0.4)]
+    const sim = { holdings: Object.fromEntries(holdings(ps).map((h) => [h.id, h])), cash: { pm: 0, ks: 0 }, realized: 0, fees: 0, errors: {}, shortfall: { pm: 0, ks: 0 }, realizedBy: {}, feesBy: {} }
+    close(scenarioMetrics(sim, []).largestEventLoss, 24)
+  })
+})
+
+describe('joint-outcome enumeration bounds', () => {
+  it('reports ranges as unavailable beyond the exact-enumeration cap instead of approximating', () => {
+    const ids = Array.from({ length: MAX_JOINT_EVENTS + 1 }, (_, i) => `e${i}`)
+    expect(outcomeRange(ids, [], () => 0)).toBeNull()
+    expect(() => jointOutcomes(ids).next()).toThrow(RangeError)
+    expect(outcomeRange(ids.slice(0, 3), [], () => 1)?.feasible).toBe(8)
   })
 })
