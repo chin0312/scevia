@@ -231,6 +231,18 @@ describe('migrations and canonical persistence', () => {
     expect((await choose({ changes: [{ key: first.key, action: 'restore' }] })).statusCode).toBe(200)
     expect((await get('/accounting/records?key=' + encodeURIComponent(first.key))).json().items[0]
       .effective.observation.price).toBe('0.45')
+    const beforeRewards = async () => (await get('/accounting?asOf=2026-11-25T05:15:00Z')).json()
+    const correctedState = await beforeRewards()
+    expect(correctedState.holdings).toContainEqual(expect.objectContaining({
+      account, quantity: '120', basis: '63', averageCost: '0.525', marketValue: '66', unrealized: '3',
+    }))
+    expect(correctedState.cash).toContainEqual(expect.objectContaining({
+      account, balance: '955', realized: '18', portfolioValue: '1021',
+    }))
+    const reset = await choose({ changes: [{ key: first.key, action: 'reset_correction' }] })
+    expect(reset.statusCode).toBe(200)
+    expect((await beforeRewards()).cash).toContainEqual(expect.objectContaining({ account, portfolioValue: '1026' }))
+    expect((await choose(adjustment)).statusCode).toBe(200)
     expect((await choose({ changes: [{ key: preferred.key, action: 'exclude' }] })).statusCode).toBe(200)
     const broken = (await get('/accounting/records?key=' + encodeURIComponent(duplicate.key))).json().items[0]
     expect(broken).toMatchObject({ inclusion: 'unresolved', duplicateLinkStatus: 'review_required' })

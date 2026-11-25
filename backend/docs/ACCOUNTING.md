@@ -95,3 +95,5 @@ Treat `replayStatus` as execution, and `portfolioScope` as the evidence selectio
 Use the snapshot comparison's scope and timestamp. A comparison against a user-selected set can differ legitimately from a provider account snapshot. Current membership metadata cannot establish membership for an earlier cutoff. Use historical daily points for selected-evidence valuation and carry forward uncertainty rather than deriving a separate finance ledger.
 
 The reference portfolio yields value 1,026. After an owner resolves an accidental duplicate and deliberately excludes the first purchase, the selected replay yields 20 shares, basis 12, cash 1,000, realized 12, unrealized -1 and value 1,011. Restoring that purchase returns the replay to 1,026.
+
+Correcting the first buy to 0.45, excluding it, then restoring membership leaves the corrected replay at 120 shares, average cost 0.525, basis 63, cash 955, realized 18, unrealized 3 and value 1,021. Resetting the correction returns value to 1,026.

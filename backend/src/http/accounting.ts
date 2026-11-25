@@ -268,6 +268,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       : { changes: new Map<string, PortfolioDecision>(), report: [] }
     const applied = applyDecisions(rawEvidence, new Map([...decisionMap, ...replacement.changes]))
     return { ...provider, ...applied, rawEvidence, decisionMap, decisionRevision, replacement,
+      recordDecisionRevisions: new Map(latest.map(({ key, revision }) => [key, revision])),
       truncated: provider.truncated || latest.length > 10000,
       selected: applied.records.some((record) => record.decision !== null) }
 
@@ -278,7 +279,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       .map(({ original }) => JSON.stringify([original.venue, original.account])))
     return digest([batchId, replaces ?? null, input.replacement.report, [...input.replacement.changes], input.records.filter(({ original }) =>
       scopes.has(JSON.stringify([original.venue, original.account])))
-      .map(({ key, revision, decision }) => [key, revision, decision]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))])
+      .map(({ key, revision, decision }) => [key, revision, decision, input.recordDecisionRevisions.get(key) ?? null]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))])
   }
 
   function replay(input: Awaited<ReturnType<typeof loadEvidence>>, asOf: string) {
@@ -432,7 +433,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     }))
     const revision = digest([selection ?? null, ordered, input.records.filter(({ original }) =>
       affectedAccounts.has(JSON.stringify([original.venue, original.account])))
-      .map(({ key, revision, decision }) => [key, revision, decision]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))])
+      .map(({ key, revision, decision }) => [key, revision, decision, input.recordDecisionRevisions.get(key) ?? null]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))])
     const next = new Map([...input.decisionMap, ...changes])
     return { changes, revision, input, next }
   }
