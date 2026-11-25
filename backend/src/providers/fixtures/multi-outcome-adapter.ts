@@ -15,6 +15,7 @@ const marketSchema = z.object({
   marketLifecycle: z.string(),
   settlementRules: z.string().nullable(),
   settlementAssetCode: z.string().nullable(),
+  eventUpdatedAt: z.string().datetime({ offset: true }).nullable().optional(),
   sourceUpdatedAt: z.string().datetime({ offset: true }).nullable(),
   outcomes: z.array(z.object({
     id: z.string(),
@@ -228,6 +229,7 @@ export class MultiOutcomeFixtureAdapter implements ProviderAdapter {
         marketLifecycle: market.marketLifecycle,
         settlementRules: market.settlementRules,
         settlementAssetCode: market.settlementAssetCode,
+        eventSourceUpdatedAt: market.eventUpdatedAt ?? market.sourceUpdatedAt,
         sourceUpdatedAt: market.sourceUpdatedAt,
         outcomes: market.outcomes.map((outcome) => ({
           externalId: outcome.id,

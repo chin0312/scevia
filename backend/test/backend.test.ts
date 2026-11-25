@@ -5,7 +5,9 @@ import { createDatabase, type Database } from '../src/db/client.js'
 import { runMigrations } from '../src/db/migrate.js'
 import {
   cashMovements,
+  events,
   fills,
+  instruments,
   markets,
   portfolios,
   positionSnapshots,
@@ -29,7 +31,7 @@ import { MultiOutcomeFixtureAdapter } from '../src/providers/fixtures/multi-outc
 import { MULTI_OUTCOME_ACCOUNT_ID, SNAPSHOT_ACCOUNT_ID } from '../src/providers/fixtures/data.js'
 import { ProviderRegistry, providerRegistry } from '../src/providers/registry.js'
 import { assertSafeTestDatabaseUrl } from '../scripts/safety.js'
-import type { CoverageEntity, EntityCoverageReport, ProviderCapabilities } from '../src/domain/model.js'
+import type { CoverageEntity, EntityCoverageReport, NormalizedRecord, ProviderCapabilities } from '../src/domain/model.js'
 import type { ServerConfig } from '../src/config.js'
 
 const OWNER_ID = '00000000-0000-4000-8000-000000000001'
@@ -435,11 +437,30 @@ describe('migrations and canonical persistence', () => {
       lastAttemptStatus: dataCoverage.lastAttemptStatus,
       lastAttemptCoverageStatus: dataCoverage.lastAttemptCoverageStatus,
       coverageStart: dataCoverage.coverageStart,
+      lastSuccessfulSyncAt: dataCoverage.lastSuccessfulSyncAt,
     }).from(dataCoverage).where(and(eq(dataCoverage.providerAccountId, accountId), eq(dataCoverage.entityType, 'fills')))
     expect(afterUnavailable?.status).toBe('complete')
     expect(afterUnavailable?.lastAttemptStatus).toBe('complete')
     expect(afterUnavailable?.lastAttemptCoverageStatus).toBe('unavailable')
     expect(afterUnavailable?.coverageStart?.toISOString()).toBe(before?.coverageStart?.toISOString())
+    expect(afterUnavailable?.lastSuccessfulSyncAt?.toISOString()).toBe(before?.lastSuccessfulSyncAt?.toISOString())
+
+    const unknownAdapter: ProviderAdapter = {
+      capabilities: original.capabilities,
+      async fetchPage(request) {
+        const page = await original.fetchPage(request.streamName === 'activity' ? { ...request, checkpoint: null } : request)
+        if (request.streamName !== 'activity') return page
+        return { ...page, coverage: { ...page.coverage, fills: { status: 'unknown', reasonCode: 'provider_freshness_unknown' } } }
+      },
+      normalizePage: (page, streamName) => original.normalizePage(page, streamName),
+    }
+    await new IngestionService(database, new ProviderRegistry([unknownAdapter])).syncProviderAccount(accountId)
+    const [afterUnknown] = await database.select({
+      lastAttemptCoverageStatus: dataCoverage.lastAttemptCoverageStatus,
+      lastSuccessfulSyncAt: dataCoverage.lastSuccessfulSyncAt,
+    }).from(dataCoverage).where(and(eq(dataCoverage.providerAccountId, accountId), eq(dataCoverage.entityType, 'fills')))
+    expect(afterUnknown?.lastAttemptCoverageStatus).toBe('unknown')
+    expect(afterUnknown?.lastSuccessfulSyncAt?.toISOString()).toBe(before?.lastSuccessfulSyncAt?.toISOString())
 
     const incrementalAdapter: ProviderAdapter = {
       capabilities: original.capabilities,
@@ -452,9 +473,9 @@ describe('migrations and canonical persistence', () => {
             ...page.coverage,
             fills: {
               status: 'complete',
-              coverageStart: '2026-11-22T00:00:00Z',
-              coverageEnd: '2026-11-25T00:00:00Z',
-              sourceAsOf: '2026-11-25T00:00:00Z',
+              coverageStart: '2026-12-01T00:00:00Z',
+              coverageEnd: '2026-12-03T00:00:00Z',
+              sourceAsOf: '2026-12-03T00:00:00Z',
             },
           },
         }
@@ -465,7 +486,133 @@ describe('migrations and canonical persistence', () => {
     const [extended] = await database.select({ coverageStart: dataCoverage.coverageStart, coverageEnd: dataCoverage.coverageEnd })
       .from(dataCoverage).where(and(eq(dataCoverage.providerAccountId, accountId), eq(dataCoverage.entityType, 'fills')))
     expect(extended?.coverageStart?.toISOString()).toBe('2026-11-20T12:30:00.000Z')
-    expect(extended?.coverageEnd?.toISOString()).toBe('2026-11-25T00:00:00.000Z')
+    expect(extended?.coverageEnd?.toISOString()).toBe('2026-12-03T00:00:00.000Z')
+  })
+
+  it('restarts nonempty complete snapshots after interruption and publishes all pages without duplicates', async () => {
+    const original = new MultiOutcomeFixtureAdapter()
+    let failSecondPage = false
+    let firstPageRequests = 0
+    const stateCoverage = {
+      positions: { status: 'complete' as const, sourceAsOf: '2026-11-25T10:00:00Z' },
+      cash_balances: { status: 'complete' as const, sourceAsOf: '2026-11-25T10:00:00Z' },
+      prices: { status: 'complete' as const, sourceAsOf: '2026-11-25T10:00:00Z' },
+    }
+    const position = (id: string, outcome: string, quantity: string) => ({
+      id,
+      contract: 'market-city-council-winner',
+      outcome,
+      observed: '2026-11-25T10:00:00Z',
+      quantity,
+      averageCost: '0.2',
+      mark: '0.3',
+      markTimestamp: '2026-11-25T09:59:00Z',
+      asset: 'USD',
+      origin: 'provider_reported',
+    })
+    const cash = (id: string, amount: string, asset: string) => ({
+      id,
+      observed: '2026-11-25T10:00:00Z',
+      amount,
+      asset,
+    })
+    const payload = (positions: ReturnType<typeof position>[], balances: ReturnType<typeof cash>[]) => ({
+      markets: [], trades: [], transfers: [], positions, cash: balances, prices: [], settlements: [],
+    })
+    const adapter: ProviderAdapter = {
+      capabilities: original.capabilities,
+      async fetchPage(request) {
+        if (request.streamName !== 'account-state') return original.fetchPage(request)
+        if (request.cursor === 'snapshot-page-2' && failSecondPage) {
+          throw new ProviderAdapterError('snapshot_page_failed', false)
+        }
+        if (request.cursor === null) {
+          firstPageRequests += 1
+          return {
+            payload: payload([
+              position('snapshot-position-a', 'candidate-north', '4'),
+              position('snapshot-position-b', 'candidate-south', '2'),
+            ], [cash('snapshot-cash-usd', '100', 'USD')]),
+            nextCursor: 'snapshot-page-2',
+            checkpoint: null,
+            coverage: stateCoverage,
+          }
+        }
+        return {
+          payload: payload([position('snapshot-position-c', 'other-candidate', '3')], [cash('snapshot-cash-usdc', '50', 'USDC')]),
+          nextCursor: null,
+          checkpoint: null,
+          coverage: stateCoverage,
+        }
+      },
+      normalizePage: (page, streamName) => original.normalizePage(page, streamName),
+    }
+    const service = new IngestionService(database, new ProviderRegistry([adapter]))
+    const account = { id: MULTI_ACCOUNT_ROW_ID, providerCode: 'fixture-multisided', externalAccountId: MULTI_OUTCOME_ACCOUNT_ID }
+    const currentPositions = async () => database.select({ id: positionSnapshots.id, externalId: positionSnapshots.externalId })
+      .from(positionSnapshots).where(and(eq(positionSnapshots.providerAccountId, MULTI_ACCOUNT_ROW_ID), eq(positionSnapshots.isCurrent, true)))
+    const currentCash = async () => database.select({ id: cashBalanceSnapshots.id, assetCode: cashBalanceSnapshots.assetCode })
+      .from(cashBalanceSnapshots).where(and(eq(cashBalanceSnapshots.providerAccountId, MULTI_ACCOUNT_ROW_ID), eq(cashBalanceSnapshots.isCurrent, true)))
+
+    const initial = await service.syncProviderAccount(account)
+    expect(initial.status).toBe('complete')
+    expect(await currentPositions()).toHaveLength(3)
+    expect(await currentCash()).toHaveLength(2)
+    expect(firstPageRequests).toBe(1)
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      failSecondPage = true
+      const partial = await service.syncProviderAccount(account)
+      const [checkpointAfterFailure] = await database.select({ cursor: syncCheckpoints.cursor }).from(syncCheckpoints).where(and(
+        eq(syncCheckpoints.providerAccountId, MULTI_ACCOUNT_ROW_ID),
+        eq(syncCheckpoints.syncName, 'stream:account-state'),
+      ))
+      expect(partial.status).toBe('partial')
+      expect(partial.streams.find((stream) => stream.streamName === 'account-state')?.pagesRead).toBe(1)
+      expect(checkpointAfterFailure?.cursor).toBe('snapshot-page-2')
+      expect(await currentPositions()).toHaveLength(3)
+      expect(await currentCash()).toHaveLength(2)
+
+      failSecondPage = false
+      const beforeRecovery = firstPageRequests
+      const recovered = await service.syncProviderAccount(account)
+      const [recoveredRun] = await database.select({ cursorAtStart: syncRuns.cursorAtStart }).from(syncRuns).where(and(
+        eq(syncRuns.providerAccountId, MULTI_ACCOUNT_ROW_ID),
+        eq(syncRuns.syncName, 'account-state'),
+      )).orderBy(sql`${syncRuns.startedAt} DESC`).limit(1)
+      const positions = await currentPositions()
+      const balances = await currentCash()
+      expect(recovered.status).toBe('complete')
+      expect(recoveredRun?.cursorAtStart).toBeNull()
+      expect(firstPageRequests).toBe(beforeRecovery + 1)
+      expect(positions.map((row) => row.externalId).sort()).toEqual([
+        'snapshot-position-a', 'snapshot-position-b', 'snapshot-position-c',
+      ])
+      expect(balances.map((row) => row.assetCode).sort()).toEqual(['USD', 'USDC'])
+    }
+
+    expect(firstPageRequests).toBe(5)
+    expect(await database.select({ id: positionSnapshots.id }).from(positionSnapshots).where(eq(positionSnapshots.providerAccountId, MULTI_ACCOUNT_ROW_ID)))
+      .toHaveLength(13)
+    expect(await database.select({ id: cashBalanceSnapshots.id }).from(cashBalanceSnapshots).where(eq(cashBalanceSnapshots.providerAccountId, MULTI_ACCOUNT_ROW_ID)))
+      .toHaveLength(8)
+  })
+
+  it('requires complete snapshots to use full-refresh pagination', async () => {
+    const original = new MultiOutcomeFixtureAdapter()
+    const capabilities: ProviderCapabilities = {
+      ...original.capabilities,
+      streams: original.capabilities.streams.map((stream) => stream.name === 'account-state'
+        ? { ...stream, strategy: 'provider_checkpoint' }
+        : stream),
+    }
+    const invalidAdapter: ProviderAdapter = {
+      capabilities,
+      fetchPage: (request) => original.fetchPage(request),
+      normalizePage: (page, streamName) => original.normalizePage(page, streamName),
+    }
+    await expect(new IngestionService(database, new ProviderRegistry([invalidAdapter])).syncProviderAccount(MULTI_ACCOUNT_ROW_ID))
+      .rejects.toMatchObject<Partial<IngestionError>>({ code: 'complete_snapshot_requires_full_refresh' })
   })
 
   it('publishes only fully completed position and cash snapshots while retaining history', async () => {
@@ -528,6 +675,53 @@ describe('migrations and canonical persistence', () => {
       .orderBy(sql`${syncRuns.startedAt} DESC`).limit(1)
     expect(latestRun?.positionSnapshotComplete).toBe(true)
     expect(latestRun?.cashBalanceSnapshotComplete).toBe(true)
+
+    const [coverageAfterEmpty] = await database.select({
+      positionSnapshotAsOf: dataCoverage.snapshotAsOf,
+      lastSuccessfulSyncAt: dataCoverage.lastSuccessfulSyncAt,
+    }).from(dataCoverage).where(and(eq(dataCoverage.providerAccountId, accountId), eq(dataCoverage.entityType, 'positions')))
+    const [cashCoverageAfterEmpty] = await database.select({
+      snapshotAsOf: dataCoverage.snapshotAsOf,
+      lastSuccessfulSyncAt: dataCoverage.lastSuccessfulSyncAt,
+    }).from(dataCoverage).where(and(eq(dataCoverage.providerAccountId, accountId), eq(dataCoverage.entityType, 'cash_balances')))
+    expect(coverageAfterEmpty?.positionSnapshotAsOf?.toISOString()).toBe('2026-11-25T10:00:00.000Z')
+    expect(cashCoverageAfterEmpty?.snapshotAsOf?.toISOString()).toBe('2026-11-25T10:00:00.000Z')
+
+    const olderSnapshotAdapter: ProviderAdapter = {
+      capabilities: original.capabilities,
+      fetchPage: (request) => original.fetchPage(request),
+      normalizePage: (page, streamName) => original.normalizePage(page, streamName),
+    }
+    const staleSnapshot = await new IngestionService(database, new ProviderRegistry([olderSnapshotAdapter])).syncProviderAccount(accountId)
+    const [coverageAfterStaleSnapshot] = await database.select({
+      snapshotAsOf: dataCoverage.snapshotAsOf,
+      lastSuccessfulSyncAt: dataCoverage.lastSuccessfulSyncAt,
+      lastAttemptReasonCode: dataCoverage.lastAttemptReasonCode,
+    }).from(dataCoverage).where(and(eq(dataCoverage.providerAccountId, accountId), eq(dataCoverage.entityType, 'positions')))
+    const [cashCoverageAfterStaleSnapshot] = await database.select({
+      snapshotAsOf: dataCoverage.snapshotAsOf,
+      lastSuccessfulSyncAt: dataCoverage.lastSuccessfulSyncAt,
+      lastAttemptReasonCode: dataCoverage.lastAttemptReasonCode,
+    }).from(dataCoverage).where(and(eq(dataCoverage.providerAccountId, accountId), eq(dataCoverage.entityType, 'cash_balances')))
+    const [staleSnapshotRun] = await database.select({ positionSnapshotComplete: syncRuns.positionSnapshotComplete })
+      .from(syncRuns).where(and(eq(syncRuns.providerAccountId, accountId), eq(syncRuns.syncName, 'account-state')))
+      .orderBy(sql`${syncRuns.startedAt} DESC`).limit(1)
+    expect(staleSnapshot.status).toBe('complete')
+    expect(await database.select({ id: positionSnapshots.id }).from(positionSnapshots).where(and(
+      eq(positionSnapshots.providerAccountId, accountId), eq(positionSnapshots.isCurrent, true),
+    ))).toHaveLength(0)
+    expect(await database.select({ id: cashBalanceSnapshots.id }).from(cashBalanceSnapshots).where(and(
+      eq(cashBalanceSnapshots.providerAccountId, accountId), eq(cashBalanceSnapshots.isCurrent, true),
+    ))).toHaveLength(0)
+    expect(coverageAfterStaleSnapshot?.snapshotAsOf?.toISOString()).toBe('2026-11-25T10:00:00.000Z')
+    expect(coverageAfterStaleSnapshot?.lastSuccessfulSyncAt?.toISOString())
+      .toBe(coverageAfterEmpty?.lastSuccessfulSyncAt?.toISOString())
+    expect(coverageAfterStaleSnapshot?.lastAttemptReasonCode).toBe('stale_snapshot_rejected')
+    expect(cashCoverageAfterStaleSnapshot?.snapshotAsOf?.toISOString()).toBe('2026-11-25T10:00:00.000Z')
+    expect(cashCoverageAfterStaleSnapshot?.lastSuccessfulSyncAt?.toISOString())
+      .toBe(cashCoverageAfterEmpty?.lastSuccessfulSyncAt?.toISOString())
+    expect(cashCoverageAfterStaleSnapshot?.lastAttemptReasonCode).toBe('stale_snapshot_rejected')
+    expect(staleSnapshotRun?.positionSnapshotComplete).toBe(false)
   })
 
   it('does not make an older incremental position observation current', async () => {
@@ -557,6 +751,62 @@ describe('migrations and canonical persistence', () => {
     expect(current[0]?.observedAt.toISOString()).toBe('2026-11-24T10:00:00.000Z')
   })
 
+  it('retains a closed position tombstone and rejects delayed nonzero observations', async () => {
+    const original = new MultiOutcomeFixtureAdapter()
+    const baseService = new IngestionService(database, new ProviderRegistry([original]))
+    await baseService.syncProviderAccount(MULTI_ACCOUNT_ROW_ID)
+    const capabilities: ProviderCapabilities = {
+      ...original.capabilities,
+      streams: original.capabilities.streams.map((stream) => stream.name === 'account-state'
+        ? { ...stream, snapshotSemantics: { positions: 'incremental', cash_balances: 'complete' } }
+        : stream),
+    }
+    const closedAdapter: ProviderAdapter = {
+      capabilities,
+      fetchPage: (request) => original.fetchPage(request),
+      normalizePage: (page, streamName) => original.normalizePage(page, streamName).map((record) => record.kind === 'position'
+        ? {
+          ...record,
+          externalId: 'position-closed-zero',
+          observedAt: '2026-11-25T10:00:00Z',
+          quantity: '0',
+          rawPayload: { ...record.rawPayload, id: 'position-closed-zero', observed: '2026-11-25T10:00:00Z', quantity: '0' },
+        }
+        : record),
+    }
+    await new IngestionService(database, new ProviderRegistry([closedAdapter])).syncProviderAccount(MULTI_ACCOUNT_ROW_ID)
+    const staleAdapter: ProviderAdapter = {
+      capabilities,
+      fetchPage: (request) => original.fetchPage(request),
+      normalizePage: (page, streamName) => original.normalizePage(page, streamName).map((record) => record.kind === 'position'
+        ? {
+          ...record,
+          externalId: 'position-delayed-nonzero',
+          observedAt: '2026-11-24T11:00:00Z',
+          quantity: '50',
+          rawPayload: { ...record.rawPayload, id: 'position-delayed-nonzero', observed: '2026-11-24T11:00:00Z', quantity: '50' },
+        }
+        : record),
+    }
+    await new IngestionService(database, new ProviderRegistry([staleAdapter])).syncProviderAccount(MULTI_ACCOUNT_ROW_ID)
+    const history = await database.select({ externalId: positionSnapshots.externalId, quantity: positionSnapshots.quantity, isCurrent: positionSnapshots.isCurrent })
+      .from(positionSnapshots).where(eq(positionSnapshots.providerAccountId, MULTI_ACCOUNT_ROW_ID))
+    const current = history.filter((row) => row.isCurrent)
+    expect(current).toHaveLength(1)
+    expect(current[0]?.externalId).toBe('position-closed-zero')
+    expect(current[0]?.quantity).toBe('0.000000000000000000')
+    expect(history.find((row) => row.externalId === 'position-delayed-nonzero')?.isCurrent).toBe(false)
+
+    const app = await createTestApp()
+    const response = await app.inject({
+      method: 'GET',
+      url: `/v1/portfolios/${PORTFOLIO_ID}/positions?limit=10&offset=0`,
+      headers: { authorization: `Bearer ${TOKEN}` },
+    })
+    expect(response.statusCode).toBe(200)
+    expect(response.json().items).toHaveLength(0)
+  })
+
   it('keeps newer canonical market metadata when an older source revision arrives', async () => {
     const original = new MultiOutcomeFixtureAdapter()
     const initial = new IngestionService(database, new ProviderRegistry([original]))
@@ -576,6 +826,80 @@ describe('migrations and canonical persistence', () => {
     expect(market?.title).toBe('Who wins the city council seat?')
     expect(market?.sourceUpdatedAt?.toISOString()).toBe('2026-11-24T09:00:00.000Z')
     expect(staleRevisions).toHaveLength(1)
+  })
+
+  it('imports a new market under a newer event without applying stale event metadata', async () => {
+    const original = new MultiOutcomeFixtureAdapter()
+    await new IngestionService(database, new ProviderRegistry([original])).syncProviderAccount(MULTI_ACCOUNT_ROW_ID)
+    const [storedEvent] = await database.select({ id: events.id }).from(events)
+      .where(eq(events.externalId, 'event-city-election-2026'))
+    expect(storedEvent).toBeDefined()
+    await database.update(events).set({
+      name: 'Newest event metadata',
+      sourceUpdatedAt: new Date('2026-11-26T00:00:00Z'),
+    }).where(eq(events.id, storedEvent!.id))
+
+    const newMarket: NormalizedRecord = {
+      kind: 'market',
+      externalEventId: 'event-city-election-2026',
+      eventName: 'Older event metadata from another market',
+      eventDescription: null,
+      resolutionRules: 'The provider resolves this market from its published results.',
+      eventLifecycle: 'open',
+      eventResolvesAt: null,
+      externalMarketId: 'market-added-late',
+      marketTitle: 'Will the late entrant qualify?',
+      marketLifecycle: 'open',
+      settlementRules: 'One outcome pays one unit.',
+      settlementAssetCode: 'USD',
+      eventSourceUpdatedAt: '2026-11-25T00:00:00Z',
+      sourceUpdatedAt: '2026-11-22T00:00:00Z',
+      outcomes: [
+        { externalId: 'candidate-added-yes', name: 'Yes', outcomeType: 'yes', payoutAmount: null, settlementAssetCode: 'USD' },
+        { externalId: 'candidate-added-no', name: 'No', outcomeType: 'no', payoutAmount: null, settlementAssetCode: 'USD' },
+      ],
+      rawPayload: { marketId: 'market-added-late', eventUpdatedAt: '2026-11-25T00:00:00Z', sourceUpdatedAt: '2026-11-22T00:00:00Z' },
+    }
+    const newFill: NormalizedRecord = {
+      kind: 'fill',
+      externalId: 'fill-added-late-market',
+      externalMarketId: 'market-added-late',
+      externalInstrumentId: 'candidate-added-yes',
+      direction: 'buy',
+      occurredAt: '2026-11-24T12:00:00Z',
+      quantity: '1',
+      price: '0.2',
+      feeAmount: '0',
+      feeStatus: 'reported',
+      settlementAssetCode: 'USD',
+      finality: 'confirmed',
+      rawPayload: { id: 'fill-added-late-market' },
+    }
+    const adapter: ProviderAdapter = {
+      capabilities: original.capabilities,
+      fetchPage: (request) => original.fetchPage(request.streamName === 'activity' ? { ...request, checkpoint: null } : request),
+      normalizePage: (page, streamName) => {
+        const records = original.normalizePage(page, streamName)
+        return streamName === 'activity' && page.nextCursor === 'page-2'
+          ? [...records, newMarket, newFill]
+          : records
+      },
+    }
+    const result = await new IngestionService(database, new ProviderRegistry([adapter])).syncProviderAccount(MULTI_ACCOUNT_ROW_ID)
+    const [updatedEvent] = await database.select({ name: events.name, sourceUpdatedAt: events.sourceUpdatedAt }).from(events)
+      .where(eq(events.id, storedEvent!.id))
+    const [addedMarket] = await database.select({ title: marketTable.title, eventId: marketTable.eventId })
+      .from(marketTable).where(eq(marketTable.externalId, 'market-added-late'))
+    const [addedInstrument] = await database.select({ id: instruments.id }).from(instruments)
+      .where(eq(instruments.externalId, 'candidate-added-yes'))
+    const importedFill = await database.select({ id: fills.id }).from(fills).where(eq(fills.externalId, 'fill-added-late-market'))
+    expect(result.status).toBe('complete')
+    expect(updatedEvent?.name).toBe('Newest event metadata')
+    expect(updatedEvent?.sourceUpdatedAt?.toISOString()).toBe('2026-11-26T00:00:00.000Z')
+    expect(addedMarket?.title).toBe('Will the late entrant qualify?')
+    expect(addedMarket?.eventId).toBe(storedEvent!.id)
+    expect(addedInstrument).toBeDefined()
+    expect(importedFill).toHaveLength(1)
   })
 
   it('uses stored provider-account identity instead of caller-supplied provider values', async () => {
@@ -679,8 +1003,12 @@ describe('provider contracts and API security', () => {
     const unavailableMark = coverage.json().items.find((item: { providerCode: string; entityType: string }) =>
       item.providerCode === 'fixture-account-snapshot' && item.entityType === 'prices',
     )
+    const positionCoverage = coverage.json().items.find((item: { providerCode: string; entityType: string }) =>
+      item.providerCode === 'fixture-multisided' && item.entityType === 'positions',
+    )
     expect(unavailableMark.status).toBe('unavailable')
     expect(unavailableMark.reasonCode).toBe('unsupported_by_provider')
+    expect(positionCoverage.snapshotAsOf).toBe('2026-11-24T10:00:00.000Z')
 
     const hiddenPortfolio = await app.inject({
       method: 'GET',
@@ -699,6 +1027,10 @@ describe('provider contracts and API security', () => {
     expect(invalidLimit.body).not.toContain('stack')
     expect(specification.statusCode).toBe(200)
     expect(specification.json().paths['/v1/portfolios/{portfolioId}/positions']).toBeDefined()
+    const coverageProperties = specification.json().paths['/v1/portfolios/{portfolioId}/coverage']
+      .get.responses['200'].content['application/json'].schema.properties.items.items.properties
+    expect(coverageProperties.coverageStart.description).toContain('does not prove continuous history')
+    expect(coverageProperties.coverageEnd.description).toContain('does not prove continuous history')
 
     const syncResponse = await app.inject({
       method: 'POST',
@@ -815,7 +1147,7 @@ function emptyFixtureAdapter(
       name: 'records',
       entities: ALL_ENTITIES,
       strategy: 'provider_checkpoint',
-      snapshotSemantics: { positions: 'complete', cash_balances: 'complete' },
+      snapshotSemantics: { positions: 'incremental', cash_balances: 'incremental' },
     }],
     pagination: 'supported',
     incrementalSync: 'supported',

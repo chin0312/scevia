@@ -45,10 +45,19 @@ describe('sync integrity migration upgrade', () => {
       INSERT INTO scevia.cash_balance_snapshots (id, provider_account_id, source_record_id, external_id, observed_at, balance, asset_code, ingested_at)
       VALUES ('00000000-0000-4000-8000-000000000704', '00000000-0000-4000-8000-000000000201', '00000000-0000-4000-8000-000000000604', 'cash', '2026-11-20T00:00:00Z', 0, 'USD', '2026-11-20T00:00:00Z');
       INSERT INTO scevia.data_coverage (provider_account_id, entity_type, status, history_start, history_end, retrieved_at)
-      VALUES ('00000000-0000-4000-8000-000000000201', 'positions', 'complete', '2026-11-19T00:00:00Z', '2026-11-21T00:00:00Z', '2026-11-20T00:00:00Z');
+      VALUES
+        ('00000000-0000-4000-8000-000000000201', 'positions', 'complete', '2026-11-19T00:00:00Z', '2026-11-21T00:00:00Z', '2026-11-20T00:00:00Z'),
+        ('00000000-0000-4000-8000-000000000201', 'cash_balances', 'complete', '2026-11-20T00:00:00Z', '2026-11-20T00:00:00Z', '2026-11-20T00:00:00Z');
     `)
 
     await applyMigration('0002_sync_integrity_hardening.sql')
+    await database.exec(`
+      UPDATE scevia.sync_runs SET position_snapshot_complete = true, cash_balance_snapshot_complete = true
+      WHERE sync_name = 'legacy_snapshot_import';
+      UPDATE scevia.data_coverage SET source_as_of = '2026-11-21T00:00:00Z'
+      WHERE entity_type IN ('positions', 'cash_balances');
+    `)
+    await applyMigration('0003_phase1_snapshot_watermark.sql')
 
     const positions = await database.query(`
       SELECT id::text, instrument_id::text, quantity::text, is_current, sync_run_id::text
@@ -59,8 +68,12 @@ describe('sync integrity migration upgrade', () => {
       WHERE id = '00000000-0000-4000-8000-000000000704'
     `)
     const coverage = await database.query(`
-      SELECT status::text, last_attempt_at::text
+      SELECT status::text, last_attempt_at::text, snapshot_as_of::text
       FROM scevia.data_coverage WHERE entity_type = 'positions'
+    `)
+    const cashCoverage = await database.query(`
+      SELECT snapshot_as_of::text
+      FROM scevia.data_coverage WHERE entity_type = 'cash_balances'
     `)
     const activePosition = positions.rows.find((row) => row.id === '00000000-0000-4000-8000-000000000701')
     const oldClosedPosition = positions.rows.find((row) => row.id === '00000000-0000-4000-8000-000000000702')
@@ -68,11 +81,14 @@ describe('sync integrity migration upgrade', () => {
 
     expect(activePosition?.is_current).toBe(true)
     expect(oldClosedPosition?.is_current).toBe(false)
-    expect(zeroClosedPosition?.is_current).toBe(false)
+    expect(zeroClosedPosition?.is_current).toBe(true)
     expect(activePosition?.sync_run_id).toBeTruthy()
     expect(cash.rows[0]?.is_current).toBe(true)
     expect(cash.rows[0]?.sync_run_id).toBe(activePosition?.sync_run_id)
     expect(coverage.rows[0]?.status).toBe('complete')
     expect(String(coverage.rows[0]?.last_attempt_at)).toContain('2026-11-20')
+    expect(String(coverage.rows[0]?.snapshot_as_of)).toContain('2026-11-21')
+    expect(String(cashCoverage.rows[0]?.snapshot_as_of)).toContain('2026-11-21')
+    expect(zeroClosedPosition?.is_current).toBe(true)
   })
 })

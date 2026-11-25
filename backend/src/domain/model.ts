@@ -102,6 +102,7 @@ const normalizedMarketSchema = z.object({
   marketLifecycle: z.string().min(1).max(64),
   settlementRules: z.string().max(20_000).nullable(),
   settlementAssetCode: z.string().min(1).max(32).nullable(),
+  eventSourceUpdatedAt: utcTimestampSchema.nullable(),
   sourceUpdatedAt: utcTimestampSchema.nullable(),
   outcomes: z.array(z.object({
     externalId: z.string().min(1).max(256),

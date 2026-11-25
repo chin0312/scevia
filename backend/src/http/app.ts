@@ -3,7 +3,7 @@ import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
 import swagger from '@fastify/swagger'
 import swaggerUi from '@fastify/swagger-ui'
-import { and, desc, eq, sql } from 'drizzle-orm'
+import { and, desc, eq, ne, sql } from 'drizzle-orm'
 import type { ServerConfig } from '../config.js'
 import type { Database } from '../db/client.js'
 import {
@@ -353,7 +353,12 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         .innerJoin(markets, eq(instruments.marketId, markets.id))
         .innerJoin(events, eq(markets.eventId, events.id))
         .innerJoin(sourceRecords, eq(positionSnapshots.sourceRecordId, sourceRecords.id))
-        .where(and(eq(portfolios.id, portfolio.id), eq(portfolios.ownerId, request.principalId!), eq(positionSnapshots.isCurrent, true)))
+        .where(and(
+          eq(portfolios.id, portfolio.id),
+          eq(portfolios.ownerId, request.principalId!),
+          eq(positionSnapshots.isCurrent, true),
+          ne(positionSnapshots.quantity, '0'),
+        ))
         .orderBy(positionSnapshots.providerAccountId, positionSnapshots.instrumentId)
         .limit(limit)
         .offset(offset)
@@ -630,9 +635,22 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
             reasonCode: { type: ['string', 'null'] },
             observedRecordStart: { type: ['string', 'null'], format: 'date-time' },
             observedRecordEnd: { type: ['string', 'null'], format: 'date-time' },
-            coverageStart: { type: ['string', 'null'], format: 'date-time' },
-            coverageEnd: { type: ['string', 'null'], format: 'date-time' },
+            coverageStart: {
+              type: ['string', 'null'],
+              format: 'date-time',
+              description: 'Earliest reported coverage bound; together with coverageEnd this is an envelope and does not prove continuous history.',
+            },
+            coverageEnd: {
+              type: ['string', 'null'],
+              format: 'date-time',
+              description: 'Latest reported coverage bound; together with coverageStart this is an envelope and does not prove continuous history.',
+            },
             sourceAsOf: { type: ['string', 'null'], format: 'date-time' },
+            snapshotAsOf: {
+              type: ['string', 'null'],
+              format: 'date-time',
+              description: 'As-of watermark of the latest complete position or cash snapshot published for this entity.',
+            },
             lastAttemptAt: { type: ['string', 'null'], format: 'date-time' },
             lastAttemptStatus: { type: ['string', 'null'] },
             lastAttemptCoverageStatus: { type: ['string', 'null'] },
@@ -659,6 +677,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         coverageStart: dataCoverage.coverageStart,
         coverageEnd: dataCoverage.coverageEnd,
         sourceAsOf: dataCoverage.sourceAsOf,
+        snapshotAsOf: dataCoverage.snapshotAsOf,
         lastAttemptAt: dataCoverage.lastAttemptAt,
         lastAttemptStatus: dataCoverage.lastAttemptStatus,
         lastAttemptCoverageStatus: dataCoverage.lastAttemptCoverageStatus,

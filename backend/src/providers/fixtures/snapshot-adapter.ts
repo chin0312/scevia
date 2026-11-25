@@ -156,6 +156,7 @@ export class SnapshotFixtureAdapter implements ProviderAdapter {
         marketLifecycle: contract.contractStatus,
         settlementRules: contract.resolution,
         settlementAssetCode: contract.collateral,
+        eventSourceUpdatedAt: null,
         sourceUpdatedAt: null,
         outcomes: contract.outcomes.map((outcome) => ({
           externalId: outcome.legRef,

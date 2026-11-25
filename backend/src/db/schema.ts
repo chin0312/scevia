@@ -461,6 +461,7 @@ export const dataCoverage = scevia.table(
     coverageStart: timestamp('coverage_start', { withTimezone: true }),
     coverageEnd: timestamp('coverage_end', { withTimezone: true }),
     sourceAsOf: timestamp('source_as_of', { withTimezone: true }),
+    snapshotAsOf: timestamp('snapshot_as_of', { withTimezone: true }),
     lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true }),
     lastAttemptStatus: syncStatusEnum('last_attempt_status'),
     lastAttemptCoverageStatus: coverageStatusEnum('last_attempt_coverage_status'),

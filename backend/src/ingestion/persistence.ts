@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto'
-import { Decimal } from 'decimal.js'
 import { and, eq, isNull, sql } from 'drizzle-orm'
 import type { ExtractTablesWithRelations } from 'drizzle-orm'
 import type { NodePgTransaction } from 'drizzle-orm/node-postgres'
@@ -94,7 +93,10 @@ async function upsertSourceRecord(
           revisionType: 'stale_observation',
         }).onConflictDoNothing()
       }
-      return { id: current.id, accepted: false }
+      // Keep the latest source-record payload, but let upsertMarket decide the
+      // event and market revisions independently. A newer event revision can
+      // accompany an older market revision in the same provider response.
+      return { id: current.id, accepted: true }
     }
     if (current.payloadSha256 !== payloadSha256) {
       await tx.insert(sourceRecordRevisions).values({
@@ -145,13 +147,10 @@ async function upsertMarket(
   providerCode: string,
   record: Extract<NormalizedRecord, { kind: 'market' }>,
 ): Promise<boolean> {
-  const incomingUpdatedAt = record.sourceUpdatedAt === null ? null : new Date(record.sourceUpdatedAt)
+  const incomingEventUpdatedAt = record.eventSourceUpdatedAt === null ? null : new Date(record.eventSourceUpdatedAt)
+  const incomingMarketUpdatedAt = record.sourceUpdatedAt === null ? null : new Date(record.sourceUpdatedAt)
   const [existingEvent] = await tx.select({ id: events.id, sourceUpdatedAt: events.sourceUpdatedAt })
     .from(events).where(and(eq(events.providerCode, providerCode), eq(events.externalId, record.externalEventId))).limit(1).for('update')
-  if (existingEvent?.sourceUpdatedAt && (!incomingUpdatedAt || incomingUpdatedAt < existingEvent.sourceUpdatedAt)) return false
-  const [existingMarket] = await tx.select({ id: markets.id, sourceUpdatedAt: markets.sourceUpdatedAt })
-    .from(markets).where(and(eq(markets.providerCode, providerCode), eq(markets.externalId, record.externalMarketId))).limit(1).for('update')
-  if (existingMarket?.sourceUpdatedAt && (!incomingUpdatedAt || incomingUpdatedAt < existingMarket.sourceUpdatedAt)) return false
 
   const [event] = await tx.insert(events).values({
     providerCode,
@@ -161,7 +160,7 @@ async function upsertMarket(
     resolutionRules: record.resolutionRules,
     lifecycle: record.eventLifecycle,
     resolvesAt: record.eventResolvesAt === null ? null : new Date(record.eventResolvesAt),
-    sourceUpdatedAt: incomingUpdatedAt,
+    sourceUpdatedAt: incomingEventUpdatedAt,
     updatedAt: new Date(),
   }).onConflictDoUpdate({
     target: [events.providerCode, events.externalId],
@@ -171,41 +170,60 @@ async function upsertMarket(
       resolutionRules: record.resolutionRules,
       lifecycle: record.eventLifecycle,
       resolvesAt: record.eventResolvesAt === null ? null : new Date(record.eventResolvesAt),
-      sourceUpdatedAt: incomingUpdatedAt,
+      sourceUpdatedAt: incomingEventUpdatedAt,
       updatedAt: new Date(),
     },
-    setWhere: incomingUpdatedAt === null
+    setWhere: incomingEventUpdatedAt === null
       ? isNull(events.sourceUpdatedAt)
-      : sql`${events.sourceUpdatedAt} IS NULL OR ${events.sourceUpdatedAt} <= ${incomingUpdatedAt}`,
+      : sql`${events.sourceUpdatedAt} IS NULL OR ${events.sourceUpdatedAt} <= ${incomingEventUpdatedAt}`,
   }).returning({ id: events.id })
-  if (!event) return false
+  let eventId = event?.id ?? existingEvent?.id
+  if (!eventId) {
+    const [racedEvent] = await tx.select({ id: events.id }).from(events).where(and(
+      eq(events.providerCode, providerCode),
+      eq(events.externalId, record.externalEventId),
+    )).limit(1)
+    eventId = racedEvent?.id
+  }
+  if (!eventId) throw new IngestionError('provider_event_persist_failed')
+
+  const [existingMarket] = await tx.select({ id: markets.id, sourceUpdatedAt: markets.sourceUpdatedAt })
+    .from(markets).where(and(eq(markets.providerCode, providerCode), eq(markets.externalId, record.externalMarketId))).limit(1).for('update')
+  if (existingMarket?.sourceUpdatedAt && (!incomingMarketUpdatedAt || incomingMarketUpdatedAt < existingMarket.sourceUpdatedAt)) return false
 
   const [market] = await tx.insert(markets).values({
-    eventId: event.id,
+    eventId,
     providerCode,
     externalId: record.externalMarketId,
     title: record.marketTitle,
     lifecycle: record.marketLifecycle,
     settlementRules: record.settlementRules,
     settlementAssetCode: record.settlementAssetCode,
-    sourceUpdatedAt: incomingUpdatedAt,
+    sourceUpdatedAt: incomingMarketUpdatedAt,
     updatedAt: new Date(),
   }).onConflictDoUpdate({
     target: [markets.providerCode, markets.externalId],
     set: {
-      eventId: event.id,
+      eventId,
       title: record.marketTitle,
       lifecycle: record.marketLifecycle,
       settlementRules: record.settlementRules,
       settlementAssetCode: record.settlementAssetCode,
-      sourceUpdatedAt: incomingUpdatedAt,
+      sourceUpdatedAt: incomingMarketUpdatedAt,
       updatedAt: new Date(),
     },
-    setWhere: incomingUpdatedAt === null
+    setWhere: incomingMarketUpdatedAt === null
       ? isNull(markets.sourceUpdatedAt)
-      : sql`${markets.sourceUpdatedAt} IS NULL OR ${markets.sourceUpdatedAt} <= ${incomingUpdatedAt}`,
+      : sql`${markets.sourceUpdatedAt} IS NULL OR ${markets.sourceUpdatedAt} <= ${incomingMarketUpdatedAt}`,
   }).returning({ id: markets.id })
-  if (!market) return false
+  if (!market) {
+    const [racedMarket] = await tx.select({ id: markets.id }).from(markets).where(and(
+      eq(markets.providerCode, providerCode),
+      eq(markets.externalId, record.externalMarketId),
+    )).limit(1)
+    if (!racedMarket) throw new IngestionError('provider_market_persist_failed')
+    return false
+  }
 
   for (const outcome of record.outcomes) {
     await tx.insert(instruments).values({
@@ -346,11 +364,17 @@ export async function persistPage(input: PersistPageInput): Promise<PersistPageR
       } else if (record.kind === 'position') {
         const instrumentId = await resolveInstrument(tx, input.providerCode, record.externalMarketId, record.externalInstrumentId)
         const observedAt = new Date(record.observedAt)
+        const [coverage] = await tx.select({ snapshotAsOf: schema.dataCoverage.snapshotAsOf })
+          .from(schema.dataCoverage).where(and(
+            eq(schema.dataCoverage.providerAccountId, input.providerAccountId),
+            eq(schema.dataCoverage.entityType, 'positions'),
+          )).limit(1)
         const [current] = await tx.select({ observedAt: positionSnapshots.observedAt })
           .from(positionSnapshots)
           .where(and(eq(positionSnapshots.providerAccountId, input.providerAccountId), eq(positionSnapshots.instrumentId, instrumentId), eq(positionSnapshots.isCurrent, true)))
           .limit(1)
         const canUpdateCurrent = input.snapshotSemantics.positions === 'incremental'
+          && (!coverage?.snapshotAsOf || observedAt >= coverage.snapshotAsOf)
           && (!current || observedAt >= current.observedAt)
         if (canUpdateCurrent) {
           await tx.update(positionSnapshots).set({ isCurrent: false }).where(and(
@@ -392,7 +416,7 @@ export async function persistPage(input: PersistPageInput): Promise<PersistPageR
             ingestedAt: new Date(input.retrievedAt),
           },
         })
-        if (canUpdateCurrent && !new Decimal(record.quantity).isZero()) {
+        if (canUpdateCurrent) {
           await tx.update(positionSnapshots).set({ isCurrent: true }).where(and(
             eq(positionSnapshots.providerAccountId, input.providerAccountId),
             eq(positionSnapshots.externalId, record.externalId),
@@ -402,11 +426,17 @@ export async function persistPage(input: PersistPageInput): Promise<PersistPageR
         }
       } else if (record.kind === 'cash_balance') {
         const observedAt = new Date(record.observedAt)
+        const [coverage] = await tx.select({ snapshotAsOf: schema.dataCoverage.snapshotAsOf })
+          .from(schema.dataCoverage).where(and(
+            eq(schema.dataCoverage.providerAccountId, input.providerAccountId),
+            eq(schema.dataCoverage.entityType, 'cash_balances'),
+          )).limit(1)
         const [current] = await tx.select({ observedAt: cashBalanceSnapshots.observedAt })
           .from(cashBalanceSnapshots)
           .where(and(eq(cashBalanceSnapshots.providerAccountId, input.providerAccountId), eq(cashBalanceSnapshots.assetCode, record.assetCode), eq(cashBalanceSnapshots.isCurrent, true)))
           .limit(1)
         const canUpdateCurrent = input.snapshotSemantics.cash_balances === 'incremental'
+          && (!coverage?.snapshotAsOf || observedAt >= coverage.snapshotAsOf)
           && (!current || observedAt >= current.observedAt)
         if (canUpdateCurrent) {
           await tx.update(cashBalanceSnapshots).set({ isCurrent: false }).where(and(
@@ -584,6 +614,8 @@ export interface CoverageWriteInput {
   syncStatus: 'complete' | 'partial' | 'failed'
   errorCode: string | null
   pagesPersisted: boolean
+  positionSnapshotComplete: boolean
+  cashBalanceSnapshotComplete: boolean
 }
 
 export async function writeStreamCoverage(tx: DatabaseTransaction, input: CoverageWriteInput): Promise<void> {
@@ -605,6 +637,10 @@ export async function writeStreamCoverage(tx: DatabaseTransaction, input: Covera
       && (report.status === 'unavailable' || report.status === 'unknown')
       && existing !== undefined
       && (existing.status === 'complete' || existing.status === 'partial')
+    const staleSnapshotNotPublished = input.syncStatus === 'complete'
+      && report?.status === 'complete'
+      && ((entityType === 'positions' && input.stream.snapshotSemantics.positions === 'complete' && !input.positionSnapshotComplete)
+        || (entityType === 'cash_balances' && input.stream.snapshotSemantics.cash_balances === 'complete' && !input.cashBalanceSnapshotComplete))
     if (input.syncStatus === 'complete' && report && !temporaryUnavailable) {
       establishedStatus = report.status
       reasonCode = report.reasonCode ?? (report.status === 'partial' ? 'provider_reports_partial_history' : report.status === 'unavailable' ? 'provider_temporarily_unavailable' : null)
@@ -638,8 +674,13 @@ export async function writeStreamCoverage(tx: DatabaseTransaction, input: Covera
       lastAttemptAt: attemptedAt,
       lastAttemptStatus: input.syncStatus,
       lastAttemptCoverageStatus: report?.status ?? 'unknown' as const,
-      lastAttemptReasonCode: report?.reasonCode ?? input.errorCode,
-      lastSuccessfulSyncAt: input.syncStatus === 'complete' ? attemptedAt : existing?.lastSuccessfulSyncAt ?? null,
+      lastAttemptReasonCode: staleSnapshotNotPublished ? 'stale_snapshot_rejected' : report?.reasonCode ?? input.errorCode,
+      lastSuccessfulSyncAt: input.syncStatus === 'complete'
+        && (report?.status === 'complete' || report?.status === 'partial')
+        && (entityType !== 'positions' || input.stream.snapshotSemantics.positions !== 'complete' || input.positionSnapshotComplete)
+        && (entityType !== 'cash_balances' || input.stream.snapshotSemantics.cash_balances !== 'complete' || input.cashBalanceSnapshotComplete)
+        ? attemptedAt
+        : existing?.lastSuccessfulSyncAt ?? null,
       updatedAt: attemptedAt,
     }
     await tx.insert(schema.dataCoverage).values({
@@ -667,16 +708,21 @@ export async function finalizeSnapshots(input: {
 
   if (stream.snapshotSemantics.positions === 'complete' && reports.positions?.status === 'complete') {
     const asOf = new Date(reports.positions.sourceAsOf ?? finishedAt.toISOString())
+    const [coverage] = await tx.select({ snapshotAsOf: schema.dataCoverage.snapshotAsOf })
+      .from(schema.dataCoverage).where(and(
+        eq(schema.dataCoverage.providerAccountId, providerAccountId),
+        eq(schema.dataCoverage.entityType, 'positions'),
+      )).limit(1)
     const [latestCurrent] = await tx.select({ observedAt: positionSnapshots.observedAt }).from(positionSnapshots).where(and(
       eq(positionSnapshots.providerAccountId, providerAccountId),
       eq(positionSnapshots.isCurrent, true),
     )).orderBy(sql`${positionSnapshots.observedAt} DESC`).limit(1)
-    if (!latestCurrent || latestCurrent.observedAt <= asOf) {
+    if ((!coverage?.snapshotAsOf || coverage.snapshotAsOf <= asOf) && (!latestCurrent || latestCurrent.observedAt <= asOf)) {
       await tx.update(positionSnapshots).set({ isCurrent: false }).where(and(
         eq(positionSnapshots.providerAccountId, providerAccountId),
         eq(positionSnapshots.isCurrent, true),
       ))
-      const rows = await tx.select({ id: positionSnapshots.id, instrumentId: positionSnapshots.instrumentId, quantity: positionSnapshots.quantity, observedAt: positionSnapshots.observedAt })
+      const rows = await tx.select({ id: positionSnapshots.id, instrumentId: positionSnapshots.instrumentId, observedAt: positionSnapshots.observedAt })
         .from(positionSnapshots).where(and(
           eq(positionSnapshots.providerAccountId, providerAccountId),
           eq(positionSnapshots.syncRunId, runId),
@@ -687,19 +733,28 @@ export async function finalizeSnapshots(input: {
         if (!prior || row.observedAt > prior.observedAt) currentByInstrument.set(row.instrumentId, row)
       }
       for (const row of currentByInstrument.values()) {
-        if (!new Decimal(row.quantity).isZero()) await tx.update(positionSnapshots).set({ isCurrent: true }).where(eq(positionSnapshots.id, row.id))
+        await tx.update(positionSnapshots).set({ isCurrent: true }).where(eq(positionSnapshots.id, row.id))
       }
+      await tx.update(schema.dataCoverage).set({ snapshotAsOf: asOf, updatedAt: finishedAt }).where(and(
+        eq(schema.dataCoverage.providerAccountId, providerAccountId),
+        eq(schema.dataCoverage.entityType, 'positions'),
+      ))
       positionSnapshotComplete = true
     }
   }
 
   if (stream.snapshotSemantics.cash_balances === 'complete' && reports.cash_balances?.status === 'complete') {
     const asOf = new Date(reports.cash_balances.sourceAsOf ?? finishedAt.toISOString())
+    const [coverage] = await tx.select({ snapshotAsOf: schema.dataCoverage.snapshotAsOf })
+      .from(schema.dataCoverage).where(and(
+        eq(schema.dataCoverage.providerAccountId, providerAccountId),
+        eq(schema.dataCoverage.entityType, 'cash_balances'),
+      )).limit(1)
     const [latestCurrent] = await tx.select({ observedAt: cashBalanceSnapshots.observedAt }).from(cashBalanceSnapshots).where(and(
       eq(cashBalanceSnapshots.providerAccountId, providerAccountId),
       eq(cashBalanceSnapshots.isCurrent, true),
     )).orderBy(sql`${cashBalanceSnapshots.observedAt} DESC`).limit(1)
-    if (!latestCurrent || latestCurrent.observedAt <= asOf) {
+    if ((!coverage?.snapshotAsOf || coverage.snapshotAsOf <= asOf) && (!latestCurrent || latestCurrent.observedAt <= asOf)) {
       await tx.update(cashBalanceSnapshots).set({ isCurrent: false }).where(and(
         eq(cashBalanceSnapshots.providerAccountId, providerAccountId),
         eq(cashBalanceSnapshots.isCurrent, true),
@@ -715,6 +770,10 @@ export async function finalizeSnapshots(input: {
         if (!prior || row.observedAt > prior.observedAt) currentByAsset.set(row.assetCode, row)
       }
       for (const row of currentByAsset.values()) await tx.update(cashBalanceSnapshots).set({ isCurrent: true }).where(eq(cashBalanceSnapshots.id, row.id))
+      await tx.update(schema.dataCoverage).set({ snapshotAsOf: asOf, updatedAt: finishedAt }).where(and(
+        eq(schema.dataCoverage.providerAccountId, providerAccountId),
+        eq(schema.dataCoverage.entityType, 'cash_balances'),
+      ))
       cashBalanceSnapshotComplete = true
     }
   }

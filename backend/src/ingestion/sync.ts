@@ -115,6 +115,9 @@ export class IngestionService {
       for (const entity of Object.keys(stream.snapshotSemantics) as Array<'positions' | 'cash_balances'>) {
         if (!stream.entities.includes(entity)) throw new IngestionError('invalid_provider_stream_configuration')
       }
+      if (Object.values(stream.snapshotSemantics).includes('complete') && stream.strategy !== 'full_refresh') {
+        throw new IngestionError('complete_snapshot_requires_full_refresh')
+      }
     }
     if (names.size === 0) throw new IngestionError('invalid_provider_stream_configuration')
     for (const [entity, capability] of Object.entries(adapter.capabilities.operations) as Array<[CoverageEntity, 'supported' | 'unsupported']>) {
@@ -142,7 +145,8 @@ export class IngestionService {
 
     const runId = randomUUID()
     const startedAt = new Date().toISOString()
-    const cursorAtStart = checkpoint.cursor
+    const restartCompleteSnapshot = Object.values(stream.snapshotSemantics).includes('complete') && checkpoint.cursor !== null
+    const cursorAtStart = restartCompleteSnapshot ? null : checkpoint.cursor
     const checkpointAtStart = stream.strategy === 'provider_checkpoint' ? checkpoint.durableCheckpoint : null
     let cursor = cursorAtStart
     let durableCheckpoint = checkpoint.durableCheckpoint
@@ -164,6 +168,7 @@ export class IngestionService {
       cursorAtStart,
       checkpointAtStart,
       startedAt,
+      resetCursor: restartCompleteSnapshot,
     })
 
     try {
@@ -280,6 +285,7 @@ export class IngestionService {
     cursorAtStart: string | null
     checkpointAtStart: string | null
     startedAt: string
+    resetCursor: boolean
   }): Promise<void> {
     await this.database.transaction(async (tx) => {
       const [lease] = await tx.update(syncCheckpoints).set({ leaseExpiresAt: LEASE_DURATION, updatedAt: new Date(input.startedAt) }).where(and(
@@ -311,6 +317,7 @@ export class IngestionService {
         lastStartedAt: new Date(input.startedAt),
         status: 'running',
         updatedAt: new Date(input.startedAt),
+        ...(input.resetCursor ? { cursor: null } : {}),
       }).where(eq(syncCheckpoints.id, input.streamCheckpointId))
     })
   }
@@ -424,6 +431,8 @@ export class IngestionService {
         syncStatus: input.status,
         errorCode: input.errorCode,
         pagesPersisted: input.pagesRead > 0,
+        positionSnapshotComplete: snapshots.positionSnapshotComplete,
+        cashBalanceSnapshotComplete: snapshots.cashBalanceSnapshotComplete,
       })
     })
   }
