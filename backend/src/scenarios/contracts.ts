@@ -25,7 +25,7 @@ export const evaluationResponse = model({
     assumedStartingCash: numberText, addedCapital: text, withdrawnCapital: text, grossSales: text, purchases: text, fees: numberText, endingCash: numberText, shortfall: numberText })),
   operations: list(model({ bucket: text, instrument: text, initialQuantity: text, proposedQuantity: text, delta: text,
     notional: text, feeAmount: numberText, feeStatus: text, realized: numberText, remainingBasis: numberText, netProceeds: numberText })),
-  positions: list(model({ bucket: text, instrument: text, quantity: text, initialQuantity: text, basis: numberText,
+  positions: list(model({ bucket: text, instrument: text, quantity: text, initialQuantity: text, initialBasis: numberText, initialValue: numberText, initialMark: numberText, basis: numberText,
     mark: numberText, value: numberText, unrealized: numberText, resolvesAt: numberText })),
   allocation: model({ before: allocation, after: allocation }),
   settlement: model({ before: modeled, verified: modeled, conditional: modeled }),

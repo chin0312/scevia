@@ -276,10 +276,15 @@ export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
     funding, additionalCapitalRequired: fixed(shortfall), operations, weightBudget: fixed(weightBudget),
     fundingOrder: 'net_batch_sales_available_for_purchases',
     positions: proposed.map((row) => {
+      const before = baselinePositions.get(key(row.bucket, row.instrument))
+      const originalReference = before ? holdingMark(before) : null
+      const initialValue = before?.quantityKnown === false ? null : !before || new D(before.quantity).isZero()
+        ? zero() : originalReference?.mul(before.quantity) ?? null
       const reference = overrides.get(row.instrument) ?? holdingMark(row)
       const value = row.quantityKnown === false ? null : row.quantity.isZero() ? zero() : reference?.mul(row.quantity) ?? null
       return { ...row, quantity: row.quantity.toFixed(), basis: fixed(row.basis), mark: fixed(reference),
-        initialQuantity: baselinePositions.get(key(row.bucket, row.instrument))?.quantity ?? '0',
+        initialQuantity: before?.quantity ?? '0', initialBasis: before ? before.basis : '0',
+        initialValue: fixed(initialValue), initialMark: fixed(originalReference),
         value: fixed(value), unrealized: fixed(add(value, row.basis?.neg() ?? null)), resolvesAt: instruments.get(row.instrument)?.resolvesAt ?? null }
     }),
     bridge: { evidenceStartingValue: fixed(add(add(initialMarked, actualOpeningCash), pending)), startingValue: fixed(startingValue), addedCapital: fixed(capital), withdrawnCapital: fixed(withdrawn), executionEffect: fixed(executionEffect),

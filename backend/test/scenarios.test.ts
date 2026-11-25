@@ -22,7 +22,7 @@ describe('scenario financial references', () => {
     expect(result.bridge).toMatchObject({ startingValue: '100', endingValue: '98.3', executionEffect: '-1', fees: '-0.7', unexplained: '0' })
     expect(result.funding[0]).toMatchObject({ endingCash: '56.3' })
     expect(result.operations).toMatchObject([{ remainingBasis: '24', netProceeds: '21.5', realized: '5.5' }, { remainingBasis: '5.2' }])
-    expect(result.positions).toMatchObject([{ quantity: '60', value: '36' }, { quantity: '20', value: '6' }])
+    expect(result.positions).toMatchObject([{ initialBasis: '40', initialValue: '60', quantity: '60', value: '36' }, { initialBasis: '0', initialValue: '0', quantity: '20', value: '6' }])
     expect(baseline.holdings[0]!.quantity).toBe('100')
   })
 
