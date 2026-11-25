@@ -1,4 +1,4 @@
-import { and, desc, eq, lte, sql } from 'drizzle-orm'
+import { and, desc, eq, inArray, lte, sql } from 'drizzle-orm'
 import { Decimal } from 'decimal.js'
 import type { Database } from '../db/client.js'
 import { activityFactOccurrences, cashBalanceSnapshots, cashMovements, dataCoverage, fills, instruments, markets, positionSnapshots,
@@ -9,8 +9,9 @@ const limit = 5001
 const fixed = (value: string) => new Decimal(value).toFixed()
 const nullable = (value: string | null) => value === null ? null : fixed(value)
 
-export async function loadProviderEvidence(db: Pick<Database, 'select' | 'selectDistinctOn'>, portfolioId: string, asOf: Date) {
-  const owned = eq(providerAccounts.portfolioId, portfolioId)
+export async function loadProviderEvidence(db: Pick<Database, 'select' | 'selectDistinctOn'>, portfolioId: string, asOf: Date, accountIds?: string[]) {
+  const owned = and(eq(providerAccounts.portfolioId, portfolioId),
+    accountIds === undefined ? undefined : inArray(providerAccounts.id, accountIds))
   const account = { account: providerAccounts.id, venue: providerAccounts.providerCode }
   const source = { sourceRecordId: sourceRecords.id, payloadSha256: sourceRecords.payloadSha256 }
   const tradeRows = await db.select({ ...account, ...source, row: fills, instrument: instruments.id, market: markets.id, event: markets.eventId, title: markets.title, externalInstrument: instruments.externalId }).from(fills)

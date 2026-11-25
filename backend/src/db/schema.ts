@@ -575,3 +575,29 @@ export const portfolioAccountingDecisions = scevia.table('portfolio_accounting_d
   uniqueIndex('accounting_decision_revision_unique').on(table.portfolioId, table.revision),
   index('accounting_decision_record_idx').on(table.portfolioId, table.recordKey, table.revision),
 ])
+
+// Verified binary payout rules are curated evidence. Portfolio users cannot create these through analytics routes.
+export const reviewedBinaryRules = scevia.table('reviewed_binary_rules', {
+  marketId: uuid('market_id').primaryKey().references(() => markets.id, { onDelete: 'cascade' }),
+  yesInstrumentId: uuid('yes_instrument_id').notNull().references(() => instruments.id, { onDelete: 'cascade' }),
+  noInstrumentId: uuid('no_instrument_id').notNull().references(() => instruments.id, { onDelete: 'cascade' }),
+  assetCode: text('asset_code').notNull(),
+  evidence: text('evidence').notNull(),
+  reviewedAt: timestamp('reviewed_at', { withTimezone: true }).notNull(),
+}, (table) => [
+  check('reviewed_binary_distinct_legs', sql`${table.yesInstrumentId} <> ${table.noInstrumentId}`),
+  check('reviewed_binary_evidence_required', sql`length(trim(${table.evidence})) > 0`),
+])
+
+export const reviewedSettlementConstraints = scevia.table('reviewed_settlement_constraints', {
+  leftMarketId: uuid('left_market_id').notNull().references(() => reviewedBinaryRules.marketId, { onDelete: 'cascade' }),
+  rightMarketId: uuid('right_market_id').notNull().references(() => reviewedBinaryRules.marketId, { onDelete: 'cascade' }),
+  kind: text('kind').$type<'equivalent' | 'exclusive' | 'implies'>().notNull(),
+  evidence: text('evidence').notNull(),
+  reviewedAt: timestamp('reviewed_at', { withTimezone: true }).notNull(),
+}, (table) => [
+  uniqueIndex('reviewed_settlement_constraint_unique').on(table.leftMarketId, table.rightMarketId, table.kind),
+  check('reviewed_settlement_constraint_distinct_markets', sql`${table.leftMarketId} <> ${table.rightMarketId}`),
+  check('reviewed_settlement_constraint_kind', sql`${table.kind} in ('equivalent','exclusive','implies')`),
+  check('reviewed_settlement_constraint_evidence_required', sql`length(trim(${table.evidence})) > 0`),
+])

@@ -6,6 +6,7 @@ import { runMigrations } from '../src/db/migrate.js'
 import {
   activityFactOccurrences,
   cashMovements,
+  reviewedBinaryRules,
   financialImportBatches,
   events,
   fills,
@@ -113,6 +114,72 @@ afterAll(async () => {
 })
 
 describe('migrations and canonical persistence', () => {
+  it('returns authorized performance and reviewed settlement risk from persisted accounting evidence', async () => {
+    await new IngestionService(database, providerRegistry).syncProviderAccount(SNAPSHOT_ACCOUNT_ROW_ID)
+    const legs = await database.select({ id: instruments.id, external: instruments.externalId, market: instruments.marketId })
+      .from(instruments)
+    const yes = legs.find((row) => row.external === 'leg-river-yes')!
+    const no = legs.find((row) => row.external === 'leg-river-no')!
+    await database.insert(reviewedBinaryRules).values({ marketId: yes.market, yesInstrumentId: yes.id, noInstrumentId: no.id,
+      assetCode: 'USDC', evidence: 'Reviewed deterministic fixture binary rules', reviewedAt: new Date('2026-11-01T00:00:00Z') })
+    const app = await createTestApp()
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const prefix = `/v1/portfolios/${PORTFOLIO_ID}`
+    const csv = [
+      'venue,account,id,timestamp,sequence,type,instrument,asset,quantity,price,amount,fee,fee_asset,coverage_through',
+      'isolated,performance,cash,2026-11-01T00:00:00Z,,opening_cash,,USD,,,1000,,,',
+      'isolated,performance,inventory,2026-11-01T00:00:00Z,,opening_inventory,,USD,,,,,,',
+      'isolated,performance,history,2026-11-01T00:00:00Z,,history_complete,,USD,,,,,,2026-11-09T00:00:00Z',
+      'isolated,performance,growth1,2026-11-02T00:00:00Z,,reward,,USD,,,100,,,',
+      'isolated,performance,deposit,2026-11-03T00:00:00Z,,deposit,,USD,,,1000,,,',
+      'isolated,performance,growth2,2026-11-04T00:00:00Z,,reward,,USD,,,105,,,',
+      'isolated,risk,cash,2026-11-01T00:00:00Z,,opening_cash,,USDC,,,0,,,',
+      'isolated,risk,inventory,2026-11-01T00:00:00Z,,opening_inventory,,USDC,,,,,,',
+      `isolated,risk,open-y,2026-11-01T00:00:00Z,,opening_position,${yes.id},USDC,100,,60,,,`,
+      `isolated,risk,open-n,2026-11-01T00:00:00Z,,opening_position,${no.id},USDC,80,,32,,,`,
+      `isolated,risk,mark-y,2026-11-04T00:00:00Z,,mark,${yes.id},USDC,,0.6,,,,`,
+      `isolated,risk,mark-n,2026-11-04T00:00:00Z,,mark,${no.id},USDC,,0.4,,,,`,
+    ].join('\n')
+    const preview = await app.inject({ method: 'POST', url: prefix + '/imports/preview', headers, payload: { csv } })
+    expect(preview.statusCode, preview.body).toBe(200)
+    const review = preview.json()
+    const confirm = await app.inject({ method: 'POST', url: prefix + '/imports/' + review.batchId + '/confirm?reviewRevision=' + review.reviewRevision, headers })
+    expect(confirm.statusCode, confirm.body).toBe(200)
+    const from = '2026-11-01T00:00:00Z'
+    const asOf = '2026-11-04T00:00:00Z'
+    const perfQuery = new URLSearchParams({ asset: 'USD', from, asOf, accounts: 'performance' })
+    const perf = await app.inject({ method: 'GET', url: prefix + '/analytics/performance?' + perfQuery, headers })
+    expect(perf.statusCode, perf.body).toBe(200)
+    expect(perf.json()).toMatchObject({ returns: { twr: { value: '0.155' } }, bridge: { netInvestmentGain: { value: '205' } } })
+    const riskQuery = new URLSearchParams({ asset: 'USDC', asOf, accounts: 'risk' })
+    const risk = await app.inject({ method: 'GET', url: prefix + '/analytics/exposure?' + riskQuery, headers })
+    expect(risk.statusCode, risk.body).toBe(200)
+    expect(risk.json().settlement.result).toMatchObject({ reference: '92', worst: { payout: '80' }, best: { payout: '100' } })
+    const beforeMark = new URLSearchParams({ asset: 'USDC', asOf: '2026-11-03T00:00:00Z', accounts: 'risk' })
+    const historicalRisk = await app.inject({ method: 'GET', url: prefix + '/analytics/exposure?' + beforeMark, headers })
+    expect(historicalRisk.json().settlement.result).toMatchObject({ reference: null, worst: { payout: '80', changeFromReference: null } })
+    const sampled = new URLSearchParams(perfQuery)
+    sampled.set('sampling', 'monthly')
+    const monthly = await app.inject({ method: 'GET', url: prefix + '/analytics/performance?' + sampled, headers })
+    expect(monthly.json().returns).toEqual(perf.json().returns)
+    expect(monthly.json().history).toHaveLength(2)
+    const recordPage = await app.inject({ method: 'GET', url: prefix + '/accounting/records?search=growth2', headers })
+    const change = { changes: [{ key: recordPage.json().items[0].key, action: 'exclude' }] }
+    const adjustment = await app.inject({ method: 'POST', url: prefix + '/accounting/adjustments/preview', headers, payload: change })
+    expect(adjustment.statusCode).toBe(200)
+    const applied = await app.inject({ method: 'POST', url: prefix + '/accounting/adjustments/confirm', headers,
+      payload: { ...change, revision: adjustment.json().revision } })
+    expect(applied.statusCode).toBe(200)
+    const revised = await app.inject({ method: 'GET', url: prefix + '/analytics/performance?' + perfQuery, headers })
+    expect(revised.json()).toMatchObject({ context: { accountingScope: 'user_selected' }, returns: { twr: { value: '0.1' } } })
+    expect(revised.json().context.evidenceRevision).not.toBe(perf.json().context.evidenceRevision)
+    const denied = await app.inject({ method: 'GET', url: `/v1/portfolios/${OTHER_PORTFOLIO_ID}/analytics/exposure?` + riskQuery, headers })
+    expect(denied.statusCode).toBe(404)
+    riskQuery.set('accounts', 'missing')
+    const wrongAccount = await app.inject({ method: 'GET', url: prefix + '/analytics/exposure?' + riskQuery, headers })
+    expect(wrongAccount.statusCode).toBe(422)
+  })
+
   it('previews and confirms owned financial CSV batches idempotently', async () => {
     const app = await createTestApp()
     const headers = { authorization: `Bearer ${TOKEN}` }

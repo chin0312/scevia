@@ -1,0 +1,38 @@
+# Phase 4 analytical API and methodology
+
+Analytics are separate read models over the effective Phase 3 evidence and weighted-average ledger. Owner authorization and existing reconciliation decisions are applied before calculation. Each response includes an as-of timestamp, selected asset and accounts, evidence digest, accounting scope and full-account coverage status. The exposure response additionally reports the reviewed settlement evidence digest. A changed digest calls for refreshed data. Analytical requests have no portfolio write effects.
+
+## Requests
+
+All paths require the existing owner credential and start with `/v1/portfolios/{portfolioId}`.
+
+| Route | Parameters and outputs |
+| --- | --- |
+| GET `/analytics/performance` | Required `asset`, `from` and `asOf` as ISO timestamps with offsets. Optional `accounts` as comma-separated account identifiers and `sampling=daily\|weekly\|monthly`. Returns endpoint values, cash-flow boundaries, P&L bridge, returns, history, attribution and trading activity. |
+| GET `/analytics/exposure` | Required `asset` and `asOf`; optional `accounts`. Returns instrument/event exposure, concentration and allocation, payout scenarios, feasible joint extrema and constituent contributions, pending entitlements and the known resolution timeline. |
+
+Unknown or out-of-portfolio account IDs are rejected. An omitted account filter means all known accounts. Choose explicit accounts when the workspace has multiple reporting assets or empty accounts. Each call uses one asset code with no implicit FX conversion, and the response never claims complete external-account coverage. Selective provider reads use portfolio and requested account IDs in SQL. Earlier activity stays in replay so opening state is reconstructed from the complete available input.
+
+For example, a fractional TWR response of `{"value":"0.155","availability":"calculated","reason":null}` represents 15.5%. A missing result carries a null value and a reason, e.g. `coverage_value_or_flow_boundary_missing`. A known valuation subtotal is separate from the aggregate selected value. Selected value may reflect estimated or declared evidence. No output implies that external-provider history was independently reconciled.
+
+## Valuation, performance and attribution
+
+- Historical replay uses event-time cutoffs and Phase 3 opening inventory, cash and mark eligibility. A later mark cannot support an earlier point. Active corrections are applied retrospectively. Market metadata in exposure comes from the current catalog, so the response does not reconstruct past catalog states. Calendar cutoffs are UTC. The engine computes endpoint and daily points, and optional sampling keeps weekly Sundays or month ends plus endpoints. Return and drawdown calculations still use the daily base.
+- The requested opening instant includes events at that instant. Activity and flows are scoped to `(from, asOf]`. A valuation bridge compares endpoint values. Net investment gain subtracts classified net owner cash flows, with a coverage and classification requirement. Provider deposits and withdrawals lack independent investment-contribution classification and cannot automatically qualify.
+- TWR values immediately before and after classified external flows, and links each end/start ratio. A nonpositive base, missing or stale valuation, incomplete coverage, or cash flow with another same-time event makes the affected return unavailable. A deposit alone is not gain. Annualized MWR uses dated investor cash flows with ACT/365, one sign change and a bracketed root between -99% and 10,000%; at most 64 nonzero payments. Cases outside those constraints remain unavailable.
+- Drawdown is the drop from the prior peak of the flow-adjusted index sampled at the reported calculation cutoffs. Annualized volatility uses sample volatility of eligible consecutive daily intervals and multiplies by the square root of 365. No risk-free or benchmark series is assumed.
+- Attribution uses posted realized ledger entries plus the change in known marked unrealized components at the two endpoints. It groups canonical instruments into events where possible and keeps unmapped components and the residual visible. The residual can include missing or non-attributed effects; it is not force-allocated.
+- Trading counts use posted fills after reconciliation, with gross quantity-times-price notional. Attached charges, standalone charges and standalone rebates remain separate. Unknown attached fees are counted separately. Excluded records and duplicate source observations do not become extra trades.
+
+## Exposure and settlement
+
+- Allocation denominators contain known marked open positions in the selected asset and exclude cash. Missing marks are counted. Allocation and HHI can be read by instrument, market, event, venue and account. Unmapped rows are labeled and independent unmapped instruments are not equated across accounts.
+- A settlement group requires an internally reviewed binary market rule, two canonical outcome IDs, an explicit collateral asset, unit payout to the winner and zero to the loser. It also requires eligible reconstructed quantities. Arbitrary CSV labels, market titles and thematic relationships establish no payout logic. Migration 0012 creates rule and relationship stores; neither is exposed for user writes. There are no preapproved live rules.
+- A reviewed, oriented market-level relationship can establish equivalence, exclusion, or implication between YES outcomes. The engine expands connected reviewed markets, including unheld intermediary markets, then enumerates joint outcomes. It is exact within the loaded verified scope and returns unavailable when a connected rule is missing or a graph bound is exceeded. Opposing holdings settle jointly in one scenario. Unsupported holdings are separately listed. No probability, expected payout or statistical correlation is inferred.
+- Gross payout and mark-relative change are distinct. The worst feasible path shows additive leg contributions for that same path, rather than combining incompatible own worst cases. Cash-inclusive values require complete selected cash and eligible pending entitlements and a supported position set. Gross payout excludes cash and pending entitlements, which prevents double counting. Reported resolution dates appear in the timeline; unknown dates remain undated.
+
+## Limits, measured workload and Phase 5 handoff
+
+The performance endpoint supports up to 366 UTC date buckets, 800 replays and 200,000 evidence-row/replay combinations. Provider and existing transaction-management limits still apply. Settlement enumeration is capped at 12 connected reviewed markets and 200 edges. With 2,159 effective synthetic rows across three accounts after 50 exclusions, the calculation produced 33 valuations, closing value 3,021.50 and TWR about 0.7167%. One local in-process run took 142 ms and increased RSS by 38 MiB after changing the cache to retain point summaries instead of every full replay. This measurement excludes database loading, HTTP and concurrent traffic.
+
+The pure functions in the analytics modules are the reuse boundary for Phase 5 scenario calculations. Scenario code may supply hypothetical inputs separately. The actual analytics path accepts curated review evidence only. Remaining work includes incremental checkpointed replay for long, busy histories, paginated management when provider evidence hits full-load limits, broader reviewed payout structures, and production workload benchmarking. Sharpe, Sortino, correlation and verified FX conversion remain evidence-dependent extensions. The existing Phase 2A access restrictions remain in place.

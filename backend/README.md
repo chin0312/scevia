@@ -93,3 +93,5 @@ The live Polymarket HTTP integration defaults to disabled. Enable it only for pe
 See [Accounting](docs/ACCOUNTING.md) for the source-independent CSV format, import workflow, weighted-average replay and Phase 3 scope.
 
 The accounting API supports independent imported accounts, manual records, transaction filters, and previewed bulk reconciliation choices. See the owner-controlled transaction management section in [Accounting](docs/ACCOUNTING.md).
+
+[Phase 4 analytics](docs/ANALYTICS.md) documents portfolio performance, allocation and reviewed settlement risk endpoints.

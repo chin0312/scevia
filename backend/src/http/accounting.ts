@@ -1,14 +1,16 @@
 import { Decimal } from 'decimal.js'
 import { createHash, randomUUID } from 'node:crypto'
-import { and, count, desc, eq, inArray, isNotNull, isNull, lte } from 'drizzle-orm'
+import { and, count, desc, eq, inArray, isNotNull, isNull, lte, or } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { Database } from '../db/client.js'
-import { financialImportBatches as batches, portfolios, providerAccounts, sourceRecords, portfolioAccountingDecisions as decisions } from '../db/schema.js'
+import { financialImportBatches as batches, portfolios, providerAccounts, sourceRecords, instruments, markets, events, reviewedBinaryRules, reviewedSettlementConstraints, portfolioAccountingDecisions as decisions } from '../db/schema.js'
 import { normalizeManualEvent, parseFinancialCsv } from '../accounting/csv.js'
 import { loadProviderEvidence } from '../accounting/provider-evidence.js'
 import type { Evidence, PortfolioDecision } from '../accounting/model.js'
 import { applyDecisions, compose, digest, potentialOverlaps, recordKey, replacementDecisions } from '../accounting/decisions.js'
+import { analyzePerformance } from '../analytics/performance.js'
+import { analyzeExposure } from '../analytics/exposure.js'
 import { replayAccounting } from '../accounting/ledger.js'
 
 const uuid = { type: 'string', format: 'uuid' }
@@ -212,11 +214,12 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
   })
 
   async function loadEvidence(portfolioId: string, cutoff: string, preview?: Pick<typeof batches.$inferSelect,
-    'id' | 'observations' | 'associatedAccountId' | 'sourceLinks'> & { manual?: boolean; acceptUnlinked?: boolean }, read?: AccountingRead, replaces?: string) {
+    'id' | 'observations' | 'associatedAccountId' | 'sourceLinks'> & { manual?: boolean; acceptUnlinked?: boolean }, read?: AccountingRead, replaces?: string, accountScope?: string[]) {
     const readAll = async (tx: AccountingRead) => {
       const confirmed = await tx.select().from(batches).where(and(eq(batches.portfolioId, portfolioId),
         isNotNull(batches.confirmedAt), isNull(batches.supersededAt))).orderBy(batches.id)
-      const provider = await loadProviderEvidence(tx, portfolioId, new Date(cutoff))
+      const provider = await loadProviderEvidence(tx, portfolioId, new Date(cutoff),
+        accountScope?.filter((account) => z.uuid().safeParse(account).success))
       const latest = await tx.selectDistinctOn([decisions.recordKey], {
         key: decisions.recordKey, decision: decisions.decision, revision: decisions.revision,
       }).from(decisions).where(eq(decisions.portfolioId, portfolioId)).orderBy(decisions.recordKey, desc(decisions.revision)).limit(10001)
@@ -533,6 +536,147 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       }),
     }
   }
+
+  const AnalyticalDecimal = Decimal.clone({ precision: 70, rounding: Decimal.ROUND_HALF_EVEN })
+  const analyticsQuery = z.object({
+    asset: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$/),
+    asOf: z.iso.datetime({ offset: true }),
+    accounts: z.string().max(4000).optional(),
+  })
+  const performanceQuery = analyticsQuery.extend({ from: z.iso.datetime({ offset: true }),
+    sampling: z.enum(['daily', 'weekly', 'monthly']).optional() })
+  function selectAccounts(input: Awaited<ReturnType<typeof loadEvidence>>, requested?: string) {
+    const available = new Set([...input.accounts.map((account) => account.account),
+      ...input.records.map((record) => record.adjusted.account)])
+    const accounts = requested === undefined ? [...available].sort() : [...new Set(requested.split(','))].sort()
+    if (accounts.length > 100 || accounts.some((account) => !available.has(account))) return null
+    return accounts
+  }
+  function analyticalContext(input: Awaited<ReturnType<typeof loadEvidence>>, accounts: string[], asOf: string, asset: string) {
+    const accountSet = new Set(accounts)
+    const evidence = input.evidence.filter((item) => accountSet.has(item.observation.account))
+    return { evidence, context: { asOf, asset, accounts,
+      evidenceRevision: digest(input.records.filter((record) => accountSet.has(record.adjusted.account))
+        .map((record) => [record.key, record.revision, record.decision]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))),
+      accountingScope: input.records.some((record) => accountSet.has(record.adjusted.account) && record.decision !== null)
+        ? 'user_selected' : 'available_evidence',
+      fullAccountCoverage: 'unverified',
+    } }
+  }
+
+  app.get<{ Params: { portfolioId: string }; Querystring: unknown }>(prefix + '/analytics/performance', {
+    schema: { ...auth, tags: ['analytics'], summary: 'Read selected-asset historical portfolio performance',
+      params: portfolioParams, querystring: { type: 'object', required: ['asset', 'asOf', 'from'],
+        properties: z.toJSONSchema(performanceQuery).properties ?? {} } },
+  }, async (request, reply) => {
+    const { portfolioId } = request.params
+    if (!await owned(portfolioId, request.principalId!)) return reply.code(404).send(missing)
+    const query = performanceQuery.safeParse(request.query)
+    if (!query.success) return reply.code(422).send({ error: { code: 'invalid_analytics_scope' } })
+    const asOf = new Date(query.data.asOf).toISOString()
+    const from = new Date(query.data.from).toISOString()
+    if (from >= asOf) return reply.code(422).send({ error: { code: 'invalid_analytics_range' } })
+    return database.transaction(async (tx) => {
+      const input = await loadEvidence(portfolioId, asOf, undefined, tx, undefined, query.data.accounts?.split(','))
+      if (input.truncated) return reply.code(422).send({ error: { code: 'provider_evidence_limit' } })
+      const accounts = selectAccounts(input, query.data.accounts)
+      if (!accounts) return reply.code(422).send({ error: { code: 'invalid_analytics_accounts' } })
+      const { context, evidence } = analyticalContext(input, accounts, asOf, query.data.asset)
+      try {
+        const data = analyzePerformance(evidence, accounts, query.data.asset, from, asOf)
+        const identified = data.attribution.instruments.map(({ instrument }) => instrument).filter((id) => z.uuid().safeParse(id).success)
+        const metadata = identified.length ? await tx.select({ instrument: instruments.id, market: markets.id, event: markets.eventId })
+          .from(instruments).innerJoin(markets, eq(instruments.marketId, markets.id)).where(inArray(instruments.id, identified)) : []
+        const identities = new Map(metadata.map((row) => [row.instrument, row]))
+        const byEvent = new Map<string, { realized: Decimal; unrealized: Decimal }>()
+        const attribution = { ...data.attribution, instruments: data.attribution.instruments.map((row) => {
+          const identity = identities.get(row.instrument)
+          const key = identity?.event ?? 'unmapped'
+          const previous = byEvent.get(key) ?? { realized: new AnalyticalDecimal(0), unrealized: new AnalyticalDecimal(0) }
+          byEvent.set(key, { realized: previous.realized.plus(row.knownRealized ?? 0),
+            unrealized: previous.unrealized.plus(row.knownUnrealizedChange ?? 0) })
+          return { ...row, market: identity?.market ?? null, event: identity?.event ?? null }
+        }), byEvent: [...byEvent.entries()].map(([event, value]) => ({
+          event, knownRealized: value.realized.toFixed(), knownUnrealizedChange: value.unrealized.toFixed(),
+        })) }
+        const sampling = query.data.sampling ?? 'daily'
+        if (sampling === 'daily') return { context, from, sampling, ...data, attribution }
+        const history = data.history.filter((point, index, points) => {
+          if (index === 0 || index === points.length - 1) return true
+          const date = new Date(point.asOf)
+          return sampling === 'weekly' ? date.getUTCDay() === 0 : new Date(date.getTime() + 1).getUTCDate() === 1
+        })
+        return { context, from, sampling, ...data, attribution, history }
+      }
+      catch (error) {
+        if (error instanceof Error && ['analytics_range_limit', 'analytics_replay_limit'].includes(error.message)) {
+          return reply.code(422).send({ error: { code: error.message } })
+        }
+        throw error
+      }
+    }, { isolationLevel: 'repeatable read', accessMode: 'read only' })
+  })
+
+  app.get<{ Params: { portfolioId: string }; Querystring: unknown }>(prefix + '/analytics/exposure', {
+    schema: { ...auth, tags: ['analytics'], summary: 'Read allocation, resolution timeline and reviewed settlement risk',
+      params: portfolioParams, querystring: { type: 'object', required: ['asset', 'asOf'],
+        properties: z.toJSONSchema(analyticsQuery).properties ?? {} } },
+  }, async (request, reply) => {
+    const { portfolioId } = request.params
+    if (!await owned(portfolioId, request.principalId!)) return reply.code(404).send(missing)
+    const query = analyticsQuery.safeParse(request.query)
+    if (!query.success) return reply.code(422).send({ error: { code: 'invalid_analytics_scope' } })
+    const { asset } = query.data
+    const asOf = new Date(query.data.asOf).toISOString()
+    return database.transaction(async (tx) => {
+      const input = await loadEvidence(portfolioId, asOf, undefined, tx, undefined, query.data.accounts?.split(','))
+      if (input.truncated) return reply.code(422).send({ error: { code: 'provider_evidence_limit' } })
+      const accounts = selectAccounts(input, query.data.accounts)
+      if (!accounts) return reply.code(422).send({ error: { code: 'invalid_analytics_accounts' } })
+      const { context, evidence } = analyticalContext(input, accounts, asOf, asset)
+      const state = replayAccounting(evidence, asOf)
+      const ids = [...new Set(state.holdings.filter((row) => row.asset === asset)
+        .map((row) => row.instrument).filter((id) => z.uuid().safeParse(id).success))]
+      if (ids.length > 2000) return reply.code(422).send({ error: { code: 'analytics_instrument_limit' } })
+      const relevant = ids.length ? await tx.select({ market: instruments.marketId }).from(instruments)
+        .where(inArray(instruments.id, ids)) : []
+      const marketIds = [...new Set(relevant.map((item) => item.market))]
+      const graph = new Set((marketIds.length ? await tx.select({ market: reviewedBinaryRules.marketId })
+        .from(reviewedBinaryRules).where(and(inArray(reviewedBinaryRules.marketId, marketIds),
+          lte(reviewedBinaryRules.reviewedAt, new Date(asOf)), eq(reviewedBinaryRules.assetCode, asset))) : [])
+        .map((rule) => rule.market))
+      let graphLimit = graph.size > 12
+      let edges: Array<{ left: string; right: string; kind: 'equivalent' | 'exclusive' | 'implies'; evidence: string }> = []
+      while (graph.size && !graphLimit) {
+        const nodes = [...graph]
+        edges = await tx.select({ left: reviewedSettlementConstraints.leftMarketId, right: reviewedSettlementConstraints.rightMarketId,
+          kind: reviewedSettlementConstraints.kind, evidence: reviewedSettlementConstraints.evidence,
+        }).from(reviewedSettlementConstraints).where(and(
+          or(inArray(reviewedSettlementConstraints.leftMarketId, nodes), inArray(reviewedSettlementConstraints.rightMarketId, nodes)),
+          lte(reviewedSettlementConstraints.reviewedAt, new Date(asOf)))).limit(201)
+        if (edges.length > 200) { graphLimit = true; break }
+        for (const edge of edges) { graph.add(edge.left); graph.add(edge.right) }
+        graphLimit = graph.size > 12
+        if (nodes.length === graph.size) break
+      }
+      const includedMarkets = graphLimit ? marketIds : [...new Set([...marketIds, ...graph])]
+
+      const metadata = includedMarkets.length ? await tx.select({
+        instrument: instruments.id, market: markets.id, event: events.id, outcome: instruments.outcomeName,
+        resolvesAt: events.resolvesAt, title: markets.title, lifecycle: markets.lifecycle,
+      }).from(instruments).innerJoin(markets, eq(instruments.marketId, markets.id))
+        .innerJoin(events, eq(markets.eventId, events.id)).where(inArray(markets.id, includedMarkets)) : []
+      const rules = includedMarkets.length ? await tx.select({
+        market: reviewedBinaryRules.marketId, event: markets.eventId, yes: reviewedBinaryRules.yesInstrumentId,
+        no: reviewedBinaryRules.noInstrumentId, asset: reviewedBinaryRules.assetCode, evidence: reviewedBinaryRules.evidence,
+        reviewedAt: reviewedBinaryRules.reviewedAt,
+      }).from(reviewedBinaryRules).innerJoin(markets, eq(reviewedBinaryRules.marketId, markets.id))
+        .where(inArray(reviewedBinaryRules.marketId, includedMarkets)) : []
+      return { context, metadataBasis: 'current_catalog',
+        settlementEvidenceRevision: digest([rules.map((rule) => ({ ...rule, reviewedAt: rule.reviewedAt.toISOString() })), edges]),
+        ...analyzeExposure(state, asset, accounts, metadata, rules, edges, graph, graphLimit) }
+    }, { isolationLevel: 'repeatable read', accessMode: 'read only' })
+  })
 
   app.get<{ Params: { portfolioId: string }; Querystring: { asOf?: string; view?: 'summary' | 'detail' } }>(prefix + '/accounting', {
     schema: {
