@@ -1,0 +1,451 @@
+import {
+  check,
+  index,
+  integer,
+  jsonb,
+  numeric,
+  pgSchema,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+} from 'drizzle-orm/pg-core'
+import { sql } from 'drizzle-orm'
+
+const scevia = pgSchema('scevia')
+
+export const accountKindEnum = scevia.enum('account_kind', [
+  'public_wallet',
+  'authenticated_account',
+  'file_import',
+  'fixture',
+])
+export const feeStatusEnum = scevia.enum('fee_status', ['reported', 'estimated', 'unavailable'])
+export const tradeDirectionEnum = scevia.enum('trade_direction', ['buy', 'sell'])
+export const cashMovementKindEnum = scevia.enum('cash_movement_kind', [
+  'deposit',
+  'withdrawal',
+  'transfer',
+  'adjustment',
+])
+export const positionOriginEnum = scevia.enum('position_origin', ['provider_reported', 'reconstructed'])
+export const reconciliationStatusEnum = scevia.enum('reconciliation_status', [
+  'not_started',
+  'pending',
+  'matched',
+  'difference',
+])
+export const syncStatusEnum = scevia.enum('sync_status', [
+  'idle',
+  'running',
+  'complete',
+  'partial',
+  'failed',
+  'unavailable',
+])
+export const coverageStatusEnum = scevia.enum('coverage_status', [
+  'complete',
+  'partial',
+  'unavailable',
+  'unknown',
+])
+export const relationshipClassEnum = scevia.enum('relationship_class', [
+  'equivalent',
+  'mutually_exclusive',
+  'related',
+  'unknown',
+])
+export const relationshipReviewEnum = scevia.enum('relationship_review', [
+  'unverified',
+  'confirmed',
+  'rejected',
+])
+
+export const users = scevia.table('users', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  authSubject: text('auth_subject').notNull().unique(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+})
+
+export const portfolios = scevia.table(
+  'portfolios',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    ownerId: uuid('owner_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index('portfolios_owner_id_idx').on(table.ownerId)],
+)
+
+export const providerAccounts = scevia.table(
+  'provider_accounts',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    portfolioId: uuid('portfolio_id').notNull().references(() => portfolios.id, { onDelete: 'cascade' }),
+    providerCode: text('provider_code').notNull(),
+    externalAccountId: text('external_account_id').notNull(),
+    label: text('label').notNull(),
+    kind: accountKindEnum('kind').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    disabledAt: timestamp('disabled_at', { withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex('provider_accounts_source_unique').on(
+      table.portfolioId,
+      table.providerCode,
+      table.externalAccountId,
+    ),
+    index('provider_accounts_portfolio_id_idx').on(table.portfolioId),
+  ],
+)
+
+export const events = scevia.table(
+  'events',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    providerCode: text('provider_code').notNull(),
+    externalId: text('external_id').notNull(),
+    name: text('name').notNull(),
+    description: text('description'),
+    resolutionRules: text('resolution_rules'),
+    lifecycle: text('lifecycle').notNull().default('unknown'),
+    resolvesAt: timestamp('resolves_at', { withTimezone: true }),
+    sourceUpdatedAt: timestamp('source_updated_at', { withTimezone: true }),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('events_provider_external_unique').on(table.providerCode, table.externalId),
+    index('events_provider_code_idx').on(table.providerCode),
+  ],
+)
+
+export const markets = scevia.table(
+  'markets',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    eventId: uuid('event_id').notNull().references(() => events.id, { onDelete: 'cascade' }),
+    providerCode: text('provider_code').notNull(),
+    externalId: text('external_id').notNull(),
+    title: text('title').notNull(),
+    lifecycle: text('lifecycle').notNull().default('unknown'),
+    settlementRules: text('settlement_rules'),
+    settlementAssetCode: text('settlement_asset_code'),
+    sourceUpdatedAt: timestamp('source_updated_at', { withTimezone: true }),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('markets_provider_external_unique').on(table.providerCode, table.externalId),
+    index('markets_event_id_idx').on(table.eventId),
+  ],
+)
+
+export const instruments = scevia.table(
+  'instruments',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    marketId: uuid('market_id').notNull().references(() => markets.id, { onDelete: 'cascade' }),
+    externalId: text('external_id').notNull(),
+    outcomeName: text('outcome_name').notNull(),
+    outcomeType: text('outcome_type').notNull().default('unknown'),
+    payoutAmount: numeric('payout_amount', { precision: 38, scale: 18 }),
+    settlementAssetCode: text('settlement_asset_code'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('instruments_market_external_unique').on(table.marketId, table.externalId),
+    index('instruments_market_id_idx').on(table.marketId),
+  ],
+)
+
+export const eventRelationships = scevia.table(
+  'event_relationships',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    eventAId: uuid('event_a_id').notNull().references(() => events.id, { onDelete: 'cascade' }),
+    eventBId: uuid('event_b_id').notNull().references(() => events.id, { onDelete: 'cascade' }),
+    relationshipClass: relationshipClassEnum('relationship_class').notNull(),
+    review: relationshipReviewEnum('review').notNull().default('unverified'),
+    note: text('note'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('event_relationships_pair_unique').on(table.eventAId, table.eventBId),
+    check('event_relationships_distinct_ordered', sql`${table.eventAId} < ${table.eventBId}`),
+  ],
+)
+
+export const sourceRecords = scevia.table(
+  'source_records',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    providerAccountId: uuid('provider_account_id')
+      .notNull()
+      .references(() => providerAccounts.id, { onDelete: 'cascade' }),
+    recordType: text('record_type').notNull(),
+    externalRecordId: text('external_record_id').notNull(),
+    payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
+    payloadSha256: text('payload_sha256').notNull(),
+    normalizationVersion: text('normalization_version').notNull(),
+    sourceOccurredAt: timestamp('source_occurred_at', { withTimezone: true }),
+    retrievedAt: timestamp('retrieved_at', { withTimezone: true }).notNull(),
+    ingestedAt: timestamp('ingested_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('source_records_external_unique').on(
+      table.providerAccountId,
+      table.recordType,
+      table.externalRecordId,
+    ),
+    index('source_records_retrieved_at_idx').on(table.providerAccountId, table.retrievedAt),
+  ],
+)
+
+export const sourceRecordRevisions = scevia.table(
+  'source_record_revisions',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    sourceRecordId: uuid('source_record_id').notNull().references(() => sourceRecords.id, { onDelete: 'cascade' }),
+    payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
+    payloadSha256: text('payload_sha256').notNull(),
+    normalizationVersion: text('normalization_version').notNull(),
+    retrievedAt: timestamp('retrieved_at', { withTimezone: true }).notNull(),
+    recordedAt: timestamp('recorded_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('source_record_revisions_hash_unique').on(table.sourceRecordId, table.payloadSha256),
+    index('source_record_revisions_recorded_idx').on(table.sourceRecordId, table.recordedAt),
+  ],
+)
+
+export const fills = scevia.table(
+  'fills',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    providerAccountId: uuid('provider_account_id')
+      .notNull()
+      .references(() => providerAccounts.id, { onDelete: 'cascade' }),
+    instrumentId: uuid('instrument_id').notNull().references(() => instruments.id),
+    sourceRecordId: uuid('source_record_id').notNull().references(() => sourceRecords.id),
+    externalId: text('external_id').notNull(),
+    direction: tradeDirectionEnum('direction').notNull(),
+    occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull(),
+    quantity: numeric('quantity', { precision: 38, scale: 18 }).notNull(),
+    price: numeric('price', { precision: 38, scale: 18 }).notNull(),
+    feeAmount: numeric('fee_amount', { precision: 38, scale: 18 }),
+    feeStatus: feeStatusEnum('fee_status').notNull(),
+    settlementAssetCode: text('settlement_asset_code').notNull(),
+    finality: text('finality').notNull().default('unknown'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('fills_account_external_unique').on(table.providerAccountId, table.externalId),
+    index('fills_account_occurred_idx').on(table.providerAccountId, table.occurredAt, table.id),
+    check('fills_quantity_positive', sql`${table.quantity} > 0`),
+    check('fills_price_nonnegative', sql`${table.price} >= 0`),
+    check(
+      'fills_fee_status_consistent',
+      sql`(${table.feeStatus} = 'unavailable' AND ${table.feeAmount} IS NULL) OR (${table.feeStatus} IN ('reported', 'estimated') AND ${table.feeAmount} IS NOT NULL)`,
+    ),
+  ],
+)
+
+export const cashMovements = scevia.table(
+  'cash_movements',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    providerAccountId: uuid('provider_account_id')
+      .notNull()
+      .references(() => providerAccounts.id, { onDelete: 'cascade' }),
+    sourceRecordId: uuid('source_record_id').notNull().references(() => sourceRecords.id),
+    externalId: text('external_id').notNull(),
+    movementKind: cashMovementKindEnum('movement_kind').notNull(),
+    occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull(),
+    signedAmount: numeric('signed_amount', { precision: 38, scale: 18 }).notNull(),
+    assetCode: text('asset_code').notNull(),
+    feeAmount: numeric('fee_amount', { precision: 38, scale: 18 }),
+    feeStatus: feeStatusEnum('fee_status').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('cash_movements_account_external_unique').on(table.providerAccountId, table.externalId),
+    index('cash_movements_account_occurred_idx').on(table.providerAccountId, table.occurredAt, table.id),
+    check('cash_movements_nonzero_amount', sql`${table.signedAmount} <> 0`),
+    check(
+      'cash_movements_fee_status_consistent',
+      sql`(${table.feeStatus} = 'unavailable' AND ${table.feeAmount} IS NULL) OR (${table.feeStatus} IN ('reported', 'estimated') AND ${table.feeAmount} IS NOT NULL)`,
+    ),
+  ],
+)
+
+export const settlements = scevia.table(
+  'settlements',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    providerAccountId: uuid('provider_account_id')
+      .notNull()
+      .references(() => providerAccounts.id, { onDelete: 'cascade' }),
+    instrumentId: uuid('instrument_id').notNull().references(() => instruments.id),
+    sourceRecordId: uuid('source_record_id').notNull().references(() => sourceRecords.id),
+    externalId: text('external_id').notNull(),
+    settledAt: timestamp('settled_at', { withTimezone: true }).notNull(),
+    quantity: numeric('quantity', { precision: 38, scale: 18 }).notNull(),
+    payoutAmount: numeric('payout_amount', { precision: 38, scale: 18 }).notNull(),
+    assetCode: text('asset_code').notNull(),
+    feeAmount: numeric('fee_amount', { precision: 38, scale: 18 }),
+    feeStatus: feeStatusEnum('fee_status').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('settlements_account_external_unique').on(table.providerAccountId, table.externalId),
+    index('settlements_account_settled_idx').on(table.providerAccountId, table.settledAt, table.id),
+    check('settlements_quantity_positive', sql`${table.quantity} > 0`),
+    check('settlements_payout_nonnegative', sql`${table.payoutAmount} >= 0`),
+    check(
+      'settlements_fee_status_consistent',
+      sql`(${table.feeStatus} = 'unavailable' AND ${table.feeAmount} IS NULL) OR (${table.feeStatus} IN ('reported', 'estimated') AND ${table.feeAmount} IS NOT NULL)`,
+    ),
+  ],
+)
+
+export const positionSnapshots = scevia.table(
+  'position_snapshots',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    providerAccountId: uuid('provider_account_id')
+      .notNull()
+      .references(() => providerAccounts.id, { onDelete: 'cascade' }),
+    instrumentId: uuid('instrument_id').notNull().references(() => instruments.id),
+    sourceRecordId: uuid('source_record_id').notNull().references(() => sourceRecords.id),
+    externalId: text('external_id').notNull(),
+    observedAt: timestamp('observed_at', { withTimezone: true }).notNull(),
+    quantity: numeric('quantity', { precision: 38, scale: 18 }).notNull(),
+    averageCostPrice: numeric('average_cost_price', { precision: 38, scale: 18 }),
+    markPrice: numeric('mark_price', { precision: 38, scale: 18 }),
+    markAt: timestamp('mark_at', { withTimezone: true }),
+    settlementAssetCode: text('settlement_asset_code'),
+    origin: positionOriginEnum('origin').notNull(),
+    reconciliationStatus: reconciliationStatusEnum('reconciliation_status').notNull().default('not_started'),
+    ingestedAt: timestamp('ingested_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('position_snapshots_account_external_unique').on(table.providerAccountId, table.externalId),
+    index('position_snapshots_latest_idx').on(table.providerAccountId, table.instrumentId, table.observedAt),
+    check('position_snapshots_avg_cost_nonnegative', sql`${table.averageCostPrice} IS NULL OR ${table.averageCostPrice} >= 0`),
+    check('position_snapshots_mark_nonnegative', sql`${table.markPrice} IS NULL OR ${table.markPrice} >= 0`),
+  ],
+)
+
+export const cashBalanceSnapshots = scevia.table(
+  'cash_balance_snapshots',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    providerAccountId: uuid('provider_account_id')
+      .notNull()
+      .references(() => providerAccounts.id, { onDelete: 'cascade' }),
+    sourceRecordId: uuid('source_record_id').notNull().references(() => sourceRecords.id),
+    externalId: text('external_id').notNull(),
+    observedAt: timestamp('observed_at', { withTimezone: true }).notNull(),
+    balance: numeric('balance', { precision: 38, scale: 18 }).notNull(),
+    assetCode: text('asset_code').notNull(),
+    ingestedAt: timestamp('ingested_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('cash_balance_snapshots_account_external_unique').on(table.providerAccountId, table.externalId),
+    index('cash_balance_snapshots_latest_idx').on(table.providerAccountId, table.observedAt),
+  ],
+)
+
+export const priceObservations = scevia.table(
+  'price_observations',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    providerAccountId: uuid('provider_account_id')
+      .notNull()
+      .references(() => providerAccounts.id, { onDelete: 'cascade' }),
+    instrumentId: uuid('instrument_id').notNull().references(() => instruments.id),
+    sourceRecordId: uuid('source_record_id').notNull().references(() => sourceRecords.id),
+    externalId: text('external_id').notNull(),
+    observedAt: timestamp('observed_at', { withTimezone: true }).notNull(),
+    price: numeric('price', { precision: 38, scale: 18 }).notNull(),
+    priceKind: text('price_kind').notNull(),
+    assetCode: text('asset_code').notNull(),
+    ingestedAt: timestamp('ingested_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('price_observations_account_external_unique').on(table.providerAccountId, table.externalId),
+    index('price_observations_instrument_time_idx').on(table.instrumentId, table.observedAt),
+    check('price_observations_nonnegative', sql`${table.price} >= 0`),
+  ],
+)
+
+export const syncRuns = scevia.table(
+  'sync_runs',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    providerAccountId: uuid('provider_account_id')
+      .notNull()
+      .references(() => providerAccounts.id, { onDelete: 'cascade' }),
+    syncName: text('sync_name').notNull(),
+    status: syncStatusEnum('status').notNull(),
+    cursorAtStart: text('cursor_at_start'),
+    cursorAtEnd: text('cursor_at_end'),
+    startedAt: timestamp('started_at', { withTimezone: true }).defaultNow().notNull(),
+    finishedAt: timestamp('finished_at', { withTimezone: true }),
+    pagesRead: integer('pages_read').notNull().default(0),
+    recordsSeen: integer('records_seen').notNull().default(0),
+    recordsRejected: integer('records_rejected').notNull().default(0),
+    errorCode: text('error_code'),
+  },
+  (table) => [
+    index('sync_runs_account_started_idx').on(table.providerAccountId, table.startedAt),
+    check('sync_runs_pages_nonnegative', sql`${table.pagesRead} >= 0`),
+    check('sync_runs_records_nonnegative', sql`${table.recordsSeen} >= 0 AND ${table.recordsRejected} >= 0`),
+  ],
+)
+
+export const syncCheckpoints = scevia.table(
+  'sync_checkpoints',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    providerAccountId: uuid('provider_account_id')
+      .notNull()
+      .references(() => providerAccounts.id, { onDelete: 'cascade' }),
+    syncName: text('sync_name').notNull(),
+    cursor: text('cursor'),
+    status: syncStatusEnum('status').notNull().default('idle'),
+    lastRunId: uuid('last_run_id'),
+    lastStartedAt: timestamp('last_started_at', { withTimezone: true }),
+    lastCompletedAt: timestamp('last_completed_at', { withTimezone: true }),
+    leaseToken: uuid('lease_token'),
+    leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true }),
+    lastErrorCode: text('last_error_code'),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('sync_checkpoints_account_name_unique').on(table.providerAccountId, table.syncName),
+    index('sync_checkpoints_lease_idx').on(table.leaseExpiresAt),
+  ],
+)
+
+export const dataCoverage = scevia.table(
+  'data_coverage',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    providerAccountId: uuid('provider_account_id')
+      .notNull()
+      .references(() => providerAccounts.id, { onDelete: 'cascade' }),
+    entityType: text('entity_type').notNull(),
+    status: coverageStatusEnum('status').notNull(),
+    reasonCode: text('reason_code'),
+    historyStart: timestamp('history_start', { withTimezone: true }),
+    historyEnd: timestamp('history_end', { withTimezone: true }),
+    sourceAsOf: timestamp('source_as_of', { withTimezone: true }),
+    retrievedAt: timestamp('retrieved_at', { withTimezone: true }).notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('data_coverage_account_entity_unique').on(table.providerAccountId, table.entityType),
+    index('data_coverage_account_updated_idx').on(table.providerAccountId, table.updatedAt),
+  ],
+)
