@@ -107,30 +107,38 @@ Smaller screens reflow instead of shrinking.
 - **Toast** `.toast`: confirmations ("Scenario saved"). Auto-dismisses after 4 s. Never used for errors that need action.
 
 ## Scenario Lab specific
-- **Scenario setup** (`Setup` in `ScenarioLab.tsx`):
-  - starting portfolio (Seg);
-  - added capital per platform (`FundingInput`);
-  - **FeeSetup:** *Provider estimate* (with assumed role Taker/Maker), *Custom* (% of notional) or *Excluded*. Every option changes the calculation.
-  - **Constraints** (`details.adv`, collapsed unless the scenario has some): verified relationships shown read-only; add or remove hypothetical *can’t both resolve YES* / *always resolve the same way* pairs between events **in this scenario**; duplicates are blocked.
+- **LabHome** (`pages/lab/Home.tsx`, `.lab-home`, `.start-card`, `.scn-card`): the entry. Two start cards (*Modify current portfolio* with an inherited-portfolio preview `.start-facts` and its accounts; *Build from scratch* with optional starting capital per venue), saved-scenario cards (name, start, positions, value at marks, status), optional examples. No charts. Empty: “No scenarios yet”.
+- **Scenario views** (`ScenarioLab.tsx`, `.lab-nav`): `Tabs` *Build · Analyze · Compare* under the page head; the Build tab shows a count flag when rows are incomplete. The SectionRail lists the current view's sections plus the scenario switcher (`.rail-keep`). Don't add a second navigation level.
+- **AssumptionsBar** (`pages/lab/Setup.tsx`, `.assume-bar`): one line summarizing start, added capital, fees, constraints and price basis, with *Edit assumptions*.
+- **AssumptionsDrawer** (`Setup.tsx`, `Drawer`): **FeeSetup** (*Provider estimate* with assumed role Taker/Maker, *Custom* % of notional, *Excluded*; every option changes the calculation), **Constraints** (verified relationships read-only; add/remove hypothetical *can’t both resolve YES* / *always resolve the same way* pairs between events in this scenario; duplicates blocked), **Methodology** (`details.adv`).
+- **StartSetup** (`Setup.tsx`, `#setup`): starting portfolio (Seg, asks before changing what held rows mean) and capital per venue (`FundingInput`). Top of Build.
+- **PositionsCard / PositionRow** (`pages/lab/Builder.tsx`, `.brow.brow-sel`):
+  - **Toolbar:** *Size by* Seg (Shares / $ Amount / % of start, ⓘ explains the conversion) and *Add markets…*.
+  - **Columns:** select, instrument (Held / New, reference price, resolution, account or funding scope), current, target in the chosen unit with the converted figure below, trade chip, assumed price with “Use reference …”, notional, est. fee, remove.
+  - **Bulk bar** `.bulk-bar` (`role="toolbar"`) when rows are selected: *Use reference prices*, *Set target to 0*, *Reset to current size* (held only), *Remove from scenario*, *Clear selection*; states the remove-vs-exit difference; an `.undo-line` offers Undo.
+  - **Layout:** a table above 1000px card width; 600–1000px: position on its own line, figures in one row; below 600px: two-column cards.
+  - **States:** incomplete rows say what is missing; invalid rows are tinted with `role="alert"`; shortfall rows carry a status note; inputs keep the user's text while focused and show the committed value otherwise.
+- **BuildSummary** (`Builder.tsx`, `#build-summary`, `.bs`): sticky beside the positions on wide screens. Starting cash, purchases, sales, est. fees (+ n unavailable), cash after trades (per venue), funding warning `.bs-warn`, value at marks and its change, settlement range, *Analyze this scenario*.
+- **AddPositionModal** (`pages/lab/AddPosition.tsx`, “Add markets”): tabs *Your holdings* (checkboxes per account holding, *Select all*) / *Search markets* (provider, category, open-only, priced-only filters; error with *Try again*; stale responses dropped) / *Paste link*. Outcomes are toggle buttons (`.outcome-btn`, `aria-pressed`). One selection per scenario row across tabs. Footer basket `.addpos-basket` with removable chips and *Add N positions*. Disabled: closed/resolved markets and rows already in the scenario. Label: the catalog's “Sample market data”.
+- **Analyze charts** (`pages/lab/charts.tsx`; every chart has an `aria-label` text equivalent and direct labels):
+  - **RangeRows**: worst ○ — ● best per row with a tick for value at marks; no midpoint. Compact layout puts the range text above the bar.
+  - **Waterfall**: totals and signed steps; the axis may start above zero and then says so (“Axis starts at …”).
+  - **StackBars** `.stack-bars`: 100% bars per row; segments are buttons (`aria-pressed`) that filter a table; unavailable / empty states.
+  - **PairBars** `.pair-bars`: before (outline) vs. after (solid, gain/loss) per row around zero; row labels can be links.
+- **AnalyzeView** (`pages/lab/Analyze.tsx`): `.an-summary` (two primary `.an-big` + four `.an-mini`), Value bridge, Settlement range, Allocation (basis: open positions / incl. cash; by category / platform / event), Event exposure (worst settlement / committed), Resolution timeline (`.tl-months`, `.tl-list`), Outcome matrix, Payoff by event, Positions in detail (filter bar from allocation/exposure selection; *Edit* jumps to the row in Build and focuses it).
+- **OutcomeMatrix / Dumbbell** (`pages/lab/Impact.tsx`): events come from the scenario's own start and result. “Not possible” cells name the linked constraints (followed through other events). Two events are needed for the matrix.
+- **CompareView** (`pages/lab/Compare.tsx`): scenario picker `.pick-chip` (up to 5, plus the actual portfolio), basis Seg (Absolute / Change from start / % of own start), Settlement range (RangeRows), Capital deployment and Category allocation (StackBars), detailed table (setup rows incl. added capital **by venue** and starting value; each value with its change vs. its own start; “change unavailable”). A callout when setups differ.
 
-  A read-only **Facts** block separates source facts and fixed methodology from user assumptions. It always comes before results.
-- **Portfolio builder row** `PositionRow` (`pages/lab/Builder.tsx`, `.brow`): one grid row per position.
-  - **Columns:** instrument (Held / New), current shares, target-shares input, trade chip, assumed-price input with “Use reference …”, notional, estimated fee, remove.
-  - **Layout:** a table on wide cards; at ≤1000px card width (container query) each row restacks into a two-column card.
-  - **States:** incomplete rows say what is missing, invalid rows are tinted with `role="alert"`, and shortfall rows carry a status note.
-- **AddPositionModal** (`pages/lab/AddPosition.tsx`), with tabs *Your holdings* / *Search markets* / *Paste link*.
-  - It talks only to the `MarketCatalog` interface (`lib/markets.ts`) and labels results with the catalog's label (“Sample market data”).
-  - Outcomes are buttons (`.outcome-btn`), disabled for closed or resolved markets and for instruments already in the scenario.
-  - Link states: invalid, unsupported provider, not found, unavailable, multiple markets, resolved.
-- **AllocationImpact** (`pages/lab/Impact.tsx`): before/after market-value table by category, platform or event, with % of open-position value, change in points, New/Exited chips, cash share, and paired bars (hidden on narrow cards).
-- **OutcomeMatrix / Dumbbell** (`pages/lab/Impact.tsx`):
-  - Events come from the scenario's own start and result, never from a fixed list.
-  - Two events are needed for the matrix; empty states otherwise.
-- **Compare** (`ScenarioLab.tsx`):
-  - setup rows (starts from, added capital, fees, hypothetical constraints);
-  - each value with its change *vs. its own start*;
-  - “change unavailable” when either side is unavailable;
-  - a callout when starts differ.
+## Accounts & records (`pages/Records.tsx`, sample workspace)
+- **Account cards** `.acct-card`: venue + account label, kind chip (Connected / Imported / Manual), sources, record range, opening-balance status, unknown-fee and review counts, *Show records*.
+- **Record filters** `.rec-filters` (`role="search"`): search, account, venue, source, type, status (incl. corrected), date range, potential duplicates, *Clear filters*.
+- **Selection scope bar** `.sel-scope` (`role="toolbar"`): count, *Select all N matching* (beyond the page), *Clear selection*, bulk actions (each opens a preview), *Undo: …*.
+- **Record table** `.rec-table`: paginated (10); excluded rows struck through; status chips (Needs review, Excluded/Duplicate, Corrected, Possible duplicate); unknown cash effect and unreported fees shown as such.
+- **ConfirmBulk** (Modal): what the action means, records changing state, change in included cash and shares, unknown amounts counted.
+- **RecordDetail** (Drawer): original vs. effective values, decision, duplicate resolution (*Duplicate of … : exclude this one* / *Distinct trades: keep both*), include/exclude/restore, correction form (imported/manual only).
+- **ImportFlow** (Modal, `.steps`): File → Account → Preview → Confirm → Result, sample files only.
+- **ManualRecord** (Modal): imported/manual accounts only.
+
 - **AdjustmentRow** `.adj`: position + action chip (Buy / Sell / Exit / No change) + Slider + hypothetical price Field + cash impact.
 - **BeforeAfterTable** `.ba`: metric · current · scenario · change (DeltaBadge, colour by "better for the user", not by sign).
 - **OutcomeMatrix** `.matrix`: 2×2 (or 2×N) joint outcomes, each tile shows scenario P&L, "was" P&L, and the change. Unknown dependencies → `warn` chip on the card.

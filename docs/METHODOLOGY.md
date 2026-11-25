@@ -22,18 +22,38 @@ The app imports data only through `web/src/data/portfolio.ts`.
 
 | Figure | Definition |
 |---|---|
-| Cost basis (capital committed) | Σ shares × fill price of open positions. Fees are not included. |
-| Unrealized P&L | Σ shares × (mark − average cost), before fees. |
-| Realized P&L | Σ over closed trades of shares × (exit − entry) − that trade's fees. Resolved trades exit at $1 or $0. |
-| Fees paid | Closed-trade fees + fees on fills of open positions. Each fee is counted once. |
-| Net P&L | Realized + unrealized − fees on open fills. |
+| Cost basis (capital committed) | Σ (shares × fill price + fill fee) of open positions: weighted-average cost with acquisition fees capitalized. This is the backend accounting convention (`backend/docs/ACCOUNTING.md`, Phase 3). |
+| Average cost | Cost basis ÷ shares (includes acquisition fees). |
+| Unrealized P&L | Σ shares × mark − cost basis of open positions (after acquisition fees). |
+| Realized P&L | Σ over closed trades of shares × (exit − entry) − that trade's fees. Resolved trades exit at $1 or $0. Sale fees reduce proceeds. |
+| Fees paid | Closed-trade fees + fees on fills of open positions (the latter are inside cost basis). Each fee is counted once. |
+| Net P&L | Realized + unrealized. |
 | Net deposits | Deposits − withdrawals. Never performance. |
-| Cash | Net deposits + realized − Σ (cost + fees) of open fills, per platform. |
+| Cash | Net deposits + realized − cost basis of open positions, per platform. |
 | Portfolio value | Cash + Σ shares × mark. **Invariant:** value − net deposits = net P&L. |
 | Win rate | Trades that resolved in your favour ÷ resolved trades. Early exits are excluded. |
 | Allocation share / weight | A position's or segment's shares × mark ÷ Σ shares × mark of open positions in the current platform scope. Cash is excluded. Segment shares sum to 100%, and each segment's positions partition it (`allocation()`). |
 
 Platform filters apply the same formulas to that platform's records. Platform figures always sum to the total.
+
+**Changed in this round (alignment with backend Phase 3).** Earlier versions kept acquisition fees out of cost basis and
+subtracted them separately in net P&L. Net P&L, cash and portfolio value are unchanged by the switch; cost basis, average
+cost, unrealized P&L, per-event capital at risk and "change in unrealized" (Analytics) now include acquisition fees.
+Tests: `finance.test.ts › account identities`, `periods and analytics`.
+
+**Ownership.** These are calculations over the *sample* ledger. For actual portfolios, the backend replay
+(weighted average, decimal arithmetic, evidence decisions, settlement entitlements separate from cash) is the accounting
+authority; the frontend will consume its holdings, cash and availability fields rather than keep a second ledger
+(see `docs/DEVELOPMENT.md › Accounting ownership`). Remaining differences until then:
+
+| Topic | Frontend sample | Backend Phase 3 |
+|---|---|---|
+| Numbers | JavaScript numbers | Decimal strings, 70-digit working precision, half-even rounding |
+| Fees | Always known for open fills; closed trades have `feeKnown` | Reported / estimated / unavailable; an unavailable buy fee invalidates basis |
+| Settlement | Pays $1/$0 directly into cash | Records an entitlement; cash moves on redemption |
+| Partial exits | Closed trades are pre-aggregated | Buy/sell fills replayed with weighted average |
+| Missing marks / opening balances | Not modelled (sample is complete) | Valuation is null; known components are scoped |
+| Evidence decisions | None in the portfolio (see the sample records workspace) | Include / exclude / duplicate / correct / restore, append-only |
 
 ## History
 
@@ -159,11 +179,16 @@ Each scenario is measured against **its own starting point**: the baseline plus 
   - the source (sample or provider).
 
   It starts at zero shares. It is valued at its reference price; if there is none, market value and allocation are **unavailable**, never 0.
-- **Quantities** are whole shares from 0 to 10,000,000. This is a temporary assumption: real providers may allow fractional shares.
+- **Quantities** are from 0 to 10,000,000 in steps of 0.01 share (the hypothetical input step). Venue lot sizes and minimums aren't enforced: they will come from instrument metadata, and no exchange rule is invented meanwhile.
+- **Sizing.** A target can be entered three ways that describe the same position (`targetShares`):
+  - *Shares*: the quantity.
+  - *$ Amount*: the target position value **at the assumed price**; shares = amount ÷ price, rounded **down** to 0.01 (never spends more than typed). Fees are on top.
+  - *% of start*: a percentage of the scenario's **starting value at reference marks** (cash and added capital included); amount = % × starting value, then as above.
+  Switching the view converts the display only. Typing sets the target in that unit, and the typed unit is saved, so a later price change keeps the typed amount, not the share count. A % of start is not a market-value weight: if the assumed price differs from the mark, the position's weight at marks differs (tested).
 - **Incomplete or invalid rows are excluded from results and block Save.** A missing quantity or price is never read as 0.
 
 **Trades.**
-- **Buy:** cost basis += shares × price; cash −= shares × price + estimated fee. Realized P&L is unchanged.
+- **Buy:** cost basis += shares × price + estimated fee (acquisition fees are capitalized); cash −= shares × price + estimated fee. Realized P&L is unchanged.
 - **Sell / exit:** realized += shares × (price − average cost) − fee; cost basis falls in proportion; cash += proceeds − fee.
 - **Fees:** see *Trading fees on hypothetical trades* below. Slippage and order-book depth are not modelled.
 
@@ -192,7 +217,7 @@ Each scenario is measured against **its own starting point**: the baseline plus 
 **Inputs.**
 - **Parsing:** quantities, prices, capital and fee % are parsed strictly (`lib/inputs.ts`).
   - Scientific notation, signs, and extra decimals are rejected.
-  - Prices take up to 3 decimals; shares are whole numbers; money takes up to 2 decimals.
+  - Prices take up to 3 decimals; shares and money take up to 2 decimals.
 - **While a field is empty, being typed or invalid, the row has no value** for it: it is excluded or marked invalid, and the previous value is never reused.
 
 **Results are expressed as portfolio value.**
@@ -234,17 +259,31 @@ Each scenario is measured against **its own starting point**: the baseline plus 
 - Reference prices, timestamps and fee parameters are a market-data snapshot carried with each new instrument. Refreshing them doesn't make a scenario "unsaved"; results show the reference time.
 - Identity is **provider + market + outcome**. Sharing an event and a side doesn't make two positions the same contract.
 
-**Allocation impact.**
-- Market value (shares × reference price) is grouped by category, platform or event, before and after.
-- **Denominator:** open-position market value, with cash excluded. Cash share = cash ÷ (cash + open-position value).
-- Allocation is not capital committed and not settlement loss.
+**Analysis (Scenario Lab › Analyze).** Each chart answers one question and has an exact table or text equivalent.
 
-**Comparison.**
-- Each column shows its starting point, added capital and assumptions.
+| View | Definition |
+|---|---|
+| Summary | Value at reference marks and feasible settlement range are primary; cash after trades, capital committed, estimated fees and funding required are secondary. Each shows its start value. |
+| Value bridge | Start value (before added capital) + added capital + Σ traded shares × (mark − assumed price) − estimated fees = scenario value at marks. Purchases and sales themselves are transfers between cash and contracts, never gains or losses. Unavailable when a traded instrument has no mark. Reconciles exactly (`workspace.test.ts`). |
+| Settlement range | Worst and best feasible value (cash + $1 per winning share) at the start and in the scenario, with the value at marks marked. No midpoint or distribution is drawn: outcomes are not weighted by likelihood. |
+| Allocation | Market value at reference marks by category, platform or event. One denominator per view: *open positions* (cash excluded) or *incl. cash* (cash + positions). Cash-inclusive is unavailable when cash is negative (a funding requirement). Selecting a segment filters the position table. |
+| Event exposure | Per event, all holdings netted: worst settlement P&L (min over outcomes, vs. cost basis) or capital committed (cost basis incl. fees), before → after. |
+| Resolution timeline | Committed capital still exposed after each month, by **scheduled resolution date**. Resolution is not a confirmed redemption date; cash timing is not modelled. |
+| Outcome matrix | P&L of two events' positions in each joint outcome. A cell is "Not possible" when it can't be extended to a feasible outcome of the whole scenario: constraints are followed through other events (A ≡ B and B × C ⇒ A and C can't both be YES), so a pair never looks possible when the portfolio isn't. The cell names the linked constraints and their provenance. |
+| Positions in detail | Start and scenario shares, trade, notional, fee, value at mark and cost basis per position. |
+
+**Comparison (Scenario Lab › Compare).**
+- The user picks up to five scenarios (and whether to show the actual portfolio).
+- Bases: *absolute*; *change from start* (value − the scenario's own starting value at marks); *% of own start* (only when that starting value is positive; otherwise unavailable).
+- Scenarios are flagged as differently set up when any of these differ: starting portfolio, added capital **per venue** (equal totals on different venues are different funding), fee treatment, constraints, or the date of the actual portfolio they start from.
+
+**Comparison table.**
+- Each column shows its starting point (with the portfolio date), added capital by venue, starting value and assumptions.
 - Each change is shown "vs. start", that is, against that scenario's own starting point, so added capital and different baselines are not read as performance.
-- Columns with different starts are flagged.
 
 **Saved state.**
 - A save snapshots name, positions, starting point, added capital and assumptions.
 - Revert restores the snapshot. Reset returns a never-saved scenario to its start: empty, the duplicate's source or the example.
 - Stored scenarios from older formats migrate to "current portfolio" with shared assumptions.
+- A current-portfolio scenario records the date of the portfolio it started from (`baseAsOf`). If the actual portfolio has moved on, the scenario says so ("created from your portfolio as of …") instead of silently rebasing.
+- The sizing unit (`size`) is part of the saved state.

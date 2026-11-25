@@ -126,10 +126,12 @@ describe('direction of comparisons', () => {
 })
 
 describe('numeric inputs', () => {
-  it('shares: whole numbers only; no scientific notation, signs or decimals', () => {
+  it('shares: up to 2 decimals (hypothetical step); no scientific notation, signs or units', () => {
     expect(parseShares('2,500')).toEqual({ state: 'ok', value: 2500 })
+    expect(parseShares('12.5')).toEqual({ state: 'ok', value: 12.5 })
+    expect(parseShares('12.')).toEqual({ state: 'partial', message: 'Finish entering a quantity' })
     expect(parseShares('')).toEqual({ state: 'empty' })
-    for (const t of ['1e5', '-10', '12.5', '10 shares', '0x10']) expect(parseShares(t).state).toBe('invalid')
+    for (const t of ['1e5', '-10', '12.555', '10 shares', '0x10']) expect(parseShares(t).state).toBe('invalid')
   })
   it('prices: partial typing is not a value; at most 3 decimals; no silent reuse of a previous value', () => {
     for (const t of ['0', '0.', '.', '0.0', '0.00']) expect(parsePrice(t).state).toBe('partial')

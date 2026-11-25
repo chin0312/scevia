@@ -5,6 +5,7 @@ import '@ds/tokens/tokens.css'
 import './styles/components.css'
 import './styles/pages.css'
 import './styles/app.css'
+import './styles/lab.css'
 import './styles/responsive.css'
 import App from './App'
 

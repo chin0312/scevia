@@ -1,61 +1,13 @@
-/* Scenario impact views: allocation before/after, outcome matrix and payoff by event.
+/* Scenario settlement views: outcome matrix and payoff by event.
    All of them read the two simulations (start, after) and never fill unavailable values with zero. */
 import { useMemo, useState } from 'react'
 import { useWidth } from '../../components/charts'
-import { Callout, Chip, Seg, cx } from '../../components/ui'
+import { Callout, Chip, cx } from '../../components/ui'
 import { PROVENANCE_TEXT, REL_TEXT } from '../../data/relations'
 import type { Relation } from '../../data/types'
-import { constrains, findRelation, groupPnl, holdingsAllocation, isFeasible, type AllocationBy, type Outcome, type Simulation } from '../../lib/finance'
-import { fmt, kfmt, pct, sfmt } from '../../lib/format'
-import { diff, eventsIn } from './model'
-
-const BY: Record<'Category' | 'Platform' | 'Event', AllocationBy> = { Category: 'category', Platform: 'platform', Event: 'event' }
-
-export function AllocationImpact({ start, after }: { start: Simulation; after: Simulation }) {
-  const [by, setBy] = useState<'Category' | 'Platform' | 'Event'>('Category')
-  const b = holdingsAllocation(Object.values(start.holdings), BY[by]), a = holdingsAllocation(Object.values(after.holdings), BY[by])
-  const keys = [...new Set([...b.segments.map((s) => s.key), ...a.segments.map((s) => s.key)])]
-  const rows = keys.map((k) => {
-    const x = b.segments.find((s) => s.key === k), y = a.segments.find((s) => s.key === k)
-    return { key: k, label: (y ?? x)!.label, bv: x?.value ?? 0, bs: x ? x.share : b.total ? 0 : null, av: y?.value ?? 0, as: y ? y.share : a.total ? 0 : null, status: !x ? 'new' : !y ? 'exited' : null }
-  }).sort((p, q) => q.av - p.av || q.bv - p.bv)
-  // Cash share is only meaningful when cash is non-negative. A negative balance is a funding requirement and is shown
-  // as such (never clamped to 0 and never presented as a negative allocation slice).
-  const cashCell = (s: Simulation, total: number | null) => {
-    const c = s.cash.pm + s.cash.ks
-    if (c < -0.005) return <span className="stale" title="Purchases exceed cash: shown as if funded">needs {fmt(-c)} funding</span>
-    if (total == null || c + total <= 0) return '—'
-    return pct((c / (c + total)) * 100, 0)
-  }
-  const unavailable = b.total == null || a.total == null
-  return (<>
-    <div className="row" style={{ justifyContent: 'space-between', flexWrap: 'wrap', marginBottom: 'var(--space-3)' }}>
-      <span className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>% = share of open-position market value (cash excluded), before and after</span>
-      <Seg label="Allocation by" options={['Category', 'Platform', 'Event'] as const} value={by} onChange={setBy} />
-    </div>
-    {unavailable ? <Callout tone="warn" icon="alert">Allocation is unavailable: a position has no reference price, so its market value is unknown.</Callout>
-      : rows.length === 0 ? <div className="empty"><p>No open positions before or after this scenario.</p></div> : (
-      <div className="dt-wrap"><table className="dt alloc-impact">
-        <thead><tr><th scope="col">{by}</th><th scope="col" className="r">Before</th><th scope="col" className="r">%</th><th scope="col" className="r">After</th><th scope="col" className="r">%</th><th scope="col" className="r">Change</th><th scope="col" className="bar-col"><span className="sr-only">Share bars</span></th></tr></thead>
-        <tbody>{rows.map((r) => {
-          const d = diff(r.as, r.bs)
-          return (
-            <tr key={r.key}>
-              <td><span className="row" style={{ gap: 'var(--space-2)' }}>{r.label}{r.status === 'new' && <Chip tone="accent">New</Chip>}{r.status === 'exited' && <Chip>Exited</Chip>}</span></td>
-              <td className="r t2">{r.bv ? fmt(r.bv) : '—'}</td><td className="r t3">{r.bs == null ? '—' : pct(r.bs * 100, 0)}</td>
-              <td className="r">{r.av ? fmt(r.av) : '—'}</td><td className="r">{r.as == null ? '—' : pct(r.as * 100, 0)}</td>
-              <td className={cx('r', d == null || Math.abs(d) < 0.005 ? 't3' : 't2')}>{d == null ? '—' : Math.abs(d) < 0.005 ? '0 pts' : `${d > 0 ? '+' : '−'}${Math.abs(d * 100).toFixed(1)} pts`}</td>
-              <td className="bar-col"><div className="ai-bars" aria-hidden="true"><i className="b" style={{ width: `${(r.bs ?? 0) * 100}%` }} /><i className="a" style={{ width: `${(r.as ?? 0) * 100}%` }} /></div></td>
-            </tr>
-          )
-        })}</tbody>
-        <tfoot><tr><th scope="row">Open-position value</th><td className="r t2">{fmt(b.total!)}</td><td /><td className="r">{fmt(a.total!)}</td><td /><td /><td /></tr>
-          <tr><th scope="row" title="Cash ÷ (cash + open-position value), when cash isn’t negative">Cash share of value</th><td className="r t2" colSpan={2}>{cashCell(start, b.total)}</td><td className="r" colSpan={2}>{cashCell(after, a.total)}</td><td /><td /></tr></tfoot>
-      </table></div>
-    )}
-    <p className="t3" style={{ fontSize: 'var(--font-size-xs)', marginTop: 'var(--space-2)' }}>Market-value allocation at reference prices. It isn’t capital committed or settlement loss, and a more even allocation isn’t necessarily less risk: see the outcome views below.</p>
-  </>)
-}
+import { constrains, constraintComponent, findRelation, groupPnl, partialFeasible, type Outcome, type Simulation } from '../../lib/finance'
+import { kfmt, sfmt } from '../../lib/format'
+import { eventsIn } from './model'
 
 export function OutcomeMatrix({ start, after, rels, onRelations }: { start: Simulation; after: Simulation; rels: Relation[]; onRelations?: () => void }) {
   const events = useMemo(() => eventsIn(start, after), [start, after])
@@ -69,9 +21,15 @@ export function OutcomeMatrix({ start, after, rels, onRelations }: { start: Simu
   const relation = findRelation(aId, bId, rels)
   const rel = relation?.cls ?? null, binds = !!relation && constrains(relation)
   const label = (e: typeof evA, o: Outcome) => (e.sides.size === 1 ? (e.sides.has(o) ? 'for you' : 'against you') : 'both sides held')
+  // Feasibility uses every constraint among the scenario's events, including implications through other events
+  // (A ≡ B and B × C exclusive ⇒ A and C can't both be YES), so a pair never looks possible when the portfolio isn't.
+  const all = events.map((e) => e.id)
+  const chain = constraintComponent([aId, bId], all, rels).relations
+  const titleOf = (id: string) => events.find((e) => e.id === id)?.title ?? id
+  const why = chain.map((r) => `${titleOf(r.a)} ${r.cls === 'mutex' ? '× (not both YES)' : '≡ (same result)'} ${titleOf(r.b)}, ${PROVENANCE_TEXT[r.provenance]}`)
   const cells = (['YES', 'NO'] as Outcome[]).flatMap((oa) => (['YES', 'NO'] as Outcome[]).map((ob) => {
     const o = { [aId]: oa, [bId]: ob }
-    return { oa, ob, before: groupPnl(start, [aId, bId], o), after: groupPnl(after, [aId, bId], o), impossible: !isFeasible(o, rels) }
+    return { oa, ob, before: groupPnl(start, [aId, bId], o), after: groupPnl(after, [aId, bId], o), impossible: partialFeasible(o, all, rels) === false }
   }))
   const feasible = cells.filter((c) => !c.impossible)
   const best = [...feasible].sort((x, y) => (y.after - y.before) - (x.after - x.before))[0]
@@ -88,13 +46,14 @@ export function OutcomeMatrix({ start, after, rels, onRelations }: { start: Simu
     <p className="t3" style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--space-3)' }}>{
       rel === 'mutex' && binds ? `Both can’t resolve YES (${relation!.provenance === 'hypothetical' ? 'a hypothetical constraint in this scenario' : 'verified'}), so that combination is excluded. That changes the settlement range, not any probability.`
         : rel === 'equivalent' && binds ? 'They settle the same way, so mixed combinations are excluded.'
+        : cells.some((c) => c.impossible) ? 'No direct constraint, but constraints through other events in this portfolio exclude some combinations (see below).'
         : rel === 'related' ? 'They share drivers but settle on different rules: all four combinations are possible and nothing is netted.'
           : 'No constraint applies: all four combinations are possible. That isn’t an assumption that they’re independent.'}</p>
     <div className="matrix">
       <div />
       {(['YES', 'NO'] as Outcome[]).map((ob) => <div className="mh" key={ob}><span><b>{evB.title}</b> resolves {ob}<br /><small>{label(evB, ob)}</small></span></div>)}
       {(['YES', 'NO'] as Outcome[]).map((oa) => (
-        <MatrixRow key={oa} label={<><b>{evA.title}</b> resolves {oa}<br /><small>{label(evA, oa)}</small></>} cells={cells.filter((c) => c.oa === oa)} />
+        <MatrixRow key={oa} label={<><b>{evA.title}</b> resolves {oa}<br /><small>{label(evA, oa)}</small></>} cells={cells.filter((c) => c.oa === oa)} why={why} />
       ))}
     </div>
     <div style={{ marginTop: 'var(--space-4)' }}>
@@ -105,11 +64,11 @@ export function OutcomeMatrix({ start, after, rels, onRelations }: { start: Simu
   </>)
 }
 
-function MatrixRow({ label, cells }: { label: React.ReactNode; cells: { before: number; after: number; impossible: boolean }[] }) {
+function MatrixRow({ label, cells, why }: { label: React.ReactNode; cells: { before: number; after: number; impossible: boolean }[]; why: string[] }) {
   return (<>
     <div className="mh row"><span>{label}</span></div>
     {cells.map((v, i) => v.impossible ? (
-      <div key={i} className="cell impossible"><div className="caps">Not possible</div><div className="was">Mutually exclusive: both can’t resolve YES</div></div>
+      <div key={i} className="cell impossible" title={why.join('\n')}><div className="caps">Not possible</div><div className="was">Excluded by {why.length === 1 ? 'a settlement constraint' : `${why.length} linked constraints`}: {why.join('; ')}</div></div>
     ) : (
       <div key={i} className={cx('cell', v.after >= 0 ? 'pos' : 'neg')}>
         {Math.abs(v.after - v.before) < 0.5 ? <span className="delta flat">—</span> : <span className={cx('delta', v.after > v.before ? 'good' : 'bad')}>{sfmt(v.after - v.before)}</span>}

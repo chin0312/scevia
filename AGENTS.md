@@ -21,6 +21,10 @@ App: `web/` (Vite + React + TS). Run `npm run dev` in `web/`. Current state, lim
 - A missing number (no price, no fee parameters, too many events, invalid input) is unavailable, not zero. Use `diff()` / `judge()` for changes.
 - Relationships are settlement logic with provenance. Only `verified` (facts) and a scenario's own `hypothetical` constraints remove outcomes; Risk never sees hypothetical ones. Never add event-specific relationship controls.
 - Hypothetical fees go through `estimateFee()` (lib/fees.ts) only. Never hard-code a provider-wide rate, and never recalculate historical fees.
+- Scenario targets go through `targetShares()`: shares, $ amount and % of start are views of one position. Never convert silently when the view changes.
+- Identity is account + instrument. Use `holdingsOfInstrument()`; never map an instrument to "the first" holding.
+- The records workspace (`/accounts`, `lib/records.ts`) is a labelled sample: it never feeds `PortfolioData` or any portfolio figure, never reads user files, and never deletes source records.
+- Actual accounting belongs to the backend replay. Don't build a second actual ledger in the frontend.
 
 ## Numbers
 - Every figure comes from `web/src/lib/finance.ts`, which reads data only via `web/src/data/portfolio.ts`. Never hard-code a metric, summary sentence or insight in a page, and never import `data/sample.ts` directly.

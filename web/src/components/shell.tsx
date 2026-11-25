@@ -40,10 +40,10 @@ function useNotifications() {
 const DEFINITIONS: [string, string][] = [
   ['Portfolio value', 'Cash + open positions at their mark price (last traded price on the platform).'],
   ['Net deposits', 'Deposits − withdrawals. Never counted as performance.'],
-  ['Net P&L', 'Realized P&L + unrealized P&L − fees paid on open fills. Equals portfolio value − net deposits.'],
+  ['Net P&L', 'Realized P&L + unrealized P&L. Equals portfolio value − net deposits.'],
   ['Realized P&L', 'Closed trades: shares × (exit − entry) − that trade’s fees.'],
-  ['Unrealized P&L', 'Open positions: shares × (mark − average cost), before fees.'],
-  ['Cost basis / committed', 'Shares × fill price of open positions. The most an open position can lose at settlement.'],
+  ['Unrealized P&L', 'Open positions: shares × mark − cost basis (after purchase fees).'],
+  ['Cost basis / committed', 'Shares × fill price + purchase fees of open positions (weighted average). The most an open position can lose at settlement.'],
   ['Settlement payoff', 'A contract pays $1 per share if its side wins and $0 otherwise. Scevia never assigns probabilities.'],
 ]
 

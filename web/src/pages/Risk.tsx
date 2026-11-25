@@ -190,7 +190,7 @@ export default function Risk() {
         </div>
 
         <Card id="payoffs" flush>
-          <CardHeader pad title="Outcome payoffs" sub="P&L at settlement vs. cost basis (fees already paid not included) · select a row for every contract behind the event" right={<Tabs label="Filter events" options={['All events', 'Next 30 days', 'Over guardrail'] as const} value={filter} onChange={setFilter} />} />
+          <CardHeader pad title="Outcome payoffs" sub="P&L at settlement vs. cost basis (purchase fees included) · select a row for every contract behind the event" right={<Tabs label="Filter events" options={['All events', 'Next 30 days', 'Over guardrail'] as const} value={filter} onChange={setFilter} />} />
           <div className="po-row h"><span>Event · your side</span><span>Resolves</span><span>Better outcome</span><span>Worse outcome</span><span className="r">Share</span></div>
           {rows.length === 0 && <div className="empty"><p>No events match “{filter}”. This filter only changes the table: the portfolio’s worst feasible outcome is still <b className="loss">{portfolio ? sfmt(portfolio.min) : na}</b>.</p><button type="button" className="link" onClick={() => setFilter('All events')}>Show all events</button></div>}
           {rows.map((e) => {

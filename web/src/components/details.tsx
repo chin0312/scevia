@@ -81,7 +81,7 @@ function PositionBody({ p, scope, open, close }: { p?: Position; scope: Platform
     <div className="cov-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
       <div><span className="t3">Cost basis</span><b>{fmt(p.cost, 2)}</b></div>
       <div><span className="t3">Value at mark {p.mark.toFixed(2)}</span><b>{fmt(p.value, 2)}</b></div>
-      <div><span className="t3">Unrealized (before fees)</span><b className={p.upl >= 0 ? 'gain' : 'loss'}>{sfmt(p.upl, 2)}</b></div>
+      <div><span className="t3">Unrealized (after purchase fees)</span><b className={p.upl >= 0 ? 'gain' : 'loss'}>{sfmt(p.upl, 2)}</b></div>
     </div>
     <h5 className="caps">If it resolves</h5>
     <div className="cov-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>

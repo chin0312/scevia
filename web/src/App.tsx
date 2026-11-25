@@ -6,6 +6,7 @@ const Overview = lazy(() => import('./pages/Overview'))
 const Analytics = lazy(() => import('./pages/Analytics'))
 const Risk = lazy(() => import('./pages/Risk'))
 const ScenarioLab = lazy(() => import('./pages/ScenarioLab'))
+const Records = lazy(() => import('./pages/Records'))
 
 /* Remount a page when its route changes (not on ?query changes). */
 function Page({ el: El }: { el: React.ComponentType }) {
@@ -22,6 +23,7 @@ export default function App() {
         <Route path="/analytics" element={<Page el={Analytics} />} />
         <Route path="/risk" element={<Page el={Risk} />} />
         <Route path="/scenario-lab" element={<Page el={ScenarioLab} />} />
+        <Route path="/accounts" element={<Page el={Records} />} />
         <Route path="*" element={<Navigate to="/overview" replace />} />
       </Route>
     </Routes>

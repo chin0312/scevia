@@ -2,19 +2,22 @@
  * Shared, pure calculation layer. Every number on every page comes from here so pages can't disagree.
  *
  * Definitions (also shown in the UI's ⓘ tips):
- *  - Cost basis        Σ shares × fill price of open positions. Fees are NOT in the cost basis.
- *  - Unrealized P&L    Σ shares × (mark − average cost) of open positions, before fees.
+ *  - Cost basis        Σ (shares × fill price + fill fee) of open positions: weighted-average cost with acquisition
+ *                      fees capitalized, the same convention as the backend accounting replay (backend/docs/ACCOUNTING.md).
+ *  - Unrealized P&L    Σ shares × mark − cost basis of open positions (after acquisition fees).
  *  - Realized P&L      Σ over closed trades of shares × (exit − entry) − that trade's fees.
- *  - Fees paid         closed-trade fees + fees on fills of still-open positions.
- *  - Net P&L           realized P&L + unrealized P&L − fees on open fills  (each fee counted once).
+ *  - Fees paid         closed-trade fees + fees on fills of still-open positions (the latter are inside cost basis).
+ *  - Net P&L           realized P&L + unrealized P&L  (each fee counted once).
  *  - Net deposits      deposits − withdrawals. Never counted as performance.
- *  - Cash              net deposits + realized P&L − Σ (cost + fees) of open fills.
+ *  - Cash              net deposits + realized P&L − cost basis of open positions.
+ *  These are sample-portfolio calculations. For actual portfolios the backend replay is the accounting authority;
+ *  this module will consume its results rather than keep a second ledger (docs/DEVELOPMENT.md).
  *  - Portfolio value   cash + Σ shares × mark.   Identity: value − net deposits = net P&L.
  *  - Settlement payoff a contract pays $1 per share if its side wins, $0 otherwise.
  */
 import { CASH_FLOWS, CLOSED_TRADES, EVENTS, HISTORY_START, LAST_VISIT, OPEN_POSITIONS, PORTFOLIO, TODAY } from '../data/portfolio'
 import { DEFAULT_FEES, estimateFee, type FeeAssumption, type FeeSchedule, type FeeStatus } from './fees'
-import type { Category, ClosedTrade, DataSource, OpenPosition, Platform, RelClass, Relation, RiskEvent, Side } from '../data/types'
+import type { AccountRef, Category, ClosedTrade, DataSource, OpenPosition, Platform, RelClass, Relation, RiskEvent, Side } from '../data/types'
 export type { RelClass, Relation }
 export type { RelProvenance } from '../data/types'
 
@@ -40,16 +43,24 @@ export function coverage(p: Platform) {
   }
 }
 
+/* ───────────── Accounts ───────────── */
+/** Financial accounts in the portfolio. An account belongs to one venue and can be fed by several acquisition
+ *  sources (API sync, CSV import, manual records). A venue is not an account, and a source is not a venue. */
+export const ACCOUNTS: AccountRef[] = PORTFOLIO.accounts
+export const accountOf = (id: string) => ACCOUNTS.find((a) => a.id === id)
+export const accountsOn = (venue: Platform) => ACCOUNTS.filter((a) => a.venue === venue)
+
 /* ───────────── Positions ───────────── */
 export interface Position extends OpenPosition {
   shares: number; avg: number; cost: number; fees: number; value: number; upl: number
   ifWin: number; ifLose: number; days: number; opened: string
 }
+/** Weighted-average cost with acquisition fees in the basis (backend convention). */
 export function derivePosition(p: OpenPosition): Position {
-  const shares = sum(p.fills, (f) => f.shares), cost = sum(p.fills, (f) => f.shares * f.price)
+  const shares = sum(p.fills, (f) => f.shares), fees = sum(p.fills, (f) => f.fee), cost = sum(p.fills, (f) => f.shares * f.price) + fees
   const value = shares * p.mark
   return {
-    ...p, shares, cost, avg: cost / shares, fees: sum(p.fills, (f) => f.fee), value, upl: value - cost,
+    ...p, shares, cost, avg: cost / shares, fees, value, upl: value - cost,
     ifWin: shares - cost, ifLose: -cost, days: daysBetween(TODAY, p.resolves), opened: p.fills[0].date,
   }
 }
@@ -79,11 +90,12 @@ export function account(f: PlatformFilter = 'all'): Account {
   const realized = sum(closed, tradeNet), closedFees = sum(closed, (t) => t.fees)
   const committed = sum(pos, (p) => p.cost), openFees = sum(pos, (p) => p.fees)
   const positionsValue = sum(pos, (p) => p.value), unrealized = positionsValue - committed
-  const cash = netDeposits + realized - committed - openFees
+  // committed already includes fees on open fills (cost basis), so they are subtracted once.
+  const cash = netDeposits + realized - committed
   const resolved = closed.filter(isResolved)
   return {
     netDeposits, cash, positionsValue, totalValue: cash + positionsValue, committed, unrealized, openFees, realized, closedFees,
-    fees: closedFees + openFees, netPnl: realized + unrealized - openFees, wins: resolved.filter((t) => t.outcome === 'Won').length,
+    fees: closedFees + openFees, netPnl: realized + unrealized, wins: resolved.filter((t) => t.outcome === 'Won').length,
     resolved: resolved.length, closedCount: closed.length, openCount: pos.length, feeEstimates: closed.filter((t) => !t.feeKnown).length,
   }
 }
@@ -143,7 +155,8 @@ export function periodRange(p: Period): Range & { label: string; prior: Range | 
 }
 
 export interface PeriodStats {
-  /** netPnl = realized + unrealizedChange − openFillFees.
+  /** netPnl = realized + unrealizedChange. Fees on fills of open positions are inside unrealizedChange (they are part
+   *  of cost basis); openFillFees reports how much of it they are.
    *  realized counts each trade closed in the period in full, including P&L that built up before the period
    *  started; that earlier part reappears as a negative unrealizedChange, so the sum stays correct. */
   netPnl: number; realized: number; unrealizedChange: number; openFillFees: number; fees: number; trades: ClosedTrade[]
@@ -172,7 +185,7 @@ export function periodStats(f: PlatformFilter, r: Range): PeriodStats {
   }
   if (dd) { const target = pts.find((p) => p.date > dd!.to && p.netPnl >= dd!.amount + pts.find((q) => q.date === dd!.to)!.netPnl); dd.recoveredOn = target?.date ?? null }
   return {
-    netPnl, realized, unrealizedChange: netPnl - realized + openFillFees, openFillFees, fees: sum(trades, (t) => t.fees) + openFillFees, trades,
+    netPnl, realized, unrealizedChange: netPnl - realized, openFillFees, fees: sum(trades, (t) => t.fees) + openFillFees, trades,
     wins: wins.length, losses: res.length - wins.length, resolved: res.length, winRate: res.length ? wins.length / res.length : null,
     avgWin: posNet.length ? grossWin / posNet.length : null, avgLoss: negNet.length ? grossLoss / negNet.length : null,
     profitFactor: grossLoss > 0 ? grossWin / grossLoss : null, months, drawdown: dd,
@@ -298,6 +311,27 @@ export function outcomeRange(ids: string[], rels: Relation[], fn: (o: Record<str
   return { min, max, argmin, argmax, feasible, excluded }
 }
 
+/** Constraining relations in the connected component of `seed` events (relations linked through other events). */
+export function constraintComponent(seed: string[], eventIds: string[], rels: Relation[]) {
+  const active = rels.filter((r) => constrains(r) && eventIds.includes(r.a) && eventIds.includes(r.b))
+  const comp = new Set(seed)
+  for (let grew = true; grew;) {
+    grew = false
+    for (const r of active) if (comp.has(r.a) !== comp.has(r.b)) { comp.add(r.a); comp.add(r.b); grew = true }
+  }
+  return { events: [...comp], relations: active.filter((r) => comp.has(r.a) && comp.has(r.b)) }
+}
+/** Is a partial outcome (e.g. two events of a matrix) possible given every constraint in the portfolio, including
+ *  implications through other events (A ≡ B and B × C exclusive ⇒ A and C can't both be YES)? Returns null when the
+ *  linked component is too large to check exactly. */
+export function partialFeasible(o: Record<string, Outcome>, eventIds: string[], rels: Relation[]): boolean | null {
+  const { events, relations } = constraintComponent(Object.keys(o), eventIds, rels)
+  const free = events.filter((e) => !(e in o))
+  if (free.length > MAX_JOINT_EVENTS) return null
+  for (const rest of jointOutcomes(free)) if (isFeasible({ ...rest, ...o }, relations)) return true
+  return false
+}
+
 /* ───────────── Holdings (base portfolio or a scenario) ───────────── */
 /** One holding in a portfolio being evaluated (the actual portfolio or a hypothetical one).
  *  `mark` is the valuation price; null when no reference price is available (value is then unavailable, never 0). */
@@ -306,6 +340,10 @@ export interface Holding {
   category: Category; title: string; eventTitle: string
   /** Provider-native market id (identity of the contract, independent of account or position id). */
   marketId: string
+  /** Resolution date of the market (when known). Not a confirmed cash-redemption date. */
+  resolves: string
+  /** Account holding it; null for a hypothetical new instrument (funded from the scenario's cash on its venue). */
+  accountId: string | null
   /** Fee parameters for hypothetical trades in this market; null/undefined = unavailable. */
   fee?: FeeSchedule | null
   /** True for an instrument that isn't in the starting portfolio (a hypothetical new position). */
@@ -313,7 +351,7 @@ export interface Holding {
 }
 const eventName = (id: string) => EVENTS.find((e) => e.id === id)?.name ?? id
 export const baseHoldings = (): Record<string, Holding> =>
-  Object.fromEntries(POSITIONS.map((p) => [p.id, { id: p.id, eventId: p.eventId, platform: p.platform, side: p.side, shares: p.shares, cost: p.cost, mark: p.mark, category: p.category, title: p.market, eventTitle: eventName(p.eventId), marketId: p.marketId, fee: p.feeSchedule }]))
+  Object.fromEntries(POSITIONS.map((p) => [p.id, { id: p.id, eventId: p.eventId, platform: p.platform, side: p.side, shares: p.shares, cost: p.cost, mark: p.mark, category: p.category, title: p.market, eventTitle: eventName(p.eventId), marketId: p.marketId, resolves: p.resolves, accountId: p.accountId, fee: p.feeSchedule }]))
 const payout = (h: Holding, o: Outcome) => (h.side === o ? h.shares : 0)
 /** P&L of an event's holdings vs. their cost basis if the event resolves `o` (excludes fees already paid). */
 export const eventPnl = (hs: Holding[], eventId: string, o: Outcome) => sum(hs.filter((h) => h.eventId === eventId), (h) => payout(h, o) - h.cost)
@@ -389,13 +427,27 @@ export const instrumentOfPosition = (p: Position): InstrumentRef => ({
   provider: p.platform, eventId: p.eventId, eventTitle: eventName(p.eventId), marketId: p.marketId, marketTitle: p.market, outcome: p.side,
   category: p.category, resolves: p.resolves, refPrice: p.mark, refAsOf: sourceOf(p.platform).asOf, source: 'sample', fee: p.feeSchedule,
 })
-/** The actual position holding exactly this instrument (same provider, market and outcome), if any. Sharing an
+/** Every actual holding of exactly this instrument (same provider, market and outcome), one per account. Sharing an
  *  event and a side is not enough: different markets are different contracts. */
-export const positionFor = (i: Pick<InstrumentRef, 'provider' | 'marketId' | 'outcome'>) => POSITIONS.find((p) => p.platform === i.provider && p.marketId === i.marketId && p.side === i.outcome)
+export const holdingsOfInstrument = (i: Pick<InstrumentRef, 'provider' | 'marketId' | 'outcome'>, ps: Position[] = POSITIONS) =>
+  ps.filter((p) => p.platform === i.provider && p.marketId === i.marketId && p.side === i.outcome)
+/** The single actual holding of an instrument, or undefined when none or several accounts hold it. With several,
+ *  the caller must ask which account is meant; it never silently picks the first. */
+export const positionFor = (i: Pick<InstrumentRef, 'provider' | 'marketId' | 'outcome'>, ps: Position[] = POSITIONS) => {
+  const hs = holdingsOfInstrument(i, ps)
+  return hs.length === 1 ? hs[0] : undefined
+}
 /** A hypothetical change: hold `to` shares of an instrument, trading at the assumed `price`.
  *  `id` is the actual position id when the instrument is held, otherwise its instrument key.
  *  null `to` / `price` mean "not entered yet": the row is excluded from results and blocks Save. */
-export interface Adjustment { id: string; to: number | null; price: number | null; instrument?: InstrumentRef }
+export interface Adjustment {
+  id: string; to: number | null; price: number | null; instrument?: InstrumentRef
+  /** When set, the target is a capital amount instead of a share count: `amount` = target position value at the
+   *  assumed price; `weight` = % of the scenario's starting value at reference marks (cash and added capital included).
+   *  Shares are derived from it at the assumed price (rounded down to the quantity step), so the intended
+   *  investment is what the user typed. `to` is then ignored. */
+  size?: { by: 'amount' | 'weight'; value: number }
+}
 /** Where a scenario starts: the user's current portfolio (holdings + cash from sources), or an empty portfolio. */
 export type Baseline = 'portfolio' | 'scratch'
 export interface SimOptions {
@@ -407,11 +459,35 @@ export interface SimOptions {
 }
 /** Safety limits for hypothetical inputs (calculation reliability, not provider rules). */
 export const MAX_SHARES = 10_000_000, MAX_FUNDING = 100_000_000
+/** Hypothetical quantity step: 0.01 share. Venue lot sizes aren't enforced (no provider metadata yet); a real
+ *  increment will come from instrument data. */
+export const QTY_DECIMALS = 2
+const onStep = (v: number) => Math.abs(v * 10 ** QTY_DECIMALS - Math.round(v * 10 ** QTY_DECIMALS)) < 1e-6
+export const floorQty = (v: number) => Math.floor(v * 10 ** QTY_DECIMALS + 1e-9) / 10 ** QTY_DECIMALS
 export function validateQty(v: number | null) {
   if (v == null || !Number.isFinite(v)) return 'Enter a target quantity'
   if (v < 0 || v > MAX_SHARES) return `Quantity must be between 0 and ${MAX_SHARES.toLocaleString('en-US')}`
-  if (!Number.isInteger(v)) return 'Use whole shares'
+  if (!onStep(v)) return `Use at most ${QTY_DECIMALS} decimals`
   return null
+}
+export const MAX_WEIGHT_PCT = 100
+/** Starting value at reference marks (cash + positions), or null when a mark is missing. Denominator of `weight`. */
+export function startingValue(baseline: Baseline = 'portfolio', funding: Partial<Record<Platform, number>> = {}) {
+  const { holdings, cash } = startingPoint(baseline, funding)
+  const hs = Object.values(holdings)
+  return hs.some((h) => h.mark == null) ? null : cash.pm + cash.ks + sum(hs, (h) => h.shares * h.mark!)
+}
+/** Target shares of an adjustment: typed shares, or derived from an amount or weight at the assumed price. */
+export function targetShares(a: Adjustment, startValue: number | null): { to: number | null; error: string | null } {
+  if (!a.size) return { to: a.to, error: null }
+  const { by, value } = a.size
+  if (!Number.isFinite(value)) return { to: null, error: by === 'amount' ? 'Enter a target amount' : 'Enter a percentage' }
+  if (by === 'amount' && (value < 0 || value > MAX_FUNDING)) return { to: null, error: `Amount must be between $0 and $${MAX_FUNDING.toLocaleString('en-US')}` }
+  if (by === 'weight' && (value < 0 || value > MAX_WEIGHT_PCT)) return { to: null, error: `Use 0–${MAX_WEIGHT_PCT}% of the starting value` }
+  if (a.price == null || !Number.isFinite(a.price) || a.price <= 0) return { to: null, error: 'Enter an assumed price' }
+  const amount = by === 'amount' ? value : startValue == null ? null : (value / 100) * startValue
+  if (amount == null) return { to: null, error: 'Starting value is unavailable, so a % target can’t be converted' }
+  return { to: Math.min(MAX_SHARES, floorQty(amount / a.price)), error: null }
 }
 export const validFunding = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= MAX_FUNDING
 /** Starting holdings and cash for a baseline, plus any added capital. */
@@ -436,6 +512,12 @@ export interface Simulation {
   feeStatusBy: Record<string, FeeStatus>
   /** Positions whose fee couldn't be estimated (no fee parameters). Their cash and P&L are before fees. */
   feesUnavailable: string[]
+  /** Resolved target shares per adjustment (typed, or derived from an amount / weight). */
+  targets: Record<string, number>
+  /** Executed hypothetical trades: signed quantity (+ buy, − sell) at the assumed price. */
+  trades: Record<string, { qty: number; price: number }>
+  /** Starting value at reference marks (the denominator of % targets); null when a mark is missing. */
+  startValue: number | null
 }
 export const MIN_PRICE = 0.01, MAX_PRICE = 0.99
 export function validatePrice(v: number) {
@@ -445,12 +527,16 @@ export function validatePrice(v: number) {
 }
 export function simulate(adjs: Adjustment[], opts: SimOptions): Simulation {
   const { holdings, cash } = startingPoint(opts.baseline, opts.funding)
+  const startValue = startingValue(opts.baseline, opts.funding)
+  const targets: Record<string, number> = {}, trades: Record<string, { qty: number; price: number }> = {}
   let realized = 0, fees = 0
   const feeMode = opts.fees ?? DEFAULT_FEES
   const errors: Record<string, string> = {}, realizedBy: Record<string, number> = {}, feesBy: Record<string, number> = {}
   const feeStatusBy: Record<string, FeeStatus> = {}, feesUnavailable: string[] = []
   for (const a of adjs) {
-    const qtyErr = validateQty(a.to)
+    const t = targetShares(a, startValue)
+    if (t.error) { errors[a.id] = t.error; continue }
+    const qtyErr = validateQty(t.to)
     if (qtyErr) { errors[a.id] = qtyErr; continue }
     if (a.price == null) { errors[a.id] = 'Enter an assumed price'; continue }
     const priceErr = validatePrice(a.price)
@@ -460,11 +546,13 @@ export function simulate(adjs: Adjustment[], opts: SimOptions): Simulation {
       // Not in the starting portfolio: a hypothetical new holding from zero, valued at its reference price.
       const i = a.instrument
       if (!i) { errors[a.id] = 'Not in this starting portfolio'; continue }
-      h = holdings[a.id] = { id: a.id, eventId: i.eventId, platform: i.provider, side: i.outcome, shares: 0, cost: 0, mark: i.refPrice, category: i.category, title: i.marketTitle, eventTitle: i.eventTitle, marketId: i.marketId, fee: i.fee ?? null, isNew: true }
+      h = holdings[a.id] = { id: a.id, eventId: i.eventId, platform: i.provider, side: i.outcome, shares: 0, cost: 0, mark: i.refPrice, category: i.category, title: i.marketTitle, eventTitle: i.eventTitle, marketId: i.marketId, resolves: i.resolves, accountId: null, fee: i.fee ?? null, isNew: true }
     }
-    const to = a.to!
+    const to = t.to!
+    targets[a.id] = to
     const d = to - h.shares
-    if (d === 0) continue
+    if (Math.abs(d) < 1e-9) continue
+    trades[a.id] = { qty: d, price: a.price }
     const notional = Math.abs(d) * a.price
     const est = estimateFee(d, a.price, h.fee, feeMode)
     // An unavailable fee is never treated as zero silently: it is flagged, and affected figures are labelled pre-fee.
@@ -472,7 +560,8 @@ export function simulate(adjs: Adjustment[], opts: SimOptions): Simulation {
     feeStatusBy[a.id] = est.status
     if (est.amount == null) feesUnavailable.push(a.id)
     fees += fee; feesBy[a.id] = fee
-    if (d > 0) { h.cost += notional; cash[h.platform] -= notional + fee }
+    // Buy fees enter cost basis (weighted average incl. acquisition fees); sale fees reduce proceeds.
+    if (d > 0) { h.cost += notional + fee; cash[h.platform] -= notional + fee }
     else {
       const q = -d, avg = h.cost / h.shares, r = q * (a.price - avg) - fee
       realized += r; realizedBy[a.id] = r
@@ -483,7 +572,7 @@ export function simulate(adjs: Adjustment[], opts: SimOptions): Simulation {
   }
   const gap = (v: number) => (v < -0.005 ? -v : 0)
   const shortfall: Record<Platform, number> = { pm: gap(cash.pm), ks: gap(cash.ks) }
-  return { holdings, cash, realized, fees, errors, shortfall, realizedBy, feesBy, feeStatusBy, feesUnavailable }
+  return { holdings, cash, realized, fees, errors, shortfall, realizedBy, feesBy, feeStatusBy, feesUnavailable, targets, trades, startValue }
 }
 
 export interface ScenarioMetrics {
@@ -522,14 +611,13 @@ export function scenarioMetrics(sim: Simulation, rels: Relation[]): ScenarioMetr
 }
 
 /** P&L of the positions in `eventIds` for a joint outcome, including realized P&L and fees from the scenario's own trades.
- *  Buy fees count as a cost here (they're not in the cost basis); sale fees are already inside realizedBy. */
+ *  Buy fees are inside cost basis; sale fees are inside realizedBy. */
 export function groupPnl(sim: Simulation, eventIds: string[], o: Record<string, Outcome>) {
   const hs = Object.values(sim.holdings).filter((h) => eventIds.includes(h.eventId))
   let v = 0
   for (const h of hs) {
     v += (h.shares > 0 ? payout(h, o[h.eventId]) - h.cost : 0)
     v += sim.realizedBy[h.id] ?? 0
-    if (!(h.id in sim.realizedBy)) v -= sim.feesBy[h.id] ?? 0
   }
   return v
 }
@@ -582,4 +670,46 @@ export function allocation(f: PlatformFilter, by: 'category' | 'platform') {
 /** Relationships that involve an event (including equivalent contracts merged into it). */
 export function eventRelations(id: string, rels: Relation[]) {
   return rels.filter((r) => r.a === id || r.b === id).map((r) => ({ other: EVENTS.find((e) => e.id === (r.a === id ? r.b : r.a))!, cls: r.cls, provenance: r.provenance, note: r.note })).filter((x) => x.other)
+}
+
+/* ───────────── Scenario analysis (Scenario Lab › Analyze) ───────────── */
+/** How the value at reference marks moves from the start to the scenario. Purchases and sales move value between
+ *  cash and holdings, so only the gap between the assumed price and the mark, and fees, change it. Added capital is
+ *  contributed capital, never a gain. Null when a mark is missing (value unavailable). */
+export interface ValueBridge { before: number; added: number; execution: number; fees: number; after: number; feesUnavailable: number }
+export function valueBridge(start: Simulation, sim: Simulation, added: number): ValueBridge | null {
+  const before = scenarioMetrics(start, []).totalValue, after = scenarioMetrics(sim, []).totalValue
+  if (before == null || after == null) return null
+  let execution = 0
+  for (const [id, t] of Object.entries(sim.trades)) {
+    const m = sim.holdings[id]?.mark
+    if (m == null) return null
+    execution += t.qty * (m - t.price)
+  }
+  return { before: before - added, added, execution, fees: sim.fees, after, feesUnavailable: sim.feesUnavailable.length }
+}
+
+/** Per event: capital committed, value at mark and settlement P&L in each outcome (opposing holdings netted). */
+export interface EventProfile { id: string; title: string; resolves: string; cost: number; value: number | null; pnl: Record<Outcome, number>; worst: number; mixed: boolean; ids: string[] }
+/** Display name of a settlement group: its event title, or the market title when another group in the same
+ *  portfolio shares that event title (e.g. two markets of one multi-market event). */
+export function groupTitles(hs: Holding[]): Record<string, string> {
+  const byTitle = new Map<string, Set<string>>()
+  for (const h of hs) byTitle.set(h.eventTitle, (byTitle.get(h.eventTitle) ?? new Set()).add(h.eventId))
+  const out: Record<string, string> = {}
+  for (const h of hs) if (!(h.eventId in out)) out[h.eventId] = (byTitle.get(h.eventTitle)?.size ?? 1) > 1 ? h.title : h.eventTitle
+  return out
+}
+export function eventProfiles(sim: Simulation): EventProfile[] {
+  const hs = Object.values(sim.holdings).filter((h) => h.shares > 0)
+  const ids = [...new Set(hs.map((h) => h.eventId))], names = groupTitles(hs)
+  return ids.map((id) => {
+    const g = hs.filter((h) => h.eventId === id)
+    const pnl = { YES: eventPnl(g, id, 'YES'), NO: eventPnl(g, id, 'NO') }
+    return {
+      id, title: names[id], resolves: g.map((h) => h.resolves).sort()[0] ?? '', cost: sum(g, (h) => h.cost),
+      value: g.some((h) => h.mark == null) ? null : sum(g, (h) => h.shares * h.mark!), pnl, worst: Math.min(pnl.YES, pnl.NO),
+      mixed: new Set(g.map((h) => h.side)).size > 1, ids: g.map((h) => h.id),
+    }
+  })
 }

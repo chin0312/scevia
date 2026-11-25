@@ -12,7 +12,7 @@ import { Button, Callout, Card, CardHeader, Chip, Delta, HeroFigure, Legend, Pag
 import { CLOSED_TRADES, LAST_VISIT, TODAY } from '../data/portfolio'
 import { CATEGORIES, CAT_COLOR, PLATFORM_NAME } from '../data/labels'
 import type { Category, Platform } from '../data/types'
-import { PERIODS, account, allocation, coverage, sourceOf, exposures, fmtDate, netPnlAt, periodRange, positionsFor, series, tradeNet, type Period, type PlatformFilter, type Position } from '../lib/finance'
+import { PERIODS, account, accountsOn, allocation, coverage, sourceOf, exposures, fmtDate, netPnlAt, periodRange, positionsFor, series, tradeNet, type Period, type PlatformFilter, type Position } from '../lib/finance'
 import { fmt, int, kfmt, pct, sfmt } from '../lib/format'
 
 const RAIL: RailSection[] = [
@@ -176,8 +176,8 @@ export default function Overview() {
 
         <div className="tiles">
           <Tile label="Realized P&L" info="Closed trades: shares × (exit − entry) − that trade’s fees. All time." value={sfmt(acct.realized, 2)} tone={acct.realized >= 0 ? 'gain' : 'loss'} foot={`${acct.closedCount} closed · after ${fmt(acct.closedFees, 2)} fees`} />
-          <Tile label="Unrealized P&L" info="Open positions at mark price minus average cost, before fees. Fees paid on open fills are subtracted once in net P&L." value={sfmt(acct.unrealized, 2)} tone={acct.unrealized >= 0 ? 'gain' : 'loss'} foot={`${acct.openCount} open · open-fill fees ${fmt(acct.openFees, 2)}`} />
-          <Tile label="Capital committed" info="Cost basis of open positions: what you’d lose if every open contract resolved against you." value={fmt(acct.committed)} foot={`${pct((acct.committed / acct.totalValue) * 100, 0)} of portfolio value`} />
+          <Tile label="Unrealized P&L" info="Open positions at mark price minus cost basis. Cost basis includes fees paid on those purchases, so unrealized P&L is after acquisition fees." value={sfmt(acct.unrealized, 2)} tone={acct.unrealized >= 0 ? 'gain' : 'loss'} foot={`${acct.openCount} open · incl. ${fmt(acct.openFees, 2)} purchase fees`} />
+          <Tile label="Capital committed" info="Cost basis of open positions, including purchase fees: what you’d lose if every open contract resolved against you." value={fmt(acct.committed)} foot={`${pct((acct.committed / acct.totalValue) * 100, 0)} of portfolio value`} />
           <Tile label="Cash" info="Net deposits + realized P&L − cost and fees of open fills, per platform." value={fmt(acct.cash, 2)} foot={f === 'all' ? `Poly ${fmt(account('pm').cash)} · Kalshi ${fmt(account('ks').cash)}` : `${plat} balance`} />
           <Tile label="Win rate · all time" info="Resolved positions that settled in your favour ÷ all resolved positions (early exits excluded). Small samples are noisy." value={acct.resolved ? `${Math.round((acct.wins / acct.resolved) * 100)}%` : '—'} foot={`${acct.wins} of ${acct.resolved} resolved`} />
         </div>
@@ -243,8 +243,9 @@ export default function Overview() {
               <p className="t3" style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--space-2)' }}>Sample portfolio. No account is connected.</p>
               {(['pm', 'ks'] as Platform[]).filter((p) => f === 'all' || p === f).map((p) => {
                 const c = coverage(p), src = sourceOf(p)
-                return <div className="cov" key={p}><PlatformBadge p={p} /><span>{c.fills} fills · {c.settlements} settlements</span><span className={src.stale ? 'stale' : 't3'} title={src.stale ? 'Older than 24 hours' : undefined}>as of {fmtDate(src.asOf)}{src.stale ? ' · stale' : ''}</span></div>
+                return <div className="cov" key={p}><PlatformBadge p={p} /><span>{accountsOn(p).map((a) => a.label).join(', ')} · {c.fills} fills · {c.settlements} settlements</span><span className={src.stale ? 'stale' : 't3'} title={src.stale ? 'Older than 24 hours' : undefined}>as of {fmtDate(src.asOf)}{src.stale ? ' · stale' : ''}</span></div>
               })}
+              <Link className="link" style={{ display: 'inline-block', marginTop: 'var(--space-3)' }} to="/accounts">Accounts &amp; records (sample workspace) →</Link>
               {feeEstimateTrades.length > 0 && <div style={{ marginTop: 'var(--space-3)' }}>
                 <Callout tone="warn">{feeEstimateTrades.length} Kalshi settlements have no fee detail, so their fees ({fmt(feeEstimateTrades.reduce((a, t) => a + t.fees, 0), 2)} total) are estimates. <button type="button" className="link" onClick={() => setFeeReview(true)}>Review</button></Callout>
               </div>}

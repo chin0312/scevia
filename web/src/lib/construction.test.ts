@@ -60,7 +60,8 @@ describe('hypothetical new instruments', () => {
     const s = simulate([row(i, null, 0.12), { ...row(inst('pm-lakers-2027'), 100, null) }], { fees: DEFAULT_FEES })
     expect(Object.keys(s.errors)).toHaveLength(2)
     expect(Object.values(s.holdings).some((h) => h.isNew)).toBe(false)
-    expect(simulate([row(i, 1.5, 0.12)], { fees: DEFAULT_FEES }).errors[row(i, 0, 0).id]).toMatch(/whole/)
+    expect(simulate([row(i, 1.555, 0.12)], { fees: DEFAULT_FEES }).errors[row(i, 0, 0).id]).toMatch(/2 decimals/)
+    expect(simulate([row(i, 1.5, 0.12)], { fees: DEFAULT_FEES }).errors).toEqual({}) // fractional quantities are allowed
   })
   it('a position without a reference price makes market value unavailable, not zero', () => {
     const i = inst('ks-wti-90'), s = simulate([row(i, 100, 0.4)], { fees: { mode: 'excluded' as const } })

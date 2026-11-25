@@ -25,7 +25,7 @@ describe('account identities', () => {
     const a = account(f)
     close(a.totalValue - a.netDeposits, a.netPnl)
     close(a.totalValue, a.cash + a.positionsValue)
-    close(a.netPnl, a.realized + a.unrealized - a.openFees)
+    close(a.netPnl, a.realized + a.unrealized) // open-fill fees are inside cost basis, so inside unrealized
     close(a.fees, a.closedFees + a.openFees)
   })
   it('platform accounts add up to the total', () => {
@@ -44,7 +44,8 @@ describe('account identities', () => {
   it('positions derive average cost from fills', () => {
     for (const p of POSITIONS) {
       const raw = OPEN_POSITIONS.find((x) => x.id === p.id)!
-      close(p.cost, raw.fills.reduce((s, f) => s + f.shares * f.price, 0))
+      close(p.cost, raw.fills.reduce((s, f) => s + f.shares * f.price + f.fee, 0)) // weighted average incl. acquisition fees (backend convention)
+      close(p.fees, raw.fills.reduce((s, f) => s + f.fee, 0))
       close(p.avg * p.shares, p.cost)
       close(p.ifWin, p.shares - p.cost)
       close(p.ifLose, -p.cost)
@@ -95,10 +96,10 @@ describe('periods and analytics', () => {
       close(s.months.reduce((a, m) => a + m.realized, 0), s.realized)
     }
   })
-  it.each(['1M', '3M', '6M', 'YTD', 'All'] as const)('period %s: realized + change in unrealized − new-fill fees = net', (period) => {
+  it.each(['1M', '3M', '6M', 'YTD', 'All'] as const)('period %s: realized + change in unrealized (after new-fill fees) = net', (period) => {
     for (const f of F) {
       const s = periodStats(f, periodRange(period))
-      close(s.realized + s.unrealizedChange - s.openFillFees, s.netPnl)
+      close(s.realized + s.unrealizedChange, s.netPnl)
       close(s.fees, s.trades.reduce((a, t) => a + t.fees, 0) + s.openFillFees)
     }
   })
@@ -108,7 +109,7 @@ describe('periods and analytics', () => {
     expect(carried).toBeTruthy()
     expect(tradesIn(carried.platform, r.start, r.end).map((t) => t.id)).toContain(carried.id)
     const s = periodStats('all', r)
-    close(s.realized + s.unrealizedChange - s.openFillFees, netPnlAt('all', r.end) - netPnlAt('all', r.start))
+    close(s.realized + s.unrealizedChange, netPnlAt('all', r.end) - netPnlAt('all', r.start))
   })
   it('All-period net P&L equals the account’s net P&L', () => {
     close(periodStats('all', periodRange('All')).netPnl, account('all').netPnl - netPnlAt('all', periodRange('All').start))
@@ -197,7 +198,7 @@ describe('scenario simulation', () => {
     const m = scenarioMetrics(sim, rels), fee = kalshiFee(d, px)
     expect(sim.realized).toBe(0)
     close(m.cash, base.cash - d * px - fee)
-    close(m.committed, base.committed + d * px)
+    close(m.committed, base.committed + d * px + fee) // the buy fee enters cost basis
     close(m.totalValue! - base.totalValue!, d * (p.mark - px) - fee)
     close(m.bestValue! - base.bestValue!, d * (1 - px) - fee) // only settlement can pay out
   })
@@ -321,8 +322,8 @@ describe('event details', () => {
 describe('event exposure with each holding’s own side', () => {
   const ev = { id: 'x', name: 'Binary event', short: 'X', category: 'Economics' as const }
   const pos = (id: string, side: 'YES' | 'NO', shares: number, price: number, platform: 'pm' | 'ks' = 'pm') =>
-    derivePosition({ id, market: id, marketId: id, feeSchedule: sampleFeeSchedule(platform, 'Economics'), eventId: 'x', category: 'Economics', platform, side, mark: price, markAtLastVisit: price, resolves: '2026-12-31', fills: [{ date: '2026-11-01', shares, price, fee: 0 }] })
-  const holdings = (ps: ReturnType<typeof pos>[]) => ps.map((p) => ({ id: p.id, eventId: p.eventId, platform: p.platform, side: p.side, shares: p.shares, cost: p.cost, mark: p.mark as number | null, category: p.category, title: p.market, eventTitle: 'Binary event', marketId: p.marketId }))
+    derivePosition({ id, market: id, marketId: id, accountId: `${platform}-main`, feeSchedule: sampleFeeSchedule(platform, 'Economics'), eventId: 'x', category: 'Economics', platform, side, mark: price, markAtLastVisit: price, resolves: '2026-12-31', fills: [{ date: '2026-11-01', shares, price, fee: 0 }] })
+  const holdings = (ps: ReturnType<typeof pos>[]) => ps.map((p) => ({ id: p.id, eventId: p.eventId, platform: p.platform, side: p.side, shares: p.shares, cost: p.cost, mark: p.mark as number | null, category: p.category, title: p.market, eventTitle: 'Binary event', marketId: p.marketId, resolves: p.resolves, accountId: p.accountId as string | null }))
 
   it('opposing YES and NO holdings offset at settlement; committed capital stays gross', () => {
     const e = eventExposureOf(ev, [pos('y', 'YES', 100, 0.6), pos('n', 'NO', 60, 0.4, 'ks')], 84)
@@ -357,7 +358,7 @@ describe('event exposure with each holding’s own side', () => {
   })
   it('largest single-event loss nets opposing holdings', () => {
     const ps = [pos('y', 'YES', 100, 0.6), pos('n', 'NO', 60, 0.4)]
-    const sim = { holdings: Object.fromEntries(holdings(ps).map((h) => [h.id, h])), cash: { pm: 0, ks: 0 }, realized: 0, fees: 0, errors: {}, shortfall: { pm: 0, ks: 0 }, realizedBy: {}, feesBy: {}, feeStatusBy: {}, feesUnavailable: [] }
+    const sim = { holdings: Object.fromEntries(holdings(ps).map((h) => [h.id, h])), cash: { pm: 0, ks: 0 }, realized: 0, fees: 0, errors: {}, shortfall: { pm: 0, ks: 0 }, realizedBy: {}, feesBy: {}, feeStatusBy: {}, feesUnavailable: [], targets: {}, trades: {}, startValue: null }
     close(scenarioMetrics(sim, []).largestEventLoss, 24)
   })
 })

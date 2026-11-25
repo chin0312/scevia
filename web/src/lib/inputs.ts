@@ -7,11 +7,14 @@ export type Parsed = { state: 'empty' } | { state: 'partial'; message: string } 
 
 const clean = (t: string) => t.trim().replace(/^\$/, '').replace(/,(?=\d{3}(\D|$))/g, '')
 
-/** Whole shares. Fractional quantities aren't supported yet (provider lot sizes will define them in Phase 2). */
+/** Shares, with up to 2 decimals (the hypothetical quantity step; venue lot sizes aren't enforced without provider
+ *  metadata). "12." is still being typed. */
 export function parseShares(text: string): Parsed {
   const t = clean(text)
   if (t === '') return { state: 'empty' }
-  if (!/^\d+$/.test(t)) return /^\d+\.\d*$/.test(t) ? { state: 'invalid', message: 'Use whole shares' } : { state: 'invalid', message: 'Enter digits only, e.g. 2500' }
+  if (/^\d+\.$/.test(t)) return { state: 'partial', message: 'Finish entering a quantity' }
+  if (/^\d+\.\d{3,}$/.test(t)) return { state: 'invalid', message: 'Use at most 2 decimals' }
+  if (!/^\d+(\.\d{1,2})?$/.test(t)) return { state: 'invalid', message: 'Enter a quantity such as 2500 or 12.5' }
   return { state: 'ok', value: Number(t) }
 }
 

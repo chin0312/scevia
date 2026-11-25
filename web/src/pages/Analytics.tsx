@@ -121,7 +121,7 @@ export default function Analytics() {
   return (
     <div className="shell">
       <SectionRail title="Analytics" sections={RAIL}>
-        <div className="rail-card"><b>Definitions</b>Net P&amp;L = realized + change in unrealized − fees on new fills. Deposits and withdrawals never count as performance. <span className="t3">History uses weekly snapshots.</span></div>
+        <div className="rail-card"><b>Definitions</b>Net P&amp;L = realized + change in unrealized (after fees on new purchases). Deposits and withdrawals never count as performance. <span className="t3">History uses weekly snapshots.</span></div>
       </SectionRail>
       <main>
         <PageHead caption={`Performance · ${range.label} · ${scope}`} title="Where your results come from"
@@ -178,8 +178,7 @@ export default function Analytics() {
                 </button>
               ))}
               <div className="attr" style={{ fontWeight: 'var(--font-weight-semibold)' }}><span>Realized</span><span /><span /><span className={cx('r', stats.realized >= 0 ? 'gain' : 'loss')}>{sfmt(stats.realized)}</span><span className="r t3">{stats.trades.length}</span></div>
-              <div className="attr t2"><span>Change in unrealized</span><span /><span /><span className={cx('r', stats.unrealizedChange >= 0 ? 'gain' : 'loss')}>{sfmt(stats.unrealizedChange)}</span><span className="r t3">—</span></div>
-              {stats.openFillFees > 0 && <div className="attr t2"><span>Fees on new fills</span><span /><span /><span className="r loss">{sfmt(-stats.openFillFees)}</span><span className="r t3">—</span></div>}
+              <div className="attr t2"><span>Change in unrealized{stats.openFillFees > 0 ? <small className="t3"> · incl. −{fmt(stats.openFillFees, 2)} fees on new purchases</small> : null}</span><span /><span /><span className={cx('r', stats.unrealizedChange >= 0 ? 'gain' : 'loss')}>{sfmt(stats.unrealizedChange)}</span><span className="r t3">—</span></div>
               <div className="attr" style={{ fontWeight: 'var(--font-weight-semibold)' }}><span>Net P&amp;L</span><span /><span /><span className={cx('r', stats.netPnl >= 0 ? 'gain' : 'loss')}>{sfmt(stats.netPnl)}</span><span className="r t3" /></div>
               <p className="t3" style={{ fontSize: 'var(--font-size-xs)', marginTop: 'var(--space-3)' }}>Realized counts each trade closed in this period in full, including gains or losses that built up before the period began. That earlier part is reversed in “Change in unrealized”, so the rows add up to the period’s net P&amp;L.</p>
             </div>

@@ -8,6 +8,7 @@ _Last updated: 2026-11-25_
 
 - **Frontend:** all four modules are built (Overview, Analytics, Risk, Scenario Lab). It is a dark-only design system enforced by lint.
 - **Data:** a deterministic **sample portfolio** (`web/src/data/sample.ts`) used as both fixture and exploration mode. There is no backend, no auth and no account connections.
+- **Records workspace:** `/accounts` is an isolated sample of account and record management (imports, filters, bulk decisions); it never changes portfolio figures.
 - **Calculations:** one pure module (`web/src/lib/finance.ts`) with 50+ unit tests. Scenario bookkeeping is in `web/src/lib/scenarios.ts`.
 - **Persistence:** scenarios (with their fee treatment and constraints) and the guardrail are kept in `sessionStorage` (one browser tab) through `lib/storage.ts`.
   - Only `scevia-`-prefixed keys are used and cleared.
@@ -82,14 +83,15 @@ A future authorized workspace persists the last three per user. Portfolio record
 ## Scenario Lab: what exists, what Phase 2/5 replace
 
 **Built (Phase 0):**
-- current-portfolio and empty-portfolio starting points;
-- per-platform added capital;
-- per-scenario fee treatment (provider estimate / custom / excluded) and hypothetical settlement constraints;
-- held and new instruments (`Adjustment.instrument`);
-- the Add position dialog (holdings / search / paste link);
-- allocation impact;
-- comparison against each scenario's own start;
-- migration from older stored scenarios (`scevia-scenarios-v3` → `-v4`).
+- an entry page (`lab/Home.tsx`): *Modify current portfolio* (with a preview of what is inherited) and *Build from scratch* (with optional starting capital per venue), saved-scenario cards, optional examples; no empty charts before a scenario exists;
+- an active scenario in three views sharing one state (`ScenarioLab.tsx`): **Build** (setup, positions, live cash & value summary), **Analyze** (`lab/Analyze.tsx`: summary, value bridge, settlement range, allocation, event exposure, resolution timeline, outcome matrix, payoffs, position detail), **Compare** (`lab/Compare.tsx`: pick scenarios, bases, charts, detailed table);
+- essentials inline (starting portfolio, capital); fees, constraints and methodology in an assumptions drawer, summarized in one line;
+- sizing by shares, $ amount or % of starting value (`Adjustment.size`, `targetShares`), fractional quantities (0.01 step);
+- multi-select Add markets (holdings / search with filters / paste link), one selection per instrument across tabs;
+- bulk actions with distinct semantics: *Remove from scenario* (restores the holding), *Set target to 0* (simulates an exit), *Reset to current size*, *Use reference prices*, with undo;
+- per-scenario fee treatment and hypothetical settlement constraints; feasibility followed through linked constraints (`partialFeasible`);
+- comparison against each scenario's own start, with funding compared per venue;
+- migration from older stored scenarios (`scevia-scenarios-v3` → `-v4`); `baseAsOf` and `size` added without a new key (older entries read as unknown / shares).
 
 **Data boundary:**
 - `MarketCatalog` (`lib/markets.ts`), with `search(query, {provider})` and `resolveLink(url)` returning a `LinkResolution`.
@@ -113,11 +115,51 @@ A future authorized workspace persists the last three per user. Portfolio record
 | Settlement groups | Which contracts settle together comes from **reviewed** relationships, never title matching. |
 
 **Phase 5 (real-data scenario construction):**
-- load the user's portfolio asynchronously as the "current portfolio" start;
+- load the user's **effective** portfolio (after reconciliation decisions) asynchronously as the "current portfolio" start; never excluded records or not-seen provider rows as confirmed holdings; say which hypothetical calculations remain possible when starting quantities, cash or costs are unknown;
+- key scenario cash by **account** (today: by venue, one sample account each) and give each new purchase a destination account or standalone funding scope;
 - persist scenarios per user (workspace), including instrument refs and the reference price/time used;
 - replace fixed `pm`/`ks` with provider ids;
 - use real fees;
 - replace the 16-event cap with a bounded exact method.
+
+## Accounts, venues, sources and identity
+
+The frontend now distinguishes (types in `data/types.ts`, sample in `data/sample.ts`):
+
+| Concept | Frontend | Notes |
+|---|---|---|
+| Portfolio | `PortfolioData` | The user-selected set of accounts. |
+| Financial account | `AccountRef {id, venue, label, kind, sources}`; `OpenPosition.accountId`; `Holding.accountId` | One wallet or venue login. Several can share a venue. |
+| Venue | `Platform` (`pm` / `ks`) | Where positions are held. Still a fixed pair in this build. |
+| Acquisition source | `AcquisitionKind` (`api` / `csv` / `manual`) | How records arrive. CSV is not a venue; Predexon would be a source, not an exchange. |
+| Market / outcome instrument | `InstrumentRef` (`provider:marketId:outcome`) | Provider-native identity. |
+| Account-specific holding | `Position.id` | Two accounts holding the same instrument are two positions. |
+
+- `holdingsOfInstrument(i)` returns every account's holding of an instrument; `positionFor(i)` returns one only when exactly one account holds it, never "the first". The Add markets dialog lists holdings per account; a searched instrument held in several accounts is added as a new purchase (the user picks the account under *Your holdings* to change an existing one).
+- Scenario cash is still per **venue**. With one sample account per venue this equals the account; Phase 5 must key cash by account (see above).
+
+## Accounting ownership
+
+The backend replay (Phase 3, PR #5) is the authority for actual portfolio results: weighted-average cost with acquisition fees in basis, decimal arithmetic, settlement entitlements separate from cash, provider observations vs. reconstructed vs. user-declared values, and per-metric availability. The frontend keeps:
+- `lib/finance.ts` calculations over the **sample** ledger (now on the same cost-basis convention), and
+- the scenario engine (`simulate`) for immediate hypothetical interactions.
+
+It must not build a second actual ledger. Phase 4 integration maps replay results (holdings, cash by account and asset, realized/unrealized with availability, discrepancies, coverage) onto the presentation model; unknown values stay unavailable, and a known subset is never shown as a verified total. Differences that remain are listed in `docs/METHODOLOGY.md › Account figures`.
+
+## User-controlled records (sample workspace)
+
+`/accounts` (`pages/Records.tsx`, `lib/records.ts`, `data/sampleRecords.ts`) prototypes account and record management against an **isolated sample workspace**. Nothing there changes portfolio figures; nothing is uploaded; only bundled sample CSV files can be "imported".
+
+| Backend contract (ACCOUNTING.md) | Sample workspace |
+|---|---|
+| `POST /accounting/accounts` (independent account) | "New imported account" in the import flow |
+| `POST /imports/preview` + `confirm` (`acceptUnlinked`) | Import flow: file → account → relationship (supplement / independent) → preview (overlaps, unreported fees) → confirm (include unmatched rows or keep them for review) → result |
+| `GET /accounting/records` filters | Search, account, venue, source, type, inclusion (incl. corrected), date range, potential duplicates |
+| `POST /accounting/adjustments/preview` / `confirm` (explicit keys or bounded `selection`) | Select rows, select page, **select all matching**; preview shows records changing state and the change in included cash / shares (unknown amounts counted); confirm; undo |
+| Actions `include` / `exclude` / `restore` / `distinct` / `duplicate` / `correct` | Same actions; corrections keep the original values and apply only to imported / manual rows; provider rows can't be edited |
+| `POST /accounting/manual-records` | "Add manual record" (imported or manual accounts only) |
+
+Integration replaces `lib/records.ts` with API calls (keeping the same UI states), uses the returned review revision on confirm and handles 409 by re-previewing. The preview's simple effects are replaced by the backend's before/after holdings and cash. Permanent source deletion stays out of this view.
 
 ## Adding sources (CSV, providers)
 

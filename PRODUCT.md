@@ -91,12 +91,14 @@ The long-term product is a privacy-first **cloud workspace**: continuity across 
 
 ## Scenario Lab
 
-Scenario Lab is a **portfolio construction and simulation workspace**. It follows the workflow below, without forcing a wizard: users move freely between inputs and results.
-1. Choose or create a scenario.
-2. Set it up: the starting portfolio (current or empty), optional added capital, fee treatment, and (optionally) hypothetical settlement constraints.
-3. Build the hypothetical portfolio.
-4. Review the impact: before/after, allocation, settlement outcomes.
-5. Compare scenarios.
+Scenario Lab is a **portfolio construction and simulation workspace**. The user should know what to do before needing any formula; methodology stays one click away.
+- **Entry.** Two starting paths, each with a short description and one action: *Modify current portfolio* (shows what is inherited: value, cash, positions, accounts) and *Build from scratch* (optional starting capital per venue; nothing inherited). Saved scenarios are listed to resume; examples are optional. Nothing is created and no chart is drawn until the user picks something.
+- **Active scenario: Build · Analyze · Compare.** Three views of the same scenario state, not a wizard. A one-line summary of the scenario's assumptions sits above them with *Edit assumptions*.
+  - **Build:** essentials first (starting portfolio, capital), then positions, with a live cash & value summary beside them on wide screens.
+  - **Analyze:** a short summary (value at marks and feasible settlement range first), then charts that each answer one question, then exact tables. Anything in the analysis links back to the row that causes it.
+  - **Compare:** the user picks which scenarios to compare; each is measured against its own start.
+- **Progressive disclosure.** Fees, the assumed order role, hypothetical constraints and the methodology live in the assumptions drawer. Limitations appear where they change a number (an unavailable fee on its row and in the fee total), not as repeated paragraphs.
+- **Construction.** Positions can be sized in shares, as a $ amount at the assumed price, or as a % of the scenario's starting value; these are views of one position, and switching never changes it. Markets are added several at a time, one explicit outcome each. Bulk actions keep their meaning: *Remove from scenario* restores the holding; *Set target to 0* simulates an exit.
 
 - **A new workspace is neutral.**
   - No scenarios and no pre-filled trades.
@@ -117,9 +119,19 @@ Scenario Lab is a **portfolio construction and simulation workspace**. It follow
     - reference price and its timestamp.
   - It also stores its funding and assumptions.
 - **Useful without an account.** An empty-portfolio scenario needs no connected source.
+- **Honest charts.** No equity curves, annualized returns, Sharpe ratios, drawdowns or Monte Carlo for hypothetical scenarios, and no expected values without stated probabilities. A settlement range is not a distribution.
 - **Current build:**
   - Market search and link resolution run against a small **sample market catalog**, labelled "Sample market data".
   - Real lookup arrives with provider integration (Phase 2), and real-data scenarios with Phase 5.
+
+## Accounts, sources and records
+
+A portfolio is **user-controlled** and can combine several accounts and acquisition sources.
+- **Venue** (Polymarket, Kalshi) is where positions are held. **Account** is one wallet or login there; several accounts can share a venue. **Source** is how records arrive (API sync, CSV import, manual entry). CSV is a source, not a venue.
+- Connection status is not accounting completeness: an account shows whether its opening balance and history are declared.
+- Users manage their records: include, exclude, restore, correct imported or manual rows, resolve potential duplicates, accept distinct identical trades, and add manual records. Bulk actions show their scope (selected, page, all matching), preview their effect and are reversible. Excluding never deletes source data.
+- A CSV import names its account and whether it supplements that account's history or stands alone. Overlaps are offered for review, never merged automatically; unmatched rows can be accepted in one decision.
+- In this build these flows run in a clearly labelled **sample records workspace** (`/accounts`) that never changes portfolio figures. Real imports and decisions need the backend accounting API.
 
 ## Interaction principles
 
@@ -141,9 +153,11 @@ Scenario Lab is a **portfolio construction and simulation workspace**. It follow
 | Term | Meaning |
 |---|---|
 | Mark | Last traded price on the platform. |
-| Cost basis / capital committed | What an open position cost (shares × fill price), excluding fees. |
-| Realized / unrealized P&L | From closed trades after their fees / from open positions at mark, before fees. |
-| Net P&L | Realized + unrealized − fees on open fills. Never includes deposits. |
+| Cost basis / capital committed | What an open position cost: shares × fill price + purchase fees (weighted average). |
+| Realized / unrealized P&L | From closed trades after their fees / from open positions at mark vs. cost basis (after purchase fees). |
+| Net P&L | Realized + unrealized. Never includes deposits. |
+| Account / venue / source | One wallet or login / where positions are held / how records arrive (API, CSV, manual). |
+| Value at reference marks | Cash + positions × reference price in a scenario. Not a quote and not a forecast. |
 | Settlement payoff | $1 per share if your side wins, $0 otherwise. |
 | Feasible outcome | A combination of event results that can actually happen given verified relationships (and, inside a scenario, its hypothetical constraints). Not a probability. |
 | Settlement constraint | A logical rule between events: equivalent (resolve the same way) or mutually exclusive (not both YES). Related and unknown impose none. |

@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 /* Data sources panel: what the figures are based on, and the ways a user can provide their own data.
    The user chooses their sources; none is required, and a file import is a source in its own right (any provider).
    Connections and imports don't work in this build, so their actions are disabled rather than simulated. */
@@ -54,7 +55,7 @@ function DataSources({ onClose }: { onClose: () => void }) {
         <span className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>No files</span>
         <Button size="sm" disabled title="Not available in this version">Import</Button>
       </div>
-      <Callout icon="info">Connecting accounts and importing files aren’t available in this version. You can explore every module with the sample portfolio.</Callout>
+      <Callout icon="info">Connecting accounts and importing files aren’t available in this version. You can explore every module with the sample portfolio, and try account and record management in the <Link to="/accounts" onClick={onClose}>sample records workspace</Link>.</Callout>
       {PORTFOLIO.isSample && <SampleCoverage />}
     </Modal>
   )

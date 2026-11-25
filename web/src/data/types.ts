@@ -13,8 +13,21 @@ export interface CashFlow { date: string; platform: Platform; amount: number }
 
 export interface Fill { date: string; shares: number; price: number; fee: number }
 
+/** How records reach an account. An acquisition method, never a trading venue. */
+export type AcquisitionKind = 'api' | 'csv' | 'manual'
+/** A financial account at one venue (e.g. one Polymarket wallet). Several accounts can share a venue, and one account
+ *  can be fed by several acquisition sources (an API connection supplemented by a CSV file). */
+export interface AccountRef {
+  id: string; venue: Platform; label: string
+  /** How the account was added: connected (API / address tracking), imported (CSV only) or manual. */
+  kind: 'connected' | 'imported' | 'manual'
+  sources: AcquisitionKind[]
+}
+
 export interface OpenPosition {
   id: string; market: string; eventId: string; category: Category; platform: Platform; side: Side
+  /** The financial account holding this position. Two accounts can hold the same instrument. */
+  accountId: string
   /** Provider-native market id. A position id is account-specific; the market id identifies the contract. */
   marketId: string
   /** Fee parameters of this market for hypothetical trades (null = not published / unknown). Not used for history. */
@@ -60,6 +73,8 @@ export interface PortfolioData {
   lastVisit: string
   /** True for the bundled sample portfolio. The UI labels sample data as such. */
   isSample: boolean
+  /** Financial accounts that contribute to this portfolio. */
+  accounts: AccountRef[]
   cashFlows: CashFlow[]
   openPositions: OpenPosition[]
   closedTrades: ClosedTrade[]

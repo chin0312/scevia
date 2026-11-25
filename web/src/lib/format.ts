@@ -20,3 +20,5 @@ export const splitMoney = (v: number) => {
 
 /** Deterministic pseudo-random generator so mock charts are stable between renders. */
 export const rng = (seed: number) => () => (seed = (seed * 16807) % 2147483647) / 2147483647
+/** Quantity: whole numbers without decimals, fractional ones with up to 2. */
+export const qty = (v: number) => (Number.isInteger(v) ? nf(0).format(v) : new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(v))

@@ -20,12 +20,15 @@ export interface ScenarioAssumptions {
 export interface Snapshot { name: string; adjs: Adjustment[]; baseline: Baseline; funding: Partial<Record<Platform, number>>; assumptions: ScenarioAssumptions }
 export interface Scenario extends Snapshot {
   key: string; saved: Snapshot | null; savedAt: string | null; color: string
+  /** Date of the actual portfolio this scenario was created from (current-portfolio scenarios). When the actual
+   *  portfolio has moved on, the scenario says so instead of silently rebasing. null = unknown (older scenarios). */
+  baseAsOf?: string | null
   /** What Reset returns a never-saved scenario to: empty for a new one, the source's state for a duplicate or example. */
   start?: Snapshot
 }
 export type ScenarioStatus = 'new' | 'saved' | 'modified'
 
-const copyAdjs = (a: Adjustment[]) => a.map((x) => ({ ...x, instrument: x.instrument ? { ...x.instrument } : undefined }))
+const copyAdjs = (a: Adjustment[]) => a.map((x) => ({ ...x, instrument: x.instrument ? { ...x.instrument } : undefined, size: x.size ? { ...x.size } : undefined }))
 const copyAssumptions = (a: ScenarioAssumptions): ScenarioAssumptions => ({ ...a, ...(a.fees ? { fees: { ...a.fees } } : {}), ...(a.constraints ? { constraints: a.constraints.map((c) => ({ ...c })) } : {}) })
 const snap = (s: Snapshot): Snapshot => ({ name: s.name, adjs: copyAdjs(s.adjs), baseline: s.baseline, funding: { ...s.funding }, assumptions: copyAssumptions(s.assumptions) })
 /** Content equality, ignoring key order and undefined fields. */
@@ -34,7 +37,7 @@ const snap = (s: Snapshot): Snapshot => ({ name: s.name, adjs: copyAdjs(s.adjs),
  *  doesn't make a scenario "unsaved" (results always show the reference time). */
 const norm = (s: Snapshot) => JSON.stringify({
   n: s.name, b: s.baseline, f: [s.funding.pm ?? null, s.funding.ks ?? null],
-  a: s.adjs.map((x) => [x.id, x.to, x.price, x.instrument ? `${x.instrument.provider}:${x.instrument.marketId}:${x.instrument.outcome}` : null]),
+  a: s.adjs.map((x) => [x.id, x.size ? null : x.to, x.price, x.instrument ? `${x.instrument.provider}:${x.instrument.marketId}:${x.instrument.outcome}` : null, x.size ? [x.size.by, x.size.value] : null]),
   fee: s.assumptions.fees ?? null,
   c: (s.assumptions.constraints ?? []).map((c) => [c.a, c.b, c.cls].join()).sort(),
 })
@@ -44,9 +47,9 @@ export const status = (s: Scenario): ScenarioStatus => (!s.saved ? 'new' : same(
 export const isDirty = (s: Scenario) => status(s) !== 'saved'
 export const statusLabel = (s: Scenario) => ({ new: 'Not saved', saved: 'Saved', modified: 'Unsaved changes' })[status(s)]
 
-export const create = (key: string, color: string, name = 'Untitled scenario', baseline: Baseline = 'portfolio'): Scenario => {
-  const base: Snapshot = { name, adjs: [], baseline, funding: {}, assumptions: {} }
-  return { ...base, key, saved: null, savedAt: null, color, start: snap(base) }
+export const create = (key: string, color: string, name = 'Untitled scenario', baseline: Baseline = 'portfolio', baseAsOf: string | null = null, funding: Snapshot['funding'] = {}): Scenario => {
+  const base: Snapshot = { name, adjs: [], baseline, funding: { ...funding }, assumptions: {} }
+  return { ...base, key, saved: null, savedAt: null, color, start: snap({ ...base, funding: {} }), baseAsOf }
 }
 /** A new, unsaved scenario prefilled from an example (examples are never added to the workspace on their own). */
 export const fromExample = (key: string, color: string, ex: Omit<Snapshot, 'funding' | 'assumptions'> & Partial<Snapshot>): Scenario => {
@@ -110,8 +113,9 @@ export function sanitize(raw: unknown, knownIds: (id: string) => boolean): { sce
       const to = a.to === null ? null : isNum(a.to) ? a.to : undefined
       const price = a.price === null ? null : isNum(a.price) ? a.price : undefined
       const instrument = readInstrument(a.instrument)
+      const size = a.size && typeof a.size === 'object' && (a.size.by === 'amount' || a.size.by === 'weight') && isNum(a.size.value) && a.size.value >= 0 ? { by: a.size.by as 'amount' | 'weight', value: a.size.value as number } : undefined
       if (to === undefined || price === undefined || instrument === false || (!instrument && !knownIds(a.id))) { dropped++; continue }
-      out.push({ id: a.id, to, price, ...(instrument ? { instrument } : {}) })
+      out.push({ id: a.id, to, price, ...(instrument ? { instrument } : {}), ...(size ? { size } : {}) })
     }
     return out
   }
@@ -145,7 +149,7 @@ export function sanitize(raw: unknown, knownIds: (id: string) => boolean): { sce
     const saved = x.saved && typeof x.saved === 'object' && typeof x.saved.name === 'string' ? snapshot({ baseline: cur.baseline, funding: cur.funding, assumptions: cur.assumptions, ...x.saved }, x.saved.name) : null
     // Older formats stored `start` as a list of adjustments.
     const start = Array.isArray(x.start) ? { ...cur, adjs: adjs(x.start) } : x.start && typeof x.start === 'object' ? snapshot(x.start, typeof x.start.name === 'string' ? x.start.name : cur.name) : undefined
-    return [{ ...cur, key: x.key, saved, savedAt: typeof x.savedAt === 'string' ? x.savedAt : null, color: typeof x.color === 'string' ? x.color : '', start }]
+    return [{ ...cur, key: x.key, saved, savedAt: typeof x.savedAt === 'string' ? x.savedAt : null, color: typeof x.color === 'string' ? x.color : '', start, baseAsOf: typeof x.baseAsOf === 'string' ? x.baseAsOf : null }]
   })
   const keys = new Set<string>()
   return { scenarios: scenarios.filter((x) => !keys.has(x.key) && keys.add(x.key)), dropped }

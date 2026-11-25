@@ -1,5 +1,5 @@
 /* Scenario Lab helpers shared by its sections: examples, metric rows, per-scenario evaluation, null-safe changes. */
-import { POS_BY_ID, instrumentOfPosition, positionFor, scenarioMetrics, simulate, sourceRelations, withConstraints, type Adjustment, type Constraint, type Holding, type Outcome, type ScenarioMetrics, type Simulation } from '../../lib/finance'
+import { POS_BY_ID, accountOf, groupTitles, instrumentOfPosition, positionFor, scenarioMetrics, simulate, sourceRelations, withConstraints, type Adjustment, type Constraint, type Holding, type Outcome, type ScenarioMetrics, type Simulation } from '../../lib/finance'
 import { DEFAULT_FEES, type FeeAssumption } from '../../lib/fees'
 import type { Relation } from '../../data/types'
 import type { Scenario } from '../../lib/scenarios'
@@ -84,16 +84,22 @@ export function describe(a: Adjustment) {
     refAsOf: i?.refAsOf ?? null,
     resolves: i?.resolves ?? p?.resolves ?? '',
     sample: (i?.source ?? 'sample') === 'sample',
+    /** The account holding it, or null for a new instrument (funded from the scenario's cash on its venue). */
+    account: p ? accountOf(p.accountId) ?? null : null,
   }
 }
+/** How a position's target is entered. All three describe the same position; see lib/finance.ts `targetShares`. */
+export type SizeMode = 'shares' | 'amount' | 'weight'
+export const SIZE_LABEL: Record<SizeMode, string> = { shares: 'Shares', amount: '$ Amount', weight: '% of start' }
 export const platformLabel = (p: keyof typeof PLATFORM_NAME) => PLATFORM_NAME[p]
 
 /** Events present before or after (with shares), for event pickers and payoff views. */
 export function eventsIn(...sims: Simulation[]) {
   const map = new Map<string, { id: string; title: string; sides: Set<Outcome> }>()
+  const names = groupTitles(sims.flatMap((s) => (Object.values(s.holdings) as Holding[]).filter((h) => h.shares > 0)))
   for (const s of sims) for (const h of Object.values(s.holdings) as Holding[]) {
     if (h.shares <= 0) continue
-    const e = map.get(h.eventId) ?? { id: h.eventId, title: h.eventTitle, sides: new Set<Outcome>() }
+    const e = map.get(h.eventId) ?? { id: h.eventId, title: names[h.eventId], sides: new Set<Outcome>() }
     e.sides.add(h.side); map.set(h.eventId, e)
   }
   return [...map.values()]
