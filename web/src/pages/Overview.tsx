@@ -40,7 +40,7 @@ export default function Overview() {
   const [holdTab, setHoldTab] = useState<'Open positions' | 'Resolved' | 'Activity'>('Open positions')
   const [sel, setSel] = useState<Selection>(null)
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: 'value', dir: -1 })
-  const [allocBy, setAllocBy] = useState<'Category' | 'Platform'>('Category')
+  const [allocBy, setAllocBy] = useState<'Category' | 'Platform'>(settings.defaultGrouping === 'platform' ? 'Platform' : 'Category')
   const [hotSlice, setHotSlice] = useState<string | null>(null)
   const [feeReview, setFeeReview] = useState(false)
   const details = useDetails()
@@ -249,7 +249,7 @@ export default function Overview() {
               })}
               {(() => { const ps = (['pm', 'ks'] as Platform[]).filter((p) => f === 'all' || p === f).map(coverage); const t = (k: keyof (typeof ps)[number]) => ps.reduce((a, c) => a + c[k], 0)
                 return <div className="cov-mini"><div><b>{t('open')}</b>open positions</div><div><b>{t('fills')}</b>fills</div><div><b>{t('settlements')}</b>settlements</div><div><b>{t('feeEstimates')}</b>fee estimates</div></div> })()}
-              <Link className="link" style={{ display: 'inline-block', marginTop: 'var(--space-3)' }} to="/accounts">Accounts &amp; records (sample workspace) →</Link>
+              <Link className="link" style={{ display: 'inline-block', marginTop: 'var(--space-3)' }} to="/portfolio/coverage">Full data coverage →</Link>
               {feeEstimateTrades.length > 0 && <div style={{ marginTop: 'var(--space-3)' }}>
                 <Callout tone="warn">{feeEstimateTrades.length} Kalshi settlements have no fee detail, so their fees ({fmt(feeEstimateTrades.reduce((a, t) => a + t.fees, 0), 2)} total) are estimates. <button type="button" className="link" onClick={() => setFeeReview(true)}>Review</button></Callout>
               </div>}

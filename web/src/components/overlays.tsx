@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom'
 import { Icon } from './Icon'
 
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-const focusables = (root: HTMLElement) => [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => el.offsetParent !== null || el === document.activeElement)
+const focusables = (root: HTMLElement) => [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => el.tabIndex >= 0 && (el.offsetParent !== null || el === document.activeElement))
 
 /** Trap Tab inside `ref`, focus the first field (or [data-autofocus]) on open, restore focus on close. */
 export function useFocusTrap(ref: React.RefObject<HTMLElement | null>) {
@@ -99,7 +99,7 @@ export function Menu({ trigger, children, align = 'right', width = 260, label }:
   return (
     <div className="menu-wrap" ref={wrap}>
       {trigger({ 'aria-expanded': open, 'aria-haspopup': 'menu', 'aria-controls': id, onClick: () => setOpen((o) => !o), ref: btn })}
-      {open && <div className="menu" id={id} role="menu" aria-label={label} ref={menu} style={{ [align]: 0, width }}>{children(() => close())}</div>}
+      {open && <div className="menu" id={id} role="menu" aria-label={label} ref={menu} style={{ [align]: 0, width: `min(${width}px, calc(100vw - 16px))` }}>{children(() => close())}</div>}
     </div>
   )
 }

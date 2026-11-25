@@ -61,7 +61,8 @@ export default function ScenarioLab() {
   const [storedActive, setActiveKey] = useSessionState<string>('scevia-active-v4', 'base', (v) => (typeof v === 'string' ? v : null))
   const [view, setView] = useSessionState<View>('scevia-lab-view', 'Build', (v) => (VIEWS.includes(v as View) ? (v as View) : null))
   const { settings } = useSettings()
-  const [mode, setMode] = useSessionState<SizeMode>('scevia-lab-size', settings.labSize, (v) => (v === 'shares' || v === 'amount' || v === 'weight' ? v : null))
+  // A view preference: opens as set in Settings › Scenario Lab; each target keeps the unit it was typed in.
+  const [mode, setMode] = useState<SizeMode>(settings.labSize)
   const activeKey = storedActive === 'base' || scenarios.some((x) => x.key === storedActive) ? storedActive : 'base'
   const storageOk = useStorageHealthy()
   const [renaming, setRenaming] = useState(false)
@@ -90,6 +91,13 @@ export default function ScenarioLab() {
   const nextColor = () => COLORS[scenarios.length % COLORS.length]
   const open = (k: string, v: View = 'Build') => { setActiveKey(k); setRenaming(false); setView(v); setUndo(null); window.scrollTo(0, 0) }
 
+  // Opening a scenario from search (?open=key) only selects it; nothing else changes.
+  useEffect(() => {
+    const k = params.get('open')
+    if (!k) return
+    if (scenarios.some((x) => x.key === k)) { setActiveKey(k); setView('Build') }
+    const next = new URLSearchParams(params); next.delete('open'); setParams(next, { replace: true })
+  }, [params]) // eslint-disable-line react-hooks/exhaustive-deps
   // Hand-offs from other modules (lib/handoff.ts): confirm first; each request id is processed once.
   const [pending, setPending] = useState<{ ids: string[]; from: string | null } | null>(null)
   const handled = useRef<string | null>(null)

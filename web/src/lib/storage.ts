@@ -55,3 +55,21 @@ export function clearScevia(): { ok: boolean; removed: number } {
   const left = sceviaKeys().length
   return { ok: left === 0, removed: keys.length - left }
 }
+
+/** Logical groups of local data, so a user can clear one without losing the others. */
+export const DATA_GROUPS = {
+  preferences: { label: 'Preferences', keys: (k: string) => k === 'scevia-settings' || k === 'scevia-guardrail' || k.startsWith('scevia-lab-') },
+  scenarios: { label: 'Scenarios', keys: (k: string) => k.startsWith('scevia-scenarios') || k.startsWith('scevia-active') || k.startsWith('scevia-handoff') },
+  records: { label: 'Sample records & import history', keys: (k: string) => k.startsWith('scevia-records') },
+  notifications: { label: 'Notification read state & activity', keys: (k: string) => k.startsWith('scevia-notif') },
+} as const
+export type DataGroup = keyof typeof DATA_GROUPS
+export const groupKeys = (g: DataGroup) => sceviaKeys().filter(DATA_GROUPS[g].keys)
+/** Remove one group's keys only. */
+export function clearGroup(g: DataGroup): { ok: boolean; removed: number } {
+  const s = store()
+  if (!s) return { ok: false, removed: 0 }
+  const keys = groupKeys(g)
+  try { keys.forEach((k) => s.removeItem(k)) } catch { return { ok: false, removed: 0 } }
+  return { ok: groupKeys(g).length === 0, removed: keys.length }
+}

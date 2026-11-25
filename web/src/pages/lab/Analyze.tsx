@@ -200,17 +200,17 @@ function Timeline({ E }: { E: Evaluation }) {
   const totalA = rows.reduce((s, r) => s + (r.a?.cost ?? 0), 0), totalB = rows.reduce((s, r) => s + (r.b?.cost ?? 0), 0)
   return (
     <Card id="a-timeline">
-      <CardHeader title="Resolution timeline" sub="When committed capital stops being exposed, by market resolution date" info="Dates are scheduled resolution dates from market data. They aren’t confirmed redemption dates: when cash actually arrives depends on the venue and on redemption." />
+      <CardHeader title="Resolution timeline" sub="Committed capital by scheduled resolution date" info="Dates are scheduled resolution dates from market data. Markets can resolve later than scheduled, and redemption into cash can come later still: exposure isn’t guaranteed to end on these dates." />
       <div className="card-b">
         {rows.length === 0 ? <div className="empty"><p>No open positions.</p></div> : (<>
-          <div className="tl-months" role="list" aria-label="Committed capital still exposed after each month">
+          <div className="tl-months" role="list" aria-label="Committed capital scheduled to resolve after each month">
             {cum.map((c) => {
               const left = totalA - c.a, leftB = totalB - c.b
               return (
                 <div role="listitem" key={c.m} className="tl-m">
                   <span className="t3">{fmtDate(`${c.m}-01`, { month: 'short', year: '2-digit' })}</span>
                   <div className="tl-track"><i className="b" style={{ width: `${totalB ? (leftB / Math.max(totalA, totalB)) * 100 : 0}%` }} /><i className="a" style={{ width: `${totalA ? (left / Math.max(totalA, totalB)) * 100 : 0}%` }} /></div>
-                  <span className="r">{fmt(left)}<small className="t3"> still exposed</small></span>
+                  <span className="r">{fmt(left)}<small className="t3"> scheduled after</small></span>
                 </div>
               )
             })}

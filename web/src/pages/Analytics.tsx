@@ -84,7 +84,7 @@ export default function Analytics() {
   const [period, setPeriod] = useState<Period>(useSettings().settings.defaultPeriod)
   const [compareOn, setCompareOn] = useState(true)
   const [tab, setTab] = useState<'Net' | 'Realized' | 'By platform'>('Net')
-  const [attrBy, setAttrBy] = useState<'Category' | 'Platform'>('Category')
+  const [attrBy, setAttrBy] = useState<'Category' | 'Platform'>(useSettings().settings.defaultGrouping === 'platform' ? 'Platform' : 'Category')
   const details = useDetails()
   const [hotBucket, setHotBucket] = useState<number | null>(null)
 

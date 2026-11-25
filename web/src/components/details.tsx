@@ -140,7 +140,7 @@ function EventBody({ id, scope, open, close }: { id: string; scope: PlatformFilt
     {related.map((r) => (
       <div className="list-row" key={r.other.id}><span>{r.other.name}{r.note && <small className="t3"> · {r.note}</small>}</span><span className="r row"><Chip tone={REL_TEXT[r.cls].tone}>{REL_TEXT[r.cls].label}</Chip><small className="t3">{PROVENANCE_TEXT[r.provenance]}</small></span></div>
     ))}
-    <h5 className="caps">Data <button type="button" className="link" style={{ textTransform: 'none', letterSpacing: 0, marginLeft: 'var(--space-2)' }} onClick={() => connect()}>Data sources…</button></h5>
+    <h5 className="caps">Data <button type="button" className="link" style={{ textTransform: 'none', letterSpacing: 0, marginLeft: 'var(--space-2)' }} onClick={() => { close(); connect('coverage') }}>Data coverage →</button></h5>
     {(e?.platforms ?? []).map((pl) => { const src = sourceOf(pl), c = coverage(pl); return <div className="cov" key={pl}><PlatformBadge p={pl} /><span>{c.fills} fills · {c.settlements} settlements</span><span className={src.stale ? 'stale' : 't3'}>as of {fmtDate(src.asOf)}{src.stale ? ' · stale' : ''}</span></div> })}
     <div className="drawer-actions">
       {!pathname.startsWith('/risk') && <Button icon="shield" onClick={() => { close(); nav(`/risk?event=${id}#payoffs`) }}>Analyze in Risk</Button>}

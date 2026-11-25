@@ -44,7 +44,7 @@ export function StartSetup({ s, E, onChange, onBaseline }: { s: Scenario; E: Eva
           <div className="row" style={{ gap: 'var(--space-2)', flexWrap: 'wrap' }}>
             {(['pm', 'ks'] as Platform[]).map((p) => <FundingInput key={p} p={p} value={s.funding[p]} onChange={(v) => onChange({ funding: { ...s.funding, [p]: v } })} />)}
           </div>
-          <small className="t3">Contributed capital on each venue. It raises cash and the starting value, is never a gain, and isn’t moved between venues.</small>
+          <small className="t3">Contributed capital, added to {(['pm', 'ks'] as Platform[]).map((p) => `${PLATFORM_NAME[p]} · ${accountsOn(p)[0]?.label ?? 'account'}`).join(' and ')}. It raises cash and the starting value, is never a gain, and isn’t moved between accounts.</small>
         </fieldset>
       </div>
     </Card>
