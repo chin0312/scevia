@@ -10,7 +10,7 @@ import type { ProviderPage } from '../providers/adapter.js'
 import { IngestionError } from './errors.js'
 
 const coverageEntitySchema = z.enum([
-  'markets', 'fills', 'cash_movements', 'settlements', 'positions', 'cash_balances', 'prices',
+  'markets', 'fills', 'activity', 'cash_movements', 'settlements', 'positions', 'cash_balances', 'prices',
 ])
 
 const coverageReportSchema = z.object({
@@ -35,6 +35,7 @@ const providerPageSchema = z.object({
 const entityForKind: Record<NormalizedRecord['kind'], CoverageEntity> = {
   market: 'markets',
   fill: 'fills',
+  activity_fact: 'activity',
   cash_movement: 'cash_movements',
   settlement: 'settlements',
   position: 'positions',
@@ -92,7 +93,9 @@ export function validateNormalizedRecords(value: unknown, stream: ProviderSyncSt
       throw new IngestionError('invalid_normalized_provider_record')
     }
     if (!parsed.success) throw new IngestionError('invalid_normalized_provider_record')
-    if (!stream.entities.includes(entityForKind[parsed.data.kind])) {
+    const entity = entityForKind[parsed.data.kind]
+    const isSharedMarketReference = parsed.data.kind === 'market' && stream.referenceEntities?.includes('markets') === true
+    if (!stream.entities.includes(entity) && !isSharedMarketReference) {
       throw new IngestionError('provider_record_outside_stream')
     }
     records.push(parsed.data)

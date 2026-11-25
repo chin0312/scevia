@@ -13,6 +13,7 @@ import {
   markets,
   positionSnapshots,
   priceObservations,
+  providerActivityFacts,
   settlements,
   sourceRecordRevisions,
   sourceRecords,
@@ -60,7 +61,7 @@ async function upsertSourceRecord(
   const payloadSha256 = createHash('sha256').update(JSON.stringify(payload)).digest('hex')
   const sourceOccurredAt = record.kind === 'market'
     ? record.sourceUpdatedAt
-    : record.kind === 'fill' || record.kind === 'cash_movement'
+    : record.kind === 'fill' || record.kind === 'cash_movement' || record.kind === 'activity_fact'
       ? record.occurredAt
       : record.kind === 'settlement'
         ? record.settledAt
@@ -361,6 +362,37 @@ export async function persistPage(input: PersistPageInput): Promise<PersistPageR
             feeStatus: record.feeStatus,
           },
         })
+      } else if (record.kind === 'activity_fact') {
+        await tx.insert(providerActivityFacts).values({
+          providerAccountId: input.providerAccountId,
+          sourceRecordId,
+          externalId: record.externalId,
+          activityType: record.activityType,
+          occurredAt: new Date(record.occurredAt),
+          transactionHash: record.transactionHash,
+          externalMarketId: record.externalMarketId,
+          externalInstrumentId: record.externalInstrumentId,
+          side: record.side,
+          quantity: record.quantity,
+          amount: record.amount,
+          assetCode: record.assetCode,
+          classification: 'unreconciled',
+        }).onConflictDoUpdate({
+          target: [providerActivityFacts.providerAccountId, providerActivityFacts.externalId],
+          set: {
+            sourceRecordId,
+            activityType: record.activityType,
+            occurredAt: new Date(record.occurredAt),
+            transactionHash: record.transactionHash,
+            externalMarketId: record.externalMarketId,
+            externalInstrumentId: record.externalInstrumentId,
+            side: record.side,
+            quantity: record.quantity,
+            amount: record.amount,
+            assetCode: record.assetCode,
+            classification: 'unreconciled',
+          },
+        })
       } else if (record.kind === 'position') {
         const instrumentId = await resolveInstrument(tx, input.providerCode, record.externalMarketId, record.externalInstrumentId)
         const observedAt = new Date(record.observedAt)
@@ -395,6 +427,19 @@ export async function persistPage(input: PersistPageInput): Promise<PersistPageR
           markPrice: record.markPrice,
           markAt: record.markAt === null ? null : new Date(record.markAt),
           settlementAssetCode: record.settlementAssetCode,
+          providerStatus: record.providerStatus ?? null,
+          redeemable: record.redeemable ?? null,
+          mergeable: record.mergeable ?? null,
+          archived: record.archived ?? null,
+          providerCurrentValue: record.providerReported?.currentValue ?? null,
+          providerRealizedPnl: record.providerReported?.realizedPnl ?? null,
+          providerUnrealizedPnl: record.providerReported?.unrealizedPnl ?? null,
+          providerTotalPnl: record.providerReported?.totalPnl ?? null,
+          providerEntryCost: record.providerReported?.entryCost ?? null,
+          providerEntryFees: record.providerReported?.entryFees ?? null,
+          providerTotalCost: record.providerReported?.totalCost ?? null,
+          providerTotalSize: record.providerReported?.totalSize ?? null,
+          providerPercentPnl: record.providerReported?.percentPnl ?? null,
           origin: record.origin,
           reconciliationStatus: record.reconciliationStatus,
           isCurrent: false,
@@ -410,6 +455,19 @@ export async function persistPage(input: PersistPageInput): Promise<PersistPageR
             markPrice: record.markPrice,
             markAt: record.markAt === null ? null : new Date(record.markAt),
             settlementAssetCode: record.settlementAssetCode,
+            providerStatus: record.providerStatus ?? null,
+            redeemable: record.redeemable ?? null,
+            mergeable: record.mergeable ?? null,
+            archived: record.archived ?? null,
+            providerCurrentValue: record.providerReported?.currentValue ?? null,
+            providerRealizedPnl: record.providerReported?.realizedPnl ?? null,
+            providerUnrealizedPnl: record.providerReported?.unrealizedPnl ?? null,
+            providerTotalPnl: record.providerReported?.totalPnl ?? null,
+            providerEntryCost: record.providerReported?.entryCost ?? null,
+            providerEntryFees: record.providerReported?.entryFees ?? null,
+            providerTotalCost: record.providerReported?.totalCost ?? null,
+            providerTotalSize: record.providerReported?.totalSize ?? null,
+            providerPercentPnl: record.providerReported?.percentPnl ?? null,
             origin: record.origin,
             reconciliationStatus: record.reconciliationStatus,
             isCurrent: false,
@@ -547,7 +605,7 @@ export async function initializeCoverage(
 
 function coverageTimestamp(record: NormalizedRecord): string | null {
   if (record.kind === 'market') return record.sourceUpdatedAt
-  if (record.kind === 'fill' || record.kind === 'cash_movement') return record.occurredAt
+  if (record.kind === 'fill' || record.kind === 'cash_movement' || record.kind === 'activity_fact') return record.occurredAt
   if (record.kind === 'settlement') return record.settledAt
   return record.observedAt
 }
@@ -564,6 +622,7 @@ export async function updateObservedRanges(
     if (at === null) continue
     const entity = record.kind === 'market' ? 'markets'
       : record.kind === 'fill' ? 'fills'
+        : record.kind === 'activity_fact' ? 'activity'
         : record.kind === 'cash_movement' ? 'cash_movements'
           : record.kind === 'settlement' ? 'settlements'
             : record.kind === 'position' ? 'positions'

@@ -25,6 +25,7 @@ export class ProviderAdapterError extends Error {
   constructor(
     readonly code: string,
     readonly retryable: boolean,
+    readonly retryAfterMs: number | null = null,
   ) {
     super(code)
     this.name = 'ProviderAdapterError'

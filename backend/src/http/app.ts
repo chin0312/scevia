@@ -16,13 +16,16 @@ import {
   markets,
   portfolios,
   positionSnapshots,
+  providerActivityFacts,
   providerAccounts,
   settlements,
   sourceRecords,
   syncRuns,
+  users,
 } from '../db/schema.js'
 import { ProviderAdapterError } from '../providers/adapter.js'
 import { ProviderRegistry, providerRegistry } from '../providers/registry.js'
+import { PolymarketMarketDataService, PublicMarketError } from '../providers/polymarket/market-data.js'
 import { IngestionError, SyncAlreadyRunningError } from '../ingestion/errors.js'
 import { IngestionService } from '../ingestion/sync.js'
 import { matchesDevelopmentBearer } from './auth.js'
@@ -31,6 +34,7 @@ export interface AppOptions {
   config: ServerConfig
   database: Database
   registry?: ProviderRegistry
+  marketData?: PolymarketMarketDataService
 }
 
 interface PageQuery {
@@ -44,6 +48,13 @@ interface PortfolioParams {
 
 interface AccountParams {
   accountId: string
+}
+
+interface MarketHistoryQuery {
+  tokenId: string
+  interval: string
+  bucketSeconds?: number
+  cursor?: string
 }
 
 declare module 'fastify' {
@@ -88,6 +99,116 @@ const errorResponseSchema = {
     },
   },
 }
+const marketCandidateSchema = {
+  type: 'object',
+  required: ['providerCode', 'eventId', 'eventSlug', 'eventTitle', 'eventDescription', 'eventLifecycle', 'markets'],
+  properties: {
+    providerCode: { type: 'string', const: 'polymarket' },
+    eventId: { type: 'string' },
+    eventSlug: { type: ['string', 'null'] },
+    eventTitle: { type: ['string', 'null'] },
+    eventDescription: { type: ['string', 'null'] },
+    eventLifecycle: { type: 'string' },
+    markets: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['providerMarketId', 'conditionId', 'slug', 'url', 'title', 'version', 'lifecycle', 'description', 'resolutionSource', 'resolutionRules', 'endDate', 'updatedAt', 'negativeRisk', 'feeRateBps', 'outcomes'],
+        properties: {
+          providerMarketId: { type: 'string' },
+          conditionId: { type: 'string' },
+          slug: { type: 'string' },
+          url: { type: 'string', format: 'uri' },
+          title: { type: 'string' },
+          version: { type: ['string', 'null'] },
+          lifecycle: { type: 'string' },
+          description: { type: ['string', 'null'] },
+          resolutionSource: { type: ['string', 'null'] },
+          resolutionRules: { type: ['string', 'null'] },
+          endDate: { type: ['string', 'null'], format: 'date-time' },
+          updatedAt: { type: ['string', 'null'], format: 'date-time' },
+          negativeRisk: { type: ['boolean', 'null'] },
+          feeRateBps: { type: ['string', 'null'] },
+          outcomes: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['assetId', 'name', 'outcomeIndex', 'referencePrice'],
+              properties: {
+                assetId: { type: 'string' },
+                name: { type: ['string', 'null'] },
+                outcomeIndex: { type: 'integer' },
+                referencePrice: {
+                  type: 'object',
+                  required: ['value', 'priceType', 'retrievedAt', 'sourceTimestamp', 'freshness'],
+                  properties: {
+                    value: { type: ['string', 'null'] },
+                    priceType: { type: 'string', const: 'clob_midpoint' },
+                    retrievedAt: { type: ['string', 'null'], format: 'date-time' },
+                    sourceTimestamp: { type: 'null' },
+                    freshness: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+}
+const marketSearchResponseSchema = {
+  type: 'object',
+  required: ['providerCode', 'query', 'retrievedAt', 'items', 'pagination'],
+  properties: {
+    providerCode: { type: 'string', const: 'polymarket' },
+    query: { type: 'string' },
+    retrievedAt: { type: 'string', format: 'date-time' },
+    items: { type: 'array', items: marketCandidateSchema },
+    pagination: {
+      type: 'object',
+      required: ['hasMore', 'totalResults'],
+      properties: { hasMore: { type: 'boolean' }, totalResults: { type: ['integer', 'null'] } },
+    },
+  },
+}
+const marketResolveResponseSchema = {
+  type: 'object',
+  required: ['providerCode', 'resolvedAs', 'sourceUrl', 'retrievedAt', 'item'],
+  properties: {
+    providerCode: { type: 'string', const: 'polymarket' },
+    resolvedAs: { type: 'string', enum: ['event', 'market'] },
+    sourceUrl: { type: 'string', format: 'uri' },
+    retrievedAt: { type: 'string', format: 'date-time' },
+    item: marketCandidateSchema,
+  },
+}
+const priceHistoryResponseSchema = {
+  type: 'object',
+  required: ['providerCode', 'tokenId', 'interval', 'retrievedAt', 'items', 'nextCursor'],
+  properties: {
+    providerCode: { type: 'string', const: 'polymarket' },
+    tokenId: { type: 'string' },
+    interval: { type: 'string' },
+    retrievedAt: { type: 'string', format: 'date-time' },
+    items: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['tokenId', 'price', 'priceType', 'observedAt', 'timestampBasis', 'resolutionSeconds'],
+        properties: {
+          tokenId: { type: 'string' },
+          price: { type: 'string' },
+          priceType: { type: 'string', const: 'provider_price_history' },
+          observedAt: { type: 'string', format: 'date-time' },
+          timestampBasis: { type: 'string', const: 'provider_observation' },
+          resolutionSeconds: { type: 'integer' },
+        },
+      },
+    },
+    nextCursor: { type: ['string', 'null'] },
+  },
+}
 const paginationResponseProperties = {
   pagination: {
     type: 'object',
@@ -123,6 +244,7 @@ function errorBody(requestId: string, code: string, message: string) {
 export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
   const registry = options.registry ?? providerRegistry
   const ingestion = new IngestionService(options.database, registry)
+  const marketData = options.marketData ?? new PolymarketMarketDataService()
   const app = Fastify({
     logger: {
       level: options.config.nodeEnv === 'test' ? 'silent' : 'info',
@@ -204,7 +326,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
   app.get('/v1/providers', {
     schema: {
       tags: ['providers'],
-      summary: 'List fixture adapters and their declared capabilities',
+      summary: 'List provider adapters and their declared capabilities',
       response: {
         200: {
           type: 'object',
@@ -225,6 +347,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
                       properties: {
                         name: { type: 'string' },
                         entities: { type: 'array', items: { type: 'string' } },
+                        referenceEntities: { type: 'array', items: { type: 'string' } },
                         strategy: { type: 'string', enum: ['full_refresh', 'provider_checkpoint'] },
                         snapshotSemantics: { type: 'object', additionalProperties: { type: 'string', enum: ['complete', 'incremental'] } },
                       },
@@ -241,9 +364,89 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     },
   }, async () => ({ items: registry.listCapabilities() }))
 
+  app.get<{ Querystring: { q: string; limit: number } }>('/v1/market-data/search', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+    schema: {
+      tags: ['public market data'],
+      summary: 'Search Polymarket events without a connected portfolio',
+      querystring: {
+        type: 'object', additionalProperties: false, required: ['q'],
+        properties: {
+          q: { type: 'string', minLength: 2, maxLength: 120 },
+          limit: { type: 'integer', minimum: 1, maximum: 10, default: 5 },
+        },
+      },
+      response: { 200: marketSearchResponseSchema, 400: errorResponseSchema, 502: errorResponseSchema },
+    },
+  }, async (request, reply) => {
+    try {
+      return await marketData.search(request.query.q, request.query.limit ?? 5, request.raw.signal)
+    } catch (error) {
+      if (error instanceof PublicMarketError) {
+        return reply.code(error.httpStatus).send(errorBody(request.id, error.code, 'Public market data is temporarily unavailable.'))
+      }
+      throw error
+    }
+  })
+
+  app.post<{ Body: { url: string } }>('/v1/market-data/resolve', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+    schema: {
+      tags: ['public market data'],
+      summary: 'Resolve a supported Polymarket event or market URL through trusted APIs',
+      body: {
+        type: 'object', additionalProperties: false, required: ['url'],
+        properties: { url: { type: 'string', minLength: 1, maxLength: 2048 } },
+      },
+      response: { 200: marketResolveResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 502: errorResponseSchema },
+    },
+  }, async (request, reply) => {
+    try {
+      return await marketData.resolve(request.body.url, request.raw.signal)
+    } catch (error) {
+      if (error instanceof PublicMarketError) {
+        const message = error.httpStatus === 400 ? 'The URL is not a supported Polymarket link.' : 'Public market data is temporarily unavailable.'
+        return reply.code(error.httpStatus).send(errorBody(request.id, error.code, message))
+      }
+      throw error
+    }
+  })
+
+  app.get<{ Querystring: MarketHistoryQuery }>('/v1/market-data/prices-history', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+    schema: {
+      tags: ['public market data'],
+      summary: 'Read bounded Polymarket outcome price history',
+      querystring: {
+        type: 'object', additionalProperties: false, required: ['tokenId'],
+        properties: {
+          tokenId: { type: 'string', pattern: '^\\d{1,100}$' },
+          interval: { type: 'string', enum: ['max', 'all', '1m', '1w', '1d', '6h', '1h'], default: '1w' },
+          bucketSeconds: { type: 'integer', minimum: 60, maximum: 86400 },
+          cursor: { type: 'string', minLength: 1, maxLength: 4096 },
+        },
+      },
+      response: { 200: priceHistoryResponseSchema, 400: errorResponseSchema, 502: errorResponseSchema },
+    },
+  }, async (request, reply) => {
+    try {
+      return await marketData.priceHistory({
+        tokenId: request.query.tokenId,
+        interval: request.query.interval ?? '1w',
+        ...(request.query.bucketSeconds === undefined ? {} : { bucketSeconds: request.query.bucketSeconds }),
+        ...(request.query.cursor === undefined ? {} : { cursor: request.query.cursor }),
+      }, request.raw.signal)
+    } catch (error) {
+      if (error instanceof PublicMarketError) {
+        return reply.code(error.httpStatus).send(errorBody(request.id, error.code, 'Public market data is temporarily unavailable.'))
+      }
+      throw error
+    }
+  })
+
   await app.register(async (privateApi) => {
     privateApi.addHook('preHandler', async (request, reply) => {
-      if (!options.config.devAuthToken || !options.config.devPrincipalId) {
+      if (options.config.nodeEnv === 'production' || !options.config.devAuthToken || !options.config.devPrincipalId) {
         return reply.code(503).send(errorBody(request.id, 'authentication_unavailable', 'Authentication is not configured.'))
       }
       if (!matchesDevelopmentBearer(request.headers.authorization, options.config.devAuthToken)) {
@@ -285,6 +488,119 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       return { items }
     })
 
+    privateApi.post<{ Body: { name: string } }>('/portfolios', {
+      schema: {
+        ...authSchema,
+        tags: ['portfolios'],
+        summary: 'Create a portfolio for the authenticated development principal',
+        body: {
+          type: 'object', additionalProperties: false, required: ['name'],
+          properties: { name: { type: 'string', minLength: 1, maxLength: 120 } },
+        },
+        response: {
+          201: {
+            type: 'object', required: ['id', 'name', 'createdAt'],
+            properties: { id: uuidSchema, name: { type: 'string' }, createdAt: { type: 'string', format: 'date-time' } },
+          },
+          400: errorResponseSchema,
+        },
+      },
+    }, async (request, reply) => {
+      const name = request.body.name.trim()
+      if (name.length === 0) return reply.code(400).send(errorBody(request.id, 'invalid_portfolio_name', 'Portfolio name cannot be blank.'))
+      await options.database.insert(users).values({
+        id: request.principalId!,
+        authSubject: `development:${request.principalId!}`,
+      }).onConflictDoNothing()
+      const [portfolio] = await options.database.insert(portfolios).values({ ownerId: request.principalId!, name }).returning({
+        id: portfolios.id,
+        name: portfolios.name,
+        createdAt: portfolios.createdAt,
+      })
+      if (!portfolio) throw new Error('portfolio_creation_failed')
+      return reply.code(201).send(portfolio)
+    })
+
+    privateApi.post<{ Params: PortfolioParams; Body: { walletAddress: string; label?: string } }>(
+      '/portfolios/:portfolioId/sources/polymarket',
+      {
+        schema: {
+          ...authSchema,
+          tags: ['provider accounts'],
+          summary: 'Register a Polymarket public account wallet for read-only tracking',
+          params: portfolioParamsSchema,
+          body: {
+            type: 'object', additionalProperties: false, required: ['walletAddress'],
+            properties: {
+              walletAddress: { type: 'string', pattern: '^0x[0-9a-fA-F]{40}$' },
+              label: { type: 'string', minLength: 1, maxLength: 100 },
+            },
+          },
+          response: {
+            201: {
+              type: 'object', required: ['id', 'providerCode', 'label', 'kind', 'createdAt', 'alreadyRegistered'],
+              properties: {
+                id: uuidSchema,
+                providerCode: { type: 'string', const: 'polymarket' },
+                label: { type: 'string' },
+                kind: { type: 'string', const: 'public_wallet' },
+                createdAt: { type: 'string', format: 'date-time' },
+                alreadyRegistered: { type: 'boolean' },
+              },
+            },
+            200: { type: 'object', additionalProperties: true },
+            400: errorResponseSchema,
+            404: errorResponseSchema,
+            422: errorResponseSchema,
+          },
+        },
+      },
+      async (request, reply) => {
+        const portfolio = await getOwnedPortfolio(options.database, request.params.portfolioId, request.principalId!)
+        if (!portfolio) return reply.code(404).send(errorBody(request.id, 'not_found', 'The requested resource was not found.'))
+        try {
+          registry.get('polymarket')
+        } catch (error) {
+          if (error instanceof ProviderAdapterError) {
+            return reply.code(422).send(errorBody(request.id, 'provider_adapter_unavailable', 'Polymarket tracking is unavailable.'))
+          }
+          throw error
+        }
+        const walletAddress = request.body.walletAddress.toLowerCase()
+        if (/^0x0{40}$/.test(walletAddress)) {
+          return reply.code(400).send(errorBody(request.id, 'invalid_wallet_address', 'Enter a Polymarket account wallet address.'))
+        }
+        const label = request.body.label?.trim() || `Polymarket ${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`
+        const [created] = await options.database.insert(providerAccounts).values({
+          portfolioId: portfolio.id,
+          providerCode: 'polymarket',
+          externalAccountId: walletAddress,
+          label,
+          kind: 'public_wallet',
+        }).onConflictDoNothing().returning({
+          id: providerAccounts.id,
+          providerCode: providerAccounts.providerCode,
+          label: providerAccounts.label,
+          kind: providerAccounts.kind,
+          createdAt: providerAccounts.createdAt,
+        })
+        if (created) return reply.code(201).send({ ...created, alreadyRegistered: false })
+        const [existing] = await options.database.select({
+          id: providerAccounts.id,
+          providerCode: providerAccounts.providerCode,
+          label: providerAccounts.label,
+          kind: providerAccounts.kind,
+          createdAt: providerAccounts.createdAt,
+        }).from(providerAccounts).where(and(
+          eq(providerAccounts.portfolioId, portfolio.id),
+          eq(providerAccounts.providerCode, 'polymarket'),
+          eq(providerAccounts.externalAccountId, walletAddress),
+        )).limit(1)
+        if (!existing) throw new Error('provider_account_registration_failed')
+        return reply.code(200).send({ ...existing, alreadyRegistered: true })
+      },
+    )
+
     privateApi.get<{ Params: PortfolioParams } & { Querystring: PageQuery }>('/portfolios/:portfolioId/positions', {
       schema: {
         ...authSchema,
@@ -314,6 +630,24 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
             origin: { type: 'string' },
             observedAt: { type: 'string', format: 'date-time' },
             retrievedAt: { type: 'string', format: 'date-time' },
+            providerStatus: { type: ['string', 'null'] },
+            redeemable: { type: ['boolean', 'null'] },
+            mergeable: { type: ['boolean', 'null'] },
+            archived: { type: ['boolean', 'null'] },
+            providerReported: {
+              type: 'object',
+              properties: {
+                currentValue: { type: ['string', 'null'] },
+                realizedPnl: { type: ['string', 'null'] },
+                unrealizedPnl: { type: ['string', 'null'] },
+                totalPnl: { type: ['string', 'null'] },
+                entryCost: { type: ['string', 'null'] },
+                entryFees: { type: ['string', 'null'] },
+                totalCost: { type: ['string', 'null'] },
+                totalSize: { type: ['string', 'null'] },
+                percentPnl: { type: ['string', 'null'] },
+              },
+            },
           }),
           404: errorResponseSchema,
         },
@@ -345,6 +679,21 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
           origin: positionSnapshots.origin,
           observedAt: positionSnapshots.observedAt,
           retrievedAt: positionSnapshots.ingestedAt,
+          providerStatus: positionSnapshots.providerStatus,
+          redeemable: positionSnapshots.redeemable,
+          mergeable: positionSnapshots.mergeable,
+          archived: positionSnapshots.archived,
+          providerReported: {
+            currentValue: positionSnapshots.providerCurrentValue,
+            realizedPnl: positionSnapshots.providerRealizedPnl,
+            unrealizedPnl: positionSnapshots.providerUnrealizedPnl,
+            totalPnl: positionSnapshots.providerTotalPnl,
+            entryCost: positionSnapshots.providerEntryCost,
+            entryFees: positionSnapshots.providerEntryFees,
+            totalCost: positionSnapshots.providerTotalCost,
+            totalSize: positionSnapshots.providerTotalSize,
+            percentPnl: positionSnapshots.providerPercentPnl,
+          },
         },
       ).from(positionSnapshots)
         .innerJoin(providerAccounts, eq(positionSnapshots.providerAccountId, providerAccounts.id))
@@ -475,6 +824,60 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         .innerJoin(sourceRecords, eq(cashMovements.sourceRecordId, sourceRecords.id))
         .where(and(eq(portfolios.id, portfolio.id), eq(portfolios.ownerId, request.principalId!)))
         .orderBy(desc(cashMovements.occurredAt), desc(cashMovements.id))
+        .limit(limit)
+        .offset(offset)
+      return { items, pagination: pagination(limit, offset, items.length) }
+    })
+
+    privateApi.get<{ Params: PortfolioParams } & { Querystring: PageQuery }>('/portfolios/:portfolioId/activity-facts', {
+      schema: {
+        ...authSchema,
+        tags: ['portfolio data'],
+        summary: 'List provider activity that has not been reconciled to canonical financial records',
+        params: portfolioParamsSchema,
+        querystring: paginationQuerySchema,
+        response: {
+          200: paginatedSchema({
+            id: uuidSchema,
+            providerAccountId: uuidSchema,
+            providerCode: { type: 'string' },
+            activityType: { type: 'string' },
+            occurredAt: { type: 'string', format: 'date-time' },
+            transactionHash: { type: ['string', 'null'] },
+            externalMarketId: { type: ['string', 'null'] },
+            externalInstrumentId: { type: ['string', 'null'] },
+            side: { type: ['string', 'null'] },
+            quantity: { type: ['string', 'null'] },
+            amount: { type: ['string', 'null'] },
+            assetCode: { type: ['string', 'null'] },
+            classification: { type: 'string' },
+          }),
+          404: errorResponseSchema,
+        },
+      },
+    }, async (request, reply) => {
+      const portfolio = await getOwnedPortfolio(options.database, request.params.portfolioId, request.principalId!)
+      if (!portfolio) return reply.code(404).send(errorBody(request.id, 'not_found', 'The requested resource was not found.'))
+      const { limit, offset } = request.query
+      const items = await options.database.select({
+        id: providerActivityFacts.id,
+        providerAccountId: providerAccounts.id,
+        providerCode: providerAccounts.providerCode,
+        activityType: providerActivityFacts.activityType,
+        occurredAt: providerActivityFacts.occurredAt,
+        transactionHash: providerActivityFacts.transactionHash,
+        externalMarketId: providerActivityFacts.externalMarketId,
+        externalInstrumentId: providerActivityFacts.externalInstrumentId,
+        side: providerActivityFacts.side,
+        quantity: providerActivityFacts.quantity,
+        amount: providerActivityFacts.amount,
+        assetCode: providerActivityFacts.assetCode,
+        classification: providerActivityFacts.classification,
+      }).from(providerActivityFacts)
+        .innerJoin(providerAccounts, eq(providerActivityFacts.providerAccountId, providerAccounts.id))
+        .innerJoin(portfolios, eq(providerAccounts.portfolioId, portfolios.id))
+        .where(and(eq(portfolios.id, portfolio.id), eq(portfolios.ownerId, request.principalId!)))
+        .orderBy(desc(providerActivityFacts.occurredAt), desc(providerActivityFacts.id))
         .limit(limit)
         .offset(offset)
       return { items, pagination: pagination(limit, offset, items.length) }

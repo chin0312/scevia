@@ -254,6 +254,33 @@ export const fills = scevia.table(
   ],
 )
 
+export const providerActivityFacts = scevia.table(
+  'provider_activity_facts',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    providerAccountId: uuid('provider_account_id')
+      .notNull()
+      .references(() => providerAccounts.id, { onDelete: 'cascade' }),
+    sourceRecordId: uuid('source_record_id').notNull().references(() => sourceRecords.id),
+    externalId: text('external_id').notNull(),
+    activityType: text('activity_type').notNull(),
+    occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull(),
+    transactionHash: text('transaction_hash'),
+    externalMarketId: text('external_market_id'),
+    externalInstrumentId: text('external_instrument_id'),
+    side: text('side'),
+    quantity: numeric('quantity', { precision: 38, scale: 18 }),
+    amount: numeric('amount', { precision: 38, scale: 18 }),
+    assetCode: text('asset_code'),
+    classification: text('classification').notNull().default('unreconciled'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('provider_activity_facts_account_external_unique').on(table.providerAccountId, table.externalId),
+    index('provider_activity_facts_account_occurred_idx').on(table.providerAccountId, table.occurredAt, table.id),
+  ],
+)
+
 export const cashMovements = scevia.table(
   'cash_movements',
   {
@@ -332,6 +359,19 @@ export const positionSnapshots = scevia.table(
     markPrice: numeric('mark_price', { precision: 38, scale: 18 }),
     markAt: timestamp('mark_at', { withTimezone: true }),
     settlementAssetCode: text('settlement_asset_code'),
+    providerStatus: text('provider_status'),
+    redeemable: boolean('redeemable'),
+    mergeable: boolean('mergeable'),
+    archived: boolean('archived'),
+    providerCurrentValue: numeric('provider_current_value', { precision: 38, scale: 18 }),
+    providerRealizedPnl: numeric('provider_realized_pnl', { precision: 38, scale: 18 }),
+    providerUnrealizedPnl: numeric('provider_unrealized_pnl', { precision: 38, scale: 18 }),
+    providerTotalPnl: numeric('provider_total_pnl', { precision: 38, scale: 18 }),
+    providerEntryCost: numeric('provider_entry_cost', { precision: 38, scale: 18 }),
+    providerEntryFees: numeric('provider_entry_fees', { precision: 38, scale: 18 }),
+    providerTotalCost: numeric('provider_total_cost', { precision: 38, scale: 18 }),
+    providerTotalSize: numeric('provider_total_size', { precision: 38, scale: 18 }),
+    providerPercentPnl: numeric('provider_percent_pnl', { precision: 38, scale: 18 }),
     origin: positionOriginEnum('origin').notNull(),
     reconciliationStatus: reconciliationStatusEnum('reconciliation_status').notNull().default('not_started'),
     isCurrent: boolean('is_current').notNull().default(false),

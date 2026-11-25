@@ -53,6 +53,7 @@ export class IngestionService {
     this.validateStreams(adapter)
     const startedAt = new Date().toISOString()
     const deadline = Date.now() + MAX_SYNC_DURATION_MS
+    const streamBudgetMs = Math.max(1, Math.floor(MAX_SYNC_DURATION_MS / adapter.capabilities.streams.length))
 
     const accountCheckpointId = await this.getOrCreateCheckpoint(accountId, ACCOUNT_LOCK_NAME)
     const leaseToken = randomUUID()
@@ -68,7 +69,7 @@ export class IngestionService {
           stream,
           accountCheckpointId,
           leaseToken,
-          deadline,
+          deadline: Math.min(deadline, Date.now() + streamBudgetMs),
         }))
       }
     } finally {
@@ -111,6 +112,11 @@ export class IngestionService {
         if (adapter.capabilities.operations[entity] !== 'supported') throw new IngestionError('invalid_provider_stream_configuration')
         if (configuredEntities.has(entity)) throw new IngestionError('provider_entity_configured_in_multiple_streams')
         configuredEntities.add(entity)
+      }
+      for (const referenceEntity of stream.referenceEntities ?? []) {
+        if (referenceEntity !== 'markets') {
+          throw new IngestionError('invalid_provider_stream_configuration')
+        }
       }
       for (const entity of Object.keys(stream.snapshotSemantics) as Array<'positions' | 'cash_balances'>) {
         if (!stream.entities.includes(entity)) throw new IngestionError('invalid_provider_stream_configuration')
@@ -363,7 +369,12 @@ export class IngestionService {
           ? error.retryable
           : error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')
         if (!retryable || attempt === MAX_RETRY_ATTEMPTS || Date.now() >= input.deadline) throw error
-        await new Promise((resolve) => setTimeout(resolve, Math.min(100 * attempt, Math.max(0, input.deadline - Date.now()))))
+        const requestedDelay = error instanceof ProviderAdapterError && error.retryAfterMs !== null
+          ? error.retryAfterMs
+          : 100 * attempt
+        const remainingBudget = Math.max(0, input.deadline - Date.now())
+        if (requestedDelay >= remainingBudget) throw error
+        await new Promise((resolve) => setTimeout(resolve, requestedDelay))
       } finally {
         if (timeout) clearTimeout(timeout)
       }

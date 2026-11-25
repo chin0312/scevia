@@ -1,6 +1,6 @@
 # Scevia backend foundation
 
-This directory contains Scevia's TypeScript API, PostgreSQL schema, provider adapter contract, fixture adapters, and synchronization pipeline. The only configured providers are deterministic fixtures. There is no Polymarket or Kalshi production adapter, user login flow, CSV importer, public market search, trading endpoint, or custody function.
+This directory contains Scevia's TypeScript API, PostgreSQL schema, provider adapter contract, fixture adapters, and synchronization pipeline. The configured registry includes a read-only Polymarket public-wallet adapter plus deterministic fixture adapters. Development portfolio authentication remains fixed to one configured principal; production identity, Kalshi, CSV import, trading, and custody are not implemented.
 
 ## Local setup
 
@@ -25,11 +25,16 @@ The private API uses the `DEV_AUTH_TOKEN` value in `.env`. Replace the example v
 curl http://127.0.0.1:3001/v1/providers
 curl -H 'Authorization: Bearer replace-this-with-a-random-value-of-at-least-32-characters' \
   http://127.0.0.1:3001/v1/portfolios
+curl -X POST -H 'Authorization: Bearer replace-this-with-a-random-value-of-at-least-32-characters' \
+  -H 'Content-Type: application/json' -d '{"name":"Research"}' \
+  http://127.0.0.1:3001/v1/portfolios
 curl -H 'Authorization: Bearer replace-this-with-a-random-value-of-at-least-32-characters' \
   'http://127.0.0.1:3001/v1/portfolios/00000000-0000-4000-8000-000000000101/positions?limit=50&offset=0'
 ```
 
-The portfolio endpoints expose current authoritative positions and cash balances, historical fills, signed cash movements, settlements, source metadata, entity-specific coverage, and per-stream synchronization history. Financial values are returned as decimal strings. Unavailable fees and marks remain `null` with an explicit status or coverage record. A complete empty snapshot can close current holdings; partial or stale snapshots do not. Zero-position tombstones preserve ordering internally and are omitted from active positions. Snapshot watermark and latest successful entity retrieval are separate from latest attempt status.
+The portfolio endpoints expose positions and cash balances according to provider-declared snapshot semantics, along with historical fills, signed cash movements, settlements, source metadata, entity-specific coverage, and per-stream synchronization history. Financial values are returned as decimal strings. Unavailable fees and marks remain `null` with an explicit status or coverage record. A complete empty snapshot can close current holdings; partial or stale snapshots do not. Zero-position tombstones preserve ordering internally and are omitted from active positions. Snapshot watermark and latest successful entity retrieval are separate from latest attempt status.
+
+Polymarket positions are exposed as provider observations with provider status/P&L fields. The current positions endpoint is intentionally partial and incremental: absence from a response does not close an old position, and its retrieval timestamp is not a provider price timestamp. Trades, deposit/withdrawal activity, and other typed but unreconciled activity facts are stored separately. Settlements, fees, and collateral balances are not represented as complete accounting data. See [the Polymarket source mapping and endpoint matrix](docs/POLYMARKET.md).
 
 ## Tests and migrations
 
@@ -40,6 +45,8 @@ npm run db:migrate
 ```
 
 `npm test` starts an in-memory PostgreSQL-compatible PGlite server when `TEST_DATABASE_URL` is unset. The harness marks the ephemeral connection explicitly before any schema reset. For an external database, destructive tests require `ALLOW_DESTRUCTIVE_TEST_DATABASE=true`, a local PostgreSQL host, and a database name ending in `_test`; `NODE_ENV=production` always rejects the test runner. The CI workflow opts into its disposable PostgreSQL 17 service explicitly. No external provider credentials are needed.
+
+To opt into a live read-only source check, start the local API, create or select a development portfolio, then set `POLYMARKET_WALLET_ADDRESS`, `SCEVIA_PORTFOLIO_ID`, and `DEV_AUTH_TOKEN` and run `npm run verify:polymarket`. This registers the explicitly supplied public account wallet and writes sync data to that local portfolio. The script accepts only the loopback development API; it is not run by CI. Review current provider terms before any public/commercial use. See [provider limitations and legal scope](docs/POLYMARKET.md).
 
 The migration runner applies the versioned SQL files under `drizzle/`. Schema changes are generated from `src/db/schema.ts` and committed as SQL; migrations that add required snapshot ownership backfill existing observations before adding constraints. Tests drop and recreate the application schema only after the target database passes the safety checks. The fixture seed is restricted to a local `scevia` or `scevia_test` database (or an explicitly allowed `_dev` database) and is disabled in production.
 
@@ -53,19 +60,25 @@ The checked-in `.env.example` contains local-only placeholders. Keep real creden
 | `GET /readyz` | Public | Database readiness |
 | `GET /v1/providers` | Public | Provider capabilities |
 | `GET /v1/portfolios` | Authenticated | Portfolios for the configured principal |
+| `POST /v1/portfolios` | Authenticated | Create a development portfolio for the configured principal |
 | `GET /v1/portfolios/{id}/sources` | Authenticated | Provider source labels and types |
-| `GET /v1/portfolios/{id}/positions` | Authenticated | Current positions from finalized provider snapshots |
+| `POST /v1/portfolios/{id}/sources/polymarket` | Authenticated | Register an explicitly supplied public account wallet |
+| `GET /v1/portfolios/{id}/positions` | Authenticated | Latest stored provider position observations, with source-specific freshness limits |
 | `GET /v1/portfolios/{id}/fills` | Authenticated | Fill history and fee coverage |
+| `GET /v1/portfolios/{id}/activity-facts` | Authenticated | Typed activity not reconciled to canonical financial records |
 | `GET /v1/portfolios/{id}/cash-movements` | Authenticated | Signed deposits, withdrawals, transfers, and adjustments |
 | `GET /v1/portfolios/{id}/settlements` | Authenticated | Settlement facts and payouts |
 | `GET /v1/portfolios/{id}/cash-balances` | Authenticated | Current reported balances from finalized snapshots |
 | `GET /v1/portfolios/{id}/coverage` | Authenticated | Observed ranges, provider-reported outer coverage bounds, source and snapshot watermarks, attempt state, and latest successful entity retrieval |
 | `GET /v1/portfolios/{id}/sync-runs` | Authenticated | Recent stream runs with cursor and snapshot-completion state |
 | `POST /v1/provider-accounts/{id}/sync` | Authenticated | Bounded read-only synchronization across configured streams |
+| `GET /v1/market-data/search?q=...` | Public | Account-independent event/market lookup |
+| `POST /v1/market-data/resolve` | Public | Resolve supported Polymarket event or market links through trusted APIs |
+| `GET /v1/market-data/prices-history?tokenId=...` | Public | Bounded provider price-history points |
 
 List endpoints accept `limit` from 1 to 100 and `offset` from 0 to 100000. Errors use a stable code and request ID. Raw source payloads and provider account identifiers are not returned by the API.
 
-The sync response is an account-level summary with a result for each stream. Ordinary interrupted streams can resume from a committed pagination cursor; complete authoritative snapshot streams restart from page one so all published pages belong to one run. Provider checkpoints are stored independently and passed to later incremental runs. Coverage bounds are an envelope and do not prove continuity across gaps. Sync is synchronous in this phase, limited to 500 records per page, 10,000 records per stream, 100 pages, and 25 seconds per account request. A production provider that cannot fit these bounds will need a background job interface before launch.
+The sync response is an account-level summary with a result for each stream. Ordinary interrupted streams can resume from a committed pagination cursor; complete authoritative snapshot streams restart from page one so all published pages belong to one run. Provider checkpoints are stored independently and passed to later incremental runs. Coverage bounds are an envelope and do not prove continuity across gaps. Sync is synchronous in this phase, limited to 500 records per page, 10,000 records per stream, 100 pages, and 25 seconds per account request. The time budget is shared across configured streams so one large history backfill can resume without preventing later streams from progressing. A production provider that cannot fit these bounds will need a background job interface before launch.
 
 ## Runtime and security boundary
 

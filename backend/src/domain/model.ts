@@ -6,6 +6,7 @@ export type CoverageState = 'complete' | 'partial' | 'unavailable' | 'unknown'
 export type CoverageEntity =
   | 'markets'
   | 'fills'
+  | 'activity'
   | 'cash_movements'
   | 'settlements'
   | 'positions'
@@ -15,6 +16,7 @@ export type CoverageEntity =
 export type ProviderSyncStream = {
   name: string
   entities: CoverageEntity[]
+  referenceEntities?: CoverageEntity[]
   strategy: 'full_refresh' | 'provider_checkpoint'
   snapshotSemantics: Partial<Record<'positions' | 'cash_balances', 'complete' | 'incremental'>>
 }
@@ -177,6 +179,36 @@ const normalizedPositionSchema = z.object({
   settlementAssetCode: z.string().min(1).max(32).nullable(),
   origin: z.enum(['provider_reported', 'reconstructed']),
   reconciliationStatus: z.enum(['not_started', 'pending', 'matched', 'difference']),
+  providerStatus: z.string().min(1).max(64).nullable().optional(),
+  redeemable: z.boolean().nullable().optional(),
+  mergeable: z.boolean().nullable().optional(),
+  archived: z.boolean().nullable().optional(),
+  providerReported: z.object({
+    currentValue: decimalTextSchema.nullable(),
+    realizedPnl: decimalTextSchema.nullable(),
+    unrealizedPnl: decimalTextSchema.nullable(),
+    totalPnl: decimalTextSchema.nullable(),
+    entryCost: decimalTextSchema.nullable(),
+    entryFees: decimalTextSchema.nullable(),
+    totalCost: decimalTextSchema.nullable(),
+    totalSize: decimalTextSchema.nullable(),
+    percentPnl: decimalTextSchema.nullable(),
+  }).strict().optional(),
+  rawPayload: rawPayloadSchema,
+}).strict()
+
+const normalizedActivityFactSchema = z.object({
+  kind: z.literal('activity_fact'),
+  externalId: z.string().min(1).max(256),
+  activityType: z.string().min(1).max(64),
+  occurredAt: utcTimestampSchema,
+  transactionHash: z.string().max(128).nullable(),
+  externalMarketId: z.string().max(256).nullable(),
+  externalInstrumentId: z.string().max(256).nullable(),
+  side: z.string().max(16).nullable(),
+  quantity: decimalTextSchema.nullable(),
+  amount: decimalTextSchema.nullable(),
+  assetCode: z.string().min(1).max(32).nullable(),
   rawPayload: rawPayloadSchema,
 }).strict()
 
@@ -209,6 +241,7 @@ const normalizedRecordUnion = z.discriminatedUnion('kind', [
   normalizedPositionSchema,
   normalizedCashBalanceSchema,
   normalizedPriceSchema,
+  normalizedActivityFactSchema,
 ])
 
 export const normalizedRecordSchema = normalizedRecordUnion.superRefine((record, context) => {
@@ -229,6 +262,7 @@ export type NormalizedSettlement = Extract<NormalizedRecord, { kind: 'settlement
 export type NormalizedPosition = Extract<NormalizedRecord, { kind: 'position' }>
 export type NormalizedCashBalance = Extract<NormalizedRecord, { kind: 'cash_balance' }>
 export type NormalizedPrice = Extract<NormalizedRecord, { kind: 'price' }>
+export type NormalizedActivityFact = Extract<NormalizedRecord, { kind: 'activity_fact' }>
 
 export const normalizedAtUtc = (value: string): string => new Date(value).toISOString()
 

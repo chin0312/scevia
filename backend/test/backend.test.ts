@@ -11,6 +11,7 @@ import {
   markets,
   portfolios,
   positionSnapshots,
+  providerActivityFacts,
   providerAccounts,
   sourceRecordRevisions,
   sourceRecords,
@@ -30,6 +31,9 @@ import { ProviderAdapterError, type ProviderAdapter, type ProviderPage } from '.
 import { MultiOutcomeFixtureAdapter } from '../src/providers/fixtures/multi-outcome-adapter.js'
 import { MULTI_OUTCOME_ACCOUNT_ID, SNAPSHOT_ACCOUNT_ID } from '../src/providers/fixtures/data.js'
 import { ProviderRegistry, providerRegistry } from '../src/providers/registry.js'
+import { PolymarketAdapter } from '../src/providers/polymarket/adapter.js'
+import { PolymarketHttpClient } from '../src/providers/polymarket/http.js'
+import { PolymarketMarketDataService } from '../src/providers/polymarket/market-data.js'
 import { assertSafeTestDatabaseUrl } from '../scripts/safety.js'
 import type { CoverageEntity, EntityCoverageReport, NormalizedRecord, ProviderCapabilities } from '../src/domain/model.js'
 import type { ServerConfig } from '../src/config.js'
@@ -44,7 +48,7 @@ const OTHER_ACCOUNT_ROW_ID = '00000000-0000-4000-8000-000000000203'
 const TOKEN = 'a-local-test-token-with-more-than-thirty-two-bytes'
 const RUNNING_SYNC_NAME = 'portfolio-history'
 const ALL_ENTITIES: CoverageEntity[] = [
-  'markets', 'fills', 'cash_movements', 'settlements', 'positions', 'cash_balances', 'prices',
+  'markets', 'fills', 'activity', 'cash_movements', 'settlements', 'positions', 'cash_balances', 'prices',
 ]
 const COMPLETE_COVERAGE = Object.fromEntries(ALL_ENTITIES.map((entity) => [entity, {
   status: 'complete',
@@ -85,6 +89,7 @@ beforeEach(async () => {
     scevia.source_record_revisions,
     scevia.fills,
     scevia.cash_movements,
+    scevia.provider_activity_facts,
     scevia.settlements,
     scevia.position_snapshots,
     scevia.cash_balance_snapshots,
@@ -125,6 +130,132 @@ describe('migrations and canonical persistence', () => {
     expect(fill?.feeAmount).toBeNull()
     expect(fill?.feeStatus).toBe('unavailable')
     await expect(pool.query("UPDATE scevia.fills SET fee_amount = NULL WHERE external_id = 'fill-multi-002'")).rejects.toThrow()
+  })
+
+  it('ingests Polymarket records into PostgreSQL and exposes only authorized normalized facts', async () => {
+    const wallet = '0x1234567890abcdef1234567890abcdef12345678'
+    const fetcher: typeof fetch = async (input) => {
+      const url = new URL(String(input))
+      if (url.pathname.endsWith('/v2/positions')) {
+        return new Response(JSON.stringify({
+          data: [{
+            proxy_wallet: wallet,
+            condition_id: 'condition-a',
+            token_id: '101',
+            opposite_token_id: '102',
+            event_id: 'event-a',
+            event_slug: 'event-a',
+            title: 'Will the test condition happen?',
+            outcome: 'Yes',
+            opposite_outcome: 'No',
+            current_size: '4.500000000000000001',
+            avg_price: '0.25',
+            current_price: '0.4',
+            current_value: '1.8',
+            entry_cost_usdc: '1.125',
+            entry_fees_usdc: '0',
+            total_cost_usdc: '1.125',
+            total_size: '4.5',
+            realized_pnl: '0',
+            unrealized_pnl: '0.675',
+            total_pnl: '0.675',
+            percent_pnl: '60',
+            status: 'OPEN',
+            redeemable: false,
+            mergeable: false,
+            archived: false,
+          }],
+          pagination: { next_cursor: null },
+        }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      if (url.pathname.endsWith('/v2/trades')) {
+        return new Response(JSON.stringify({
+          data: [{
+            proxy_wallet: wallet,
+            transaction_hash: '0xabc123',
+            condition_id: 'condition-a',
+            token_id: '101',
+            side: 'BUY',
+            size: '4.500000000000000001',
+            price: '0.25',
+            timestamp: 1795564800,
+            title: 'Will the test condition happen?',
+            event_id: 'event-a',
+          }],
+          pagination: { next_cursor: null },
+        }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      if (url.pathname.endsWith('/v2/tokens')) {
+        const requested = new Set((url.searchParams.get('token_id') ?? '').split(','))
+        const tokens = [
+          { token_id: '101', opposite_token_id: '102', condition_id: 'condition-a', title: 'Will the test condition happen?', outcome: 'Yes', outcome_index: 0, event_id: 'event-a', event_slug: 'event-a', module: 'v1' },
+          { token_id: '102', opposite_token_id: '101', condition_id: 'condition-a', title: 'Will the test condition happen?', outcome: 'No', outcome_index: 1, event_id: 'event-a', event_slug: 'event-a', module: 'v1' },
+        ]
+        return new Response(JSON.stringify({ data: tokens.filter((token) => requested.has(token.token_id)) }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      if (url.pathname.endsWith('/v2/activity')) {
+        return new Response(JSON.stringify({
+          data: [
+            { type: 'DEPOSIT', transaction_hash: '0xdeposit', proxy_wallet: wallet, timestamp: 1795564800, usdc_size: '10.25' },
+            { type: 'REDEEM', transaction_hash: '0xredeem', proxy_wallet: wallet, timestamp: 1795564900, condition_id: 'condition-a', token_id: '101', size: '1', usdc_size: '1' },
+          ],
+          pagination: { next_cursor: null },
+        }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      throw new Error(`Unexpected Polymarket API request: ${url.pathname}`)
+    }
+    const app = await buildApp({
+      config: testConfig(),
+      database,
+      registry: new ProviderRegistry([new PolymarketAdapter(new PolymarketHttpClient(fetcher))]),
+    })
+    openApps.push(app)
+    const auth = { authorization: `Bearer ${TOKEN}` }
+    const source = await app.inject({
+      method: 'POST',
+      url: `/v1/portfolios/${PORTFOLIO_ID}/sources/polymarket`,
+      headers: auth,
+      payload: { walletAddress: wallet },
+    })
+    expect(source.statusCode).toBe(201)
+    const accountId = source.json().id as string
+    const first = await app.inject({ method: 'POST', url: `/v1/provider-accounts/${accountId}/sync`, headers: auth })
+    const second = await app.inject({ method: 'POST', url: `/v1/provider-accounts/${accountId}/sync`, headers: auth })
+
+    expect(first.statusCode).toBe(200)
+    expect(first.json().status).toBe('complete')
+    expect(second.statusCode).toBe(200)
+    expect(second.json().status).toBe('complete')
+    expect(await database.select({ id: fills.id }).from(fills)).toHaveLength(1)
+    expect(await database.select({ id: cashMovements.id }).from(cashMovements)).toHaveLength(1)
+    expect(await database.select({ id: providerActivityFacts.id }).from(providerActivityFacts)).toHaveLength(1)
+    const [fill] = await database.select({ quantity: fills.quantity, feeAmount: fills.feeAmount, feeStatus: fills.feeStatus }).from(fills)
+    expect(fill).toEqual({ quantity: '4.500000000000000001', feeAmount: null, feeStatus: 'unavailable' })
+
+    const positionsResponse = await app.inject({
+      method: 'GET',
+      url: `/v1/portfolios/${PORTFOLIO_ID}/positions`,
+      headers: auth,
+    })
+    const factsResponse = await app.inject({
+      method: 'GET',
+      url: `/v1/portfolios/${PORTFOLIO_ID}/activity-facts`,
+      headers: auth,
+    })
+    const hiddenFacts = await app.inject({
+      method: 'GET',
+      url: `/v1/portfolios/${OTHER_PORTFOLIO_ID}/activity-facts`,
+      headers: auth,
+    })
+    expect(positionsResponse.statusCode).toBe(200)
+    expect(positionsResponse.json().items[0]).toMatchObject({
+      providerStatus: 'OPEN',
+      providerReported: { currentValue: '1.800000000000000000' },
+    })
+    expect(factsResponse.statusCode).toBe(200)
+    expect(factsResponse.json().items[0]).toMatchObject({ activityType: 'REDEEM', classification: 'unreconciled' })
+    expect(factsResponse.body).not.toContain('rawPayload')
+    expect(hiddenFacts.statusCode).toBe(404)
   })
 
   it('keeps provider events distinct and stores varying outcome and settlement values', async () => {
@@ -377,7 +508,8 @@ describe('migrations and canonical persistence', () => {
     expect(positionCoverage?.observedRecordEnd?.toISOString()).toBe('2026-11-24T10:00:00.000Z')
     expect(fillCoverage?.coverageStart?.toISOString()).toBe('2026-11-20T12:30:00.000Z')
     expect(positionCoverage?.coverageStart?.toISOString()).toBe('2026-11-24T10:00:00.000Z')
-    expect(rows.every((row) => row.status === 'complete' && row.lastSuccessfulSyncAt !== null)).toBe(true)
+    expect(rows.filter((row) => row.entityType !== 'activity').every((row) => row.status === 'complete' && row.lastSuccessfulSyncAt !== null)).toBe(true)
+    expect(rows.find((row) => row.entityType === 'activity')?.status).toBe('unavailable')
   })
 
   it('preserves established coverage after a failed incremental attempt and records the failure separately', async () => {
@@ -943,6 +1075,88 @@ describe('provider contracts and API security', () => {
     expect(matchesDevelopmentBearer(`Bearer ${TOKEN}`, TOKEN)).toBe(true)
     expect(matchesDevelopmentBearer('Bearer wrong-token', TOKEN)).toBe(false)
     expect(matchesDevelopmentBearer(undefined, TOKEN)).toBe(false)
+  })
+
+  it('creates owned portfolios and registers normalized public-wallet sources idempotently', async () => {
+    const app = await createTestApp()
+    const createdPortfolio = await app.inject({
+      method: 'POST',
+      url: '/v1/portfolios',
+      headers: { authorization: `Bearer ${TOKEN}` },
+      payload: { name: '  Research  ' },
+    })
+    expect(createdPortfolio.statusCode).toBe(201)
+    expect(createdPortfolio.json().name).toBe('Research')
+
+    const portfolioId = createdPortfolio.json().id as string
+    const walletAddress = '0x1234567890ABCDEF1234567890ABCDEF12345678'
+    const registered = await app.inject({
+      method: 'POST',
+      url: `/v1/portfolios/${portfolioId}/sources/polymarket`,
+      headers: { authorization: `Bearer ${TOKEN}` },
+      payload: { walletAddress },
+    })
+    const duplicate = await app.inject({
+      method: 'POST',
+      url: `/v1/portfolios/${portfolioId}/sources/polymarket`,
+      headers: { authorization: `Bearer ${TOKEN}` },
+      payload: { walletAddress: walletAddress.toLowerCase(), label: 'ignored on duplicate' },
+    })
+    const invalid = await app.inject({
+      method: 'POST',
+      url: `/v1/portfolios/${portfolioId}/sources/polymarket`,
+      headers: { authorization: `Bearer ${TOKEN}` },
+      payload: { walletAddress: '0x0000000000000000000000000000000000000000' },
+    })
+    const crossOwner = await app.inject({
+      method: 'POST',
+      url: `/v1/portfolios/${OTHER_PORTFOLIO_ID}/sources/polymarket`,
+      headers: { authorization: `Bearer ${TOKEN}` },
+      payload: { walletAddress },
+    })
+
+    expect(registered.statusCode).toBe(201)
+    expect(registered.json()).toMatchObject({ providerCode: 'polymarket', kind: 'public_wallet', alreadyRegistered: false })
+    expect(registered.body).not.toContain(walletAddress)
+    expect(registered.body).not.toContain(walletAddress.toLowerCase())
+    const [storedSource] = await database.select({ externalAccountId: providerAccounts.externalAccountId })
+      .from(providerAccounts).where(eq(providerAccounts.id, registered.json().id))
+    expect(storedSource?.externalAccountId).toBe(walletAddress.toLowerCase())
+    expect(duplicate.statusCode).toBe(200)
+    expect(duplicate.json().alreadyRegistered).toBe(true)
+    expect(duplicate.json().id).toBe(registered.json().id)
+    expect(invalid.statusCode).toBe(400)
+    expect(crossOwner.statusCode).toBe(404)
+  })
+
+  it('serves public market lookup without authentication and fails closed on production private routes', async () => {
+    let upstreamCalls = 0
+    const marketData = new PolymarketMarketDataService(new PolymarketHttpClient(async () => {
+      upstreamCalls += 1
+      return new Response(JSON.stringify({ events: [], pagination: { hasMore: false, totalResults: 0 } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }))
+    const publicApp = await buildApp({ config: testConfig(), database, marketData })
+    openApps.push(publicApp)
+    const search = await publicApp.inject({ method: 'GET', url: '/v1/market-data/search?q=public%20event' })
+    const unsafeUrl = await publicApp.inject({ method: 'POST', url: '/v1/market-data/resolve', payload: { url: 'http://127.0.0.1/private' } })
+    expect(search.statusCode).toBe(200)
+    expect(search.json().items).toEqual([])
+    expect(search.headers['access-control-allow-origin']).toBeUndefined()
+    expect(unsafeUrl.statusCode).toBe(400)
+    expect(upstreamCalls).toBe(1)
+
+    const productionApp = await buildApp({ config: { ...testConfig(), nodeEnv: 'production' }, database })
+    openApps.push(productionApp)
+    const privateResponse = await productionApp.inject({
+      method: 'GET',
+      url: '/v1/portfolios',
+      headers: { authorization: `Bearer ${TOKEN}` },
+    })
+    expect(privateResponse.statusCode).toBe(503)
+    expect(privateResponse.json().error.code).toBe('authentication_unavailable')
   })
 
   it('rejects development identity configuration in production', () => {
