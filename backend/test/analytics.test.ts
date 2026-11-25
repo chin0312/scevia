@@ -42,7 +42,7 @@ describe('independent analytics examples', () => {
     ])).toMatchObject({ status: 'exact', feasible: 4 })
     expect(settlementRisk([{ ...binary, fixed: 'yes' }, { ...other, fixed: 'no' }], [
       { left: 'a', right: 'b', kind: 'equivalent' },
-    ])).toEqual({ status: 'unavailable', reason: 'no_feasible_outcomes' })
+    ])).toMatchObject({ status: 'unavailable', reason: 'no_feasible_outcomes', supportedSubset: null })
     const independent = Array.from({ length: 30 }, (_, index) => ({ ...binary, id: String(index) }))
     expect(settlementRisk(independent, [])).toMatchObject({
       status: 'exact', feasibleCountExact: '1073741824', reference: '2760', downside: '360',
@@ -50,7 +50,11 @@ describe('independent analytics examples', () => {
     })
     expect(settlementRisk(independent.slice(0, 13), independent.slice(1, 13).map(({ id }) =>
       ({ left: '0', right: id, kind: 'equivalent' as const }))))
-      .toEqual({ status: 'unavailable', reason: 'joint_enumeration_limit' })
+      .toMatchObject({ status: 'unavailable', reason: 'joint_enumeration_limit', supportedSubset: null })
+    expect(settlementRisk(independent.slice(0, 14), independent.slice(1, 13).map(({ id }) =>
+      ({ left: '0', right: id, kind: 'equivalent' as const }))))
+      .toMatchObject({ status: 'unavailable', components: [{ status: 'unavailable' }, { status: 'exact' }],
+        supportedSubset: { feasibleCountExact: '2', worst: { payout: '80' } } })
   })
 
   it('preserves exact counts for disconnected components and reports reviewed observed payoff separately', () => {
@@ -149,6 +153,10 @@ describe('independent analytics examples', () => {
     const identities = ['crypto', 'politics'].map((instrument) => ({
       instrument, market: instrument, event: instrument, title: instrument, outcome: instrument, resolvesAt: null, lifecycle: 'open',
     }))
+    const cashOnly = replayAccounting([row(1, { amount: '5000' })], asOf)
+    expect(analyzeExposure(cashOnly, 'USD', ['a'], [], [], [], new Set(), false).allocationBases.cashInclusive)
+      .toMatchObject({ denominator: null, reason: 'opening_inventory_unknown', rows: [{ id: 'cash', value: '5000', weight: null },
+        { id: 'pending', weight: null }] })
     const result = analyzeExposure(state, 'USD', ['a'], identities, [], [], new Set(), false)
     expect(result.allocation.byEvent.rows).toMatchObject([{ id: 'crypto', weight: '0.75' }, { id: 'politics', weight: '0.25' }])
     expect(result.allocationBases.cashInclusive).toMatchObject({ denominator: '10000', rows: [
@@ -170,6 +178,12 @@ describe('independent analytics examples', () => {
         observation: { ...frame, id: 'unknown-flow', type: 'deposit', fee: '0', timestamp: '2026-01-03T00:00:00.000Z' } },
     ]
     const result = analyzePerformance(evidence, ['a'], 'USD', frame.timestamp, '2026-01-05T00:00:00.000Z')
+    expect(result.periodicReturns.daily).toContainEqual(expect.objectContaining({
+      through: '2026-01-02T23:59:59.999Z', partial: false, twr: { value: '0.1', availability: 'calculated',
+        quality: 'reconstructed_selected_value', reason: null },
+      trading: expect.objectContaining({ fills: 0, buys: 0, sells: 0, grossNotional: '0' }),
+    }))
+    expect(result.periodicReturns.monthly).toMatchObject([{ partial: true, twr: { value: null, quality: 'unavailable' } }])
     expect(result.history).toContainEqual(expect.objectContaining({ asOf: '2026-01-02T23:59:59.999Z', returnIndex: '110' }))
     expect(result.history.filter((point) => point.asOf >= '2026-01-03T00:00:00.000Z').every((point) => point.returnIndex === null)).toBe(true)
     expect(result.returns).toMatchObject({ twr: { value: null }, indexCoverage: 'gapped_sample_grid',

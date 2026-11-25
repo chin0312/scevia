@@ -114,9 +114,10 @@ function upperBound(sorted: readonly number[], cutoff: number) {
   return low
 }
 
-function valuation(replay: ValuationReplay, accounts: string[], asset: string, openingCutoff: string) {
+function valuation(replay: ValuationReplay, accounts: string[], asset: string, openingCutoff: string, scopes: Array<{ venue: string; account: string }>) {
   const balances = replay.cash.filter((bucket) => bucket.asset === asset)
   const complete = accounts.every((account) => balances.some((bucket) => bucket.account === account))
+    && scopes.every((scope) => balances.some((bucket) => bucket.account === scope.account && bucket.venue === scope.venue))
     && balances.length > 0 && balances.every((bucket) => bucket.portfolioValue !== null)
   return {
     asOf: replay.asOf, accounts: balances.length,
@@ -147,8 +148,10 @@ export function analyzePerformance(evidence: Evidence[], accounts: string[], ass
   }
   const initialState = replayAt(evidence, from)
   const endingState = through === from ? initialState : replayAt(evidence, through)
-  const opening = valuation(initialState, accounts, asset, from)
-  const ending = valuation(endingState, accounts, asset, from)
+  const scopes = [...new Map(evidence.map(({ observation: { venue, account } }) =>
+    [JSON.stringify([venue, account]), { venue, account }])).values()]
+  const opening = valuation(initialState, accounts, asset, from, scopes)
+  const ending = valuation(endingState, accounts, asset, from, scopes)
   cache.set(from, opening)
   cache.set(through, ending)
   const partitions = new Map<string, Evidence[]>()
@@ -192,7 +195,7 @@ export function analyzePerformance(evidence: Evidence[], accounts: string[], ass
       combined.cash.push(...projection.cash)
       combined.holdings.push(...projection.holdings)
     }
-    const point = valuation(combined, accounts, asset, from)
+    const point = valuation(combined, accounts, asset, from, scopes)
     cache.set(asOf, point)
     return point
   }
@@ -221,24 +224,54 @@ export function analyzePerformance(evidence: Evidence[], accounts: string[], ass
     return { timestamp, flow: flow.toFixed(), before: before.value, after: after.value,
       beforeQuality: before.valuationQuality, afterQuality: after.valuationQuality, valid }
   })
-  const returnTo = (point: ReturnType<typeof valuation>) => {
-    if (unclassifiedFlowTimes.some((time) => time <= point.asOf) || !opening.returnEligible || !point.returnEligible
-      || opening.value === null || point.value === null) return null
-    let base = opening.value
+  type Point = ReturnType<typeof valuation>
+  const qualityFor = (first: Point, last: Point, includeBoundaries: boolean) =>
+    first.valuationQuality === 'carry_forward_reference_estimate' || last.valuationQuality === 'carry_forward_reference_estimate'
+      || (includeBoundaries && boundaries.some((boundary) => boundary.timestamp > first.asOf && boundary.timestamp <= last.asOf
+        && (boundary.beforeQuality === 'carry_forward_reference_estimate' || boundary.afterQuality === 'carry_forward_reference_estimate')))
+      ? 'carry_forward_reference_estimate' as const : 'reconstructed_selected_value' as const
+  const returnBetween = (first: Point, last: Point) => {
+    if (unclassifiedFlowTimes.some((time) => time > first.asOf && time <= last.asOf)
+      || !first.returnEligible || !last.returnEligible || first.value === null || last.value === null) return null
+    let base = first.value
     const subperiods = []
     for (const boundary of boundaries) {
-      if (boundary.timestamp > point.asOf) break
+      if (boundary.timestamp <= first.asOf) continue
+      if (boundary.timestamp > last.asOf) break
       if (!boundary.valid || boundary.before === null || boundary.after === null) return null
       subperiods.push({ opening: base, closing: boundary.before })
       base = boundary.after
     }
-    return linkedReturn([...subperiods, { opening: base, closing: point.value }])
+    return linkedReturn([...subperiods, { opening: base, closing: last.value }])
   }
+  const returnTo = (point: Point) => returnBetween(opening, point)
   const points = [opening]
   for (let midnight = Math.floor(start / dayMs) * dayMs + dayMs - 1; midnight < end; midnight += dayMs) {
     if (midnight > start) points.push(at(new Date(midnight).toISOString()))
   }
   if (end !== start) points.push(ending)
+  const qualityMetric = (value: Decimal | null, reason: string, quality: string) => ({
+    ...metric(value, reason), quality: value === null ? 'unavailable' : quality,
+  })
+  const periodFlows = (first: Point, last: Point) => boundaries
+    .filter(({ timestamp }) => timestamp > first.asOf && timestamp <= last.asOf)
+    .reduce((total, boundary) => total.plus(boundary.flow), decimal(0))
+  function isCalendarBoundary(point: Point, frequency: 'daily' | 'weekly' | 'monthly') {
+    const date = new Date(point.asOf)
+    if (date.getTime() % dayMs !== dayMs - 1) return false
+    return frequency === 'daily' || (frequency === 'weekly' ? date.getUTCDay() === 0
+      : new Date(date.getTime() + 1).getUTCDate() === 1)
+  }
+  function periodic(frequency: 'daily' | 'weekly' | 'monthly') {
+    const grid = points.filter((point, index) => index === 0 || index === points.length - 1 || isCalendarBoundary(point, frequency))
+    return grid.slice(1).map((last, index) => {
+      const first = grid[index]!
+      return { from: first.asOf, through: last.asOf, openingValue: first.value, endingValue: last.value,
+        partial: !isCalendarBoundary(first, frequency) || !isCalendarBoundary(last, frequency),
+        knownNetExternalFlows: periodFlows(first, last).toFixed(),
+        twr: qualityMetric(returnBetween(first, last), 'coverage_value_or_flow_boundary_missing', qualityFor(first, last, true)) }
+    })
+  }
   const indices = points.map((point) => returnTo(point)?.plus(1).mul(100).toFixed() ?? null)
   const dailyReturns = points.map((point, index) => {
     const prior = points[index - 1]
@@ -248,6 +281,8 @@ export function analyzePerformance(evidence: Evidence[], accounts: string[], ass
       && previous != null && current != null && decimal(previous).gt(0)
       ? decimal(current).div(previous).minus(1).toFixed() : null
   })
+  const sampledQuality = points.some((point) => qualityFor(opening, point, true) === 'carry_forward_reference_estimate')
+    ? 'carry_forward_reference_estimate' : 'reconstructed_selected_value'
   const risk = indices.length >= 2 && indices.every((point) => point !== null) ? drawdowns(indices as string[]) : null
   const eligibleBridge = opening.returnEligible && ending.returnEligible && unclassifiedFlowTimes.length === 0
     && opening.value !== null && ending.value !== null
@@ -298,12 +333,38 @@ export function analyzePerformance(evidence: Evidence[], accounts: string[], ass
   ]) : null
   const realized = sum([...attribution.values()].map((amount) => amount.toFixed()))
   const eligibleTrades = posted.filter((event) => event.type === 'buy' || event.type === 'sell')
-  const feeRows = entries.flatMap((entry) => entry.feeEffect ? [entry.feeEffect] : [])
-  const feeSum = (kind: 'execution' | 'standalone' | 'funding', negative: boolean) => sum(feeRows
+  const postedFeeRows = entries.flatMap((entry) => entry.feeEffect
+    ? [{ ...entry.feeEffect, timestamp: byId.get(entry.eventId)!.timestamp }] : [])
+  const feeSum = (rows: typeof postedFeeRows, kind: 'execution' | 'standalone' | 'funding', negative: boolean) => sum(rows
     .filter((row) => row.kind === kind && row.amount !== null && (negative ? decimal(row.amount).lt(0) : decimal(row.amount).gte(0)))
     .map((row) => decimal(row.amount!).abs().toFixed()))
-  const executionCharges = feeSum('execution', false)
-  const executionRebates = feeSum('execution', true)
+  const notional = (trades: typeof eligibleTrades) =>
+    trades.reduce((total, event) => total.plus(decimal(event.quantity!).mul(event.price!)), decimal(0))
+  function feeSummary(rows: typeof postedFeeRows) {
+    const charges = feeSum(rows, 'execution', false)
+    const rebates = feeSum(rows, 'execution', true)
+    return { grossExecutionCharges: charges.toFixed(), executionRebates: rebates.toFixed(),
+      netExecutionFees: charges.minus(rebates).toFixed(), standaloneCharges: feeSum(rows, 'standalone', false).toFixed(),
+      standaloneRebates: feeSum(rows, 'standalone', true).toFixed(), fundingCharges: feeSum(rows, 'funding', false).toFixed(),
+      fundingRebates: feeSum(rows, 'funding', true).toFixed(), unknownEffects: rows.filter((row) => row.amount === null).length,
+      observedZeroEffects: rows.filter((row) => row.amount === '0').length }
+  }
+  function tradeSummary(trades: typeof eligibleTrades) {
+    const buys = trades.filter((event) => event.type === 'buy')
+    const sells = trades.filter((event) => event.type === 'sell')
+    const gross = notional(trades)
+    return { fills: trades.length, buys: buys.length, sells: sells.length,
+      buyNotional: notional(buys).toFixed(), sellNotional: notional(sells).toFixed(), grossNotional: gross.toFixed(),
+      averageExecutionNotional: trades.length === 0 ? null : gross.div(trades.length).toFixed() }
+  }
+  const periodicSeries = (frequency: 'daily' | 'weekly' | 'monthly') => periodic(frequency).map((point) => {
+    const within = ({ timestamp }: { timestamp: string }) => timestamp > point.from && timestamp <= point.through
+    const trades = eligibleTrades.filter(within)
+    return { ...point, trading: tradeSummary(trades), fees: feeSummary(postedFeeRows.filter(within)) }
+  })
+  const feeRows = postedFeeRows
+  const executionCharges = feeSum(feeRows, 'execution', false)
+  const executionRebates = feeSum(feeRows, 'execution', true)
   const exits = entries.filter((entry) => byId.get(entry.eventId)?.type === 'sell' && entry.realized !== null)
   const gains = sum(exits.filter((entry) => decimal(entry.realized!).gt(0)).map((entry) => entry.realized!))
   const losses = sum(exits.filter((entry) => decimal(entry.realized!).lt(0)).map((entry) => entry.realized!)).abs()
@@ -312,23 +373,36 @@ export function analyzePerformance(evidence: Evidence[], accounts: string[], ass
     methodology: { valuation: 'selected_accounting_evidence', return: 'cash_flow_boundary_twr', time: 'UTC', drawdown: 'flow_adjusted_sampled_index' },
     opening, ending, cashFlowBoundaries: boundaries, work: { replays: replayCount, inputRowsReplayed: replayWork },
     bridge: {
-      valueChange: metric(opening.value !== null && ending.value !== null ? decimal(ending.value).minus(opening.value) : null, 'valuation_missing'),
+      valueChange: qualityMetric(opening.value !== null && ending.value !== null ? decimal(ending.value).minus(opening.value) : null, 'valuation_missing', qualityFor(opening, ending, false)),
       knownNetContributions: netFlows.toFixed(),
-      netInvestmentGain: metric(pnl, 'coverage_or_cash_flow_classification_missing'),
+      netInvestmentGain: qualityMetric(pnl, 'coverage_or_cash_flow_classification_missing', qualityFor(opening, ending, false)),
     },
-    returns: { twr: metric(returnTo(ending), 'coverage_value_or_flow_boundary_missing'),
-      annualizedMwr: metric(mwr, 'eligible_cash_flow_schedule_or_unique_bounded_root_missing'),
-      annualizedVolatility: metric(dailyVolatility(points.map((point, index) => ({ asOf: point.asOf, index: indices[index] ?? null }))),
-        'eligible_daily_return_series_missing'),
-      maximumDrawdown: metric(risk ? decimal(risk.maximum) : null, 'eligible_index_series_missing'),
+    returns: { twr: qualityMetric(returnTo(ending), 'coverage_value_or_flow_boundary_missing', qualityFor(opening, ending, true)),
+      annualizedMwr: qualityMetric(mwr, 'eligible_cash_flow_schedule_or_unique_bounded_root_missing', qualityFor(opening, ending, false)),
+      annualizedVolatility: qualityMetric(dailyVolatility(points.map((point, index) => ({ asOf: point.asOf, index: indices[index] ?? null }))),
+        'eligible_daily_return_series_missing', sampledQuality),
+      maximumDrawdown: qualityMetric(risk ? decimal(risk.maximum) : null, 'eligible_index_series_missing', sampledQuality),
       indexCoverage: indices.every((value) => value !== null) ? 'complete_sample_grid' :
         indices.some((value) => value !== null) ? 'gapped_sample_grid' : 'unavailable',
       drawdownEpisode: risk?.episode ? { peak: points[risk.episode.peakIndex]!.asOf, trough: points[risk.episode.troughIndex]!.asOf,
         recovery: risk.episode.recoveryIndex === null ? null : points[risk.episode.recoveryIndex]!.asOf } : null,
       twrValuationBasis: 'reconstructed_selected_values_and_eligible_reference_marks' },
-    history: points.map((point, index) => ({ ...point, returnIndex: indices[index], dailyReturn: dailyReturns[index], drawdown: risk?.series[index] ?? null })),
+    periodicReturns: { daily: periodicSeries('daily'), weekly: periodicSeries('weekly'), monthly: periodicSeries('monthly') },
+    history: points.map((point, index) => {
+      const knownFlows = periodFlows(opening, point)
+      return { ...point, returnIndex: indices[index], dailyReturn: dailyReturns[index], drawdown: risk?.series[index] ?? null,
+        indexQuality: indices[index] === null ? 'unavailable' : qualityFor(opening, point, true),
+        knownCumulativeNetContributions: knownFlows.toFixed(),
+        knownIntervalExternalFlows: index === 0 ? null : periodFlows(points[index - 1]!, point).toFixed(),
+        investmentGainSinceOpening: opening.returnEligible && point.returnEligible && opening.value !== null && point.value !== null
+          && !unclassifiedFlowTimes.some((time) => time <= point.asOf) ? decimal(point.value).minus(opening.value).minus(knownFlows).toFixed() : null }
+    }),
     attribution: { scope: 'known_posted_and_marked_components', knownRealized: realized.toFixed(),
       knownUnrealizedChange: knownUnrealizedChange.toFixed(),
+      unrealizedAvailability: [...new Set([...unrealizedByInstrument.keys(), ...marksMissing])]
+        .every((key) => unrealizedChange.has(key)) && eligibleBridge ? 'complete_for_selected_evidence' : 'partial',
+      unavailableUnrealizedInstruments: [...new Set([...unrealizedByInstrument.keys(), ...marksMissing])]
+        .filter((key) => !unrealizedChange.has(key)).length,
       instruments: [...new Set([...attribution.keys(), ...unrealizedByInstrument.keys(), ...marksMissing])].map((identity) => {
         const [venue, account, instrument] = JSON.parse(identity) as [string, string, string]
         return { identity, venue, account, instrument, knownRealized: attribution.get(identity)?.toFixed() ?? null,
@@ -336,23 +410,18 @@ export function analyzePerformance(evidence: Evidence[], accounts: string[], ass
       }),
       byActivity: [...activities].map(([type, amount]) => ({ type, knownRealized: amount.toFixed() })),
       unattributedResidual: pnl?.minus(realized).minus(knownUnrealizedChange).toFixed() ?? null },
-    fees: { asset, grossExecutionCharges: executionCharges.toFixed(), executionRebates: executionRebates.toFixed(),
-      netExecutionFees: executionCharges.minus(executionRebates).toFixed(), standaloneCharges: feeSum('standalone', false).toFixed(),
-      standaloneRebates: feeSum('standalone', true).toFixed(), fundingCharges: feeSum('funding', false).toFixed(),
-      fundingRebates: feeSum('funding', true).toFixed(), unknownEffects: feeRows.filter((row) => row.amount === null).length,
-      observedZeroEffects: feeRows.filter((row) => row.amount === '0').length, coverage: 'known_posted_components' },
+    fees: { asset, ...feeSummary(feeRows), coverage: 'known_posted_components' },
     trading: { knownRealizedExitFills: exits.length, winningExitFills: wins,
       lossExitFills: exits.filter((entry) => decimal(entry.realized!).lt(0)).length,
       exitWinRate: metric(exits.length ? decimal(wins).div(exits.length) : null, 'no_known_realized_exits'),
       exitProfitFactor: metric(losses.gt(0) ? gains.div(losses) : null, 'no_known_gross_exit_loss'),
-      fills: eligibleTrades.length, buys: eligibleTrades.filter((event) => event.type === 'buy').length,
-      sells: eligibleTrades.filter((event) => event.type === 'sell').length,
-      grossNotional: eligibleTrades.reduce((total, event) => total.plus(decimal(event.quantity!).mul(event.price!)), decimal(0)).toFixed(),
+      ...tradeSummary(eligibleTrades),
+      grossRealizedExitGains: gains.toFixed(), grossRealizedExitLosses: losses.toFixed(),
       attachedFeeObservations: feeRows.filter((row) => row.kind === 'execution' && row.amount !== null).length,
       missingAttachedFees: feeRows.filter((row) => row.kind === 'execution' && row.amount === null).length,
       knownAttachedFees: executionCharges.minus(executionRebates).toFixed(),
-      knownStandaloneFees: feeSum('standalone', false).toFixed(),
-      knownStandaloneRebates: feeSum('standalone', true).toFixed(),
+      knownStandaloneFees: feeSum(feeRows, 'standalone', false).toFixed(),
+      knownStandaloneRebates: feeSum(feeRows, 'standalone', true).toFixed(),
       feeScope: 'posted_fee_effects_in_selected_asset' },
   }
 }
