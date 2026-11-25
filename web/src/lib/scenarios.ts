@@ -26,3 +26,11 @@ export const revert = (s: Scenario, starting: Adjustment[] = []): Scenario =>
   s.saved ? { ...s, name: s.saved.name, adjs: copy(s.saved.adjs) } : { ...s, adjs: copy(starting) }
 export const canRevert = (s: Scenario, starting: Adjustment[] = []) => (s.saved ? status(s) === 'modified' : !sameAdjs(s.adjs, starting))
 export const duplicate = (s: Scenario, key: string, color: string): Scenario => ({ ...s, key, color, name: `${s.name} (copy)`, adjs: copy(s.adjs), saved: null, savedAt: null })
+
+/** Explicitly add positions to a scenario at their current holding and mark (no hypothetical change yet).
+ *  Positions already in the scenario are left exactly as they are. */
+export function addPositions(s: Scenario, adds: Adjustment[]) {
+  const present = new Set(s.adjs.map((a) => a.id))
+  const added = adds.filter((a) => !present.has(a.id))
+  return { scenario: { ...s, adjs: [...s.adjs, ...added.map((a) => ({ ...a }))] }, added: added.map((a) => a.id), skipped: adds.filter((a) => present.has(a.id)).map((a) => a.id) }
+}

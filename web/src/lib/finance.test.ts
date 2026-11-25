@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { CASH_FLOWS, CLOSED_TRADES, FEE_RATE, OPEN_POSITIONS, TODAY } from '../data/portfolio'
 import {
-  POSITIONS, POS_BY_ID, account, attribution, baseHoldings, entryBuckets, eventPnl, groupPnl, insights, isFeasible, jointOutcomes,
-  exposures, netPnlAt, outcomeRange, periodRange, periodStats, relationsFor, scenarioMetrics, series, settlementRange, settlementRangeFor, simulate, tradesIn,
+  POSITIONS, POS_BY_ID, account, allocation, attribution, baseHoldings, entryBuckets, eventPnl, eventRelations, groupPnl, insights, isFeasible, jointOutcomes,
+  exposures, netPnlAt, outcomeRange, periodRange, periodStats, relationsFor, scenarioMetrics, series, settlementRange, positionsFor, settlementRangeFor, simulate, tradesIn,
   type Outcome, type PlatformFilter,
 } from './finance'
 
@@ -267,3 +267,41 @@ describe('scenario simulation', () => {
 })
 const tradeNetLike = (q: number, px: number, avg: number) => q * (px - avg)
 
+
+describe('allocation drill-down', () => {
+  for (const f of F) for (const by of ['category', 'platform'] as const) {
+    it(`${f} by ${by}: shares sum to 1 and segments partition the open positions`, () => {
+      const { total, segments } = allocation(f, by)
+      const pos = positionsFor(f)
+      close(total, pos.reduce((a, p) => a + p.value, 0))
+      close(segments.reduce((a, s) => a + s.share, 0), 1, 1e-9)
+      const ids = segments.flatMap((s) => s.positions.map((x) => x.p.id))
+      expect(ids.sort()).toEqual(pos.map((p) => p.id).sort())
+      for (const s of segments) {
+        close(s.positions.reduce((a, x) => a + x.shareOfSegment, 0), 1, 1e-9)
+        close(s.positions.reduce((a, x) => a + x.shareOfOpen, 0), s.share, 1e-9)
+        for (const x of s.positions) expect(by === 'category' ? x.p.category : x.p.platform).toBe(s.key)
+      }
+      expect(segments.map((s) => s.value)).toEqual([...segments.map((s) => s.value)].sort((a, b) => b - a))
+    })
+  }
+  it('excludes cash: the basis is open-position market value only', () => {
+    const { total } = allocation('all', 'category')
+    close(total, account('all').positionsValue)
+  })
+  it('platform scope only contains that platform', () => {
+    expect(allocation('ks', 'platform').segments.map((s) => s.key)).toEqual(['ks'])
+  })
+})
+
+describe('event details', () => {
+  it('an event exposure includes every contract across platforms', () => {
+    const fed = exposures('all').find((e) => e.event.id === 'fed')!
+    expect(fed.positions.map((p) => p.id).sort()).toEqual(['fedk', 'fedp'])
+    expect(fed.platforms.sort()).toEqual(['ks', 'pm'])
+  })
+  it('eventRelations follows the shared classification', () => {
+    expect(eventRelations('btc', relationsFor('mutex')).map((r) => [r.other.id, r.cls])).toContainEqual(['eth', 'mutex'])
+    expect(eventRelations('btc', relationsFor('related')).map((r) => r.cls)).toContain('related')
+  })
+})

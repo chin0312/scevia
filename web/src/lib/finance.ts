@@ -192,7 +192,7 @@ export function entryBuckets(trades: ClosedTrade[]) {
       label: `$${lo.toFixed(2)}–${Math.min(hi, 1).toFixed(2)}`, n: ts.length,
       winRate: ts.length ? ts.filter((t) => t.outcome === 'Won').length / ts.length : null,
       implied: ts.length ? sum(ts, (t) => t.entry) / ts.length : null,
-      net: sum(ts, tradeNet),
+      net: sum(ts, tradeNet), trades: ts,
     }
   })
 }
@@ -379,4 +379,31 @@ export function groupPnl(sim: Simulation, eventIds: string[], o: Record<string, 
     if (!(h.id in sim.realizedBy)) v -= sim.feesBy[h.id] ?? 0
   }
   return v
+}
+
+/* ───────────── Allocation ───────────── */
+export interface AllocationSegment {
+  key: string; value: number
+  /** Share of open-position market value in scope (cash excluded). */
+  share: number
+  positions: { p: Position; shareOfSegment: number; shareOfOpen: number }[]
+}
+/** Open-position market value grouped by category or platform. Basis: shares × mark; cash is not included. */
+export function allocation(f: PlatformFilter, by: 'category' | 'platform') {
+  const pos = positionsFor(f), total = sum(pos, (p) => p.value)
+  const groups = new Map<string, Position[]>()
+  for (const p of pos) { const k = by === 'category' ? p.category : p.platform; groups.set(k, [...(groups.get(k) ?? []), p]) }
+  const segments: AllocationSegment[] = [...groups.entries()].map(([key, ps]) => {
+    const value = sum(ps, (p) => p.value)
+    return {
+      key, value, share: total ? value / total : 0,
+      positions: [...ps].sort((a, b) => b.value - a.value).map((p) => ({ p, shareOfSegment: value ? p.value / value : 0, shareOfOpen: total ? p.value / total : 0 })),
+    }
+  }).sort((a, b) => b.value - a.value)
+  return { total, segments }
+}
+
+/** Relationships that involve an event (including equivalent contracts merged into it). */
+export function eventRelations(id: string, rels: Relation[]) {
+  return rels.filter((r) => r.a === id || r.b === id).map((r) => ({ other: EVENTS.find((e) => e.id === (r.a === id ? r.b : r.a))!, cls: r.cls })).filter((x) => x.other)
 }

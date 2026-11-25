@@ -24,7 +24,7 @@ Scevia brings those answers into one workspace. It is **read-only**: it never pl
 ## Modules
 
 **Overview — what you own and what changed.**
-Portfolio value against net deposits, realized and unrealized P&L, holdings with drill-down to individual fills, allocation, upcoming resolutions, and data freshness.
+Portfolio value against net deposits, realized and unrealized P&L, holdings with drill-down to individual fills, allocation that filters holdings by category or platform, upcoming resolutions, and data freshness.
 
 **Analytics — where your results come from.**
 Net P&L by period and platform, reconciled into realized results, changes in open positions, and fees. Attribution by category or platform, entry price vs. outcome, and descriptive patterns that are shown only when there are enough trades to describe.
@@ -35,7 +35,7 @@ Exposure grouped by the event that decides the payoff, so the same outcome held 
 **Scenario Lab — what happens if you change something.**
 Resize positions at the prices you assume you could trade at. Compare portfolio value and settlement range before and after, see two events' joint outcomes side by side, and compare saved scenarios. Funding gaps are flagged, and no orders are ever placed.
 
-Every figure explains how it is calculated. Scevia shows payoffs if an event resolves one way or the other. It never presents a probability as its own forecast.
+Every figure explains how it is calculated. Positions, events and the trades behind a figure open in a side panel on the page you're on; moving to another module or into a scenario is always an explicit step. Scevia shows payoffs if an event resolves one way or the other. It never presents a probability as its own forecast.
 
 > Scevia currently runs on a bundled **sample portfolio**, labelled as such throughout the app.
 

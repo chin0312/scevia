@@ -54,3 +54,20 @@ describe('scenario lifecycle', () => {
     expect(s.saved!.adjs[0].to).toBe(10)
   })
 })
+
+describe('adding positions to a scenario', () => {
+  it('adds only positions that are absent, copies them, and reports what was skipped', () => {
+    const s = { ...SC.create('k', 'c'), adjs: [adj('a', 100)] }
+    const input = [adj('a', 999), adj('b', 50)]
+    const r = SC.addPositions(s, input)
+    expect(r.added).toEqual(['b'])
+    expect(r.skipped).toEqual(['a'])
+    expect(r.scenario.adjs).toEqual([adj('a', 100), adj('b', 50)])
+    expect(r.scenario.adjs[1]).not.toBe(input[1])
+    expect(s.adjs).toHaveLength(1) // original untouched
+  })
+  it('adding nothing new leaves the scenario equal', () => {
+    const s = { ...SC.create('k', 'c'), adjs: [adj('a', 1)] }
+    expect(SC.addPositions(s, [adj('a', 2)]).scenario.adjs).toEqual(s.adjs)
+  })
+})

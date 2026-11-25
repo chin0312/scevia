@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { useSearchParams } from 'react-router-dom'
 import { Icon } from '../components/Icon'
 import { Menu, Modal, useToast } from '../components/overlays'
+import { RelationshipModal } from '../components/relationships'
 import { SectionRail, useHashScroll, type RailSection } from '../components/shell'
 import { Button, Callout, Card, CardHeader, Chip, PlatformBadge, SideChip, Tabs, cx } from '../components/ui'
 import { EVENTS, FEE_RATE } from '../data/portfolio'
@@ -18,9 +19,7 @@ import type { Scenario } from '../lib/scenarios'
 
 
 const RAIL: RailSection[] = [
-  { id: 'adjust', label: 'Adjustments', icon: 'sliders' },
-  { id: 'ba', label: 'Before / after', icon: 'compare' },
-  { id: 'matrix', label: 'Outcome matrix', icon: 'grid' },
+  { id: 'workspace', label: 'Adjust & impact', icon: 'sliders', children: [{ id: 'adjust', label: 'Adjustments' }, { id: 'ba', label: 'Before / after' }, { id: 'matrix', label: 'Outcome matrix' }] },
   { id: 'payoff', label: 'Payoff by event', icon: 'bars' },
   { id: 'cmp', label: 'Compare scenarios', icon: 'table' },
   { id: 'assume', label: 'Assumptions', icon: 'info' },
@@ -71,21 +70,38 @@ export default function ScenarioLab() {
   const active = scenarios.find((s) => s.key === activeKey)
   const adjs = active?.adjs ?? NO_ADJ
 
-  // ?add=<positionId> from Overview / Risk / ⌘K → add to the draft (ref guards StrictMode double-run)
+  // ?add=<positionIds> / ?addEvent=<eventIds> from other modules: ask before changing anything.
+  // The request is read once (ref guards StrictMode) and removed from the URL, so reloads and Back never re-add.
+  const [pending, setPending] = useState<string[] | null>(null)
+  const [editRel, setEditRel] = useState(false)
   const handled = useRef<string | null>(null)
   useEffect(() => {
-    const id = params.get('add')
-    if (!id || handled.current === id) return
-    handled.current = id
+    const add = params.get('add'), addEvent = params.get('addEvent')
+    if (!add && !addEvent) return
+    const sig = params.toString()
+    if (handled.current === sig) return
+    handled.current = sig
     setParams({}, { replace: true })
-    const p = POS_BY_ID[id]
-    if (!p) { toast('That position isn’t in your portfolio', 'info'); return }
-    setScenarios((ss) => (ss.some((s) => s.key === 'draft') ? ss : [{ ...INITIAL[0], adjs: [] }, ...ss])
-      .map((s) => (s.key === 'draft' && !s.adjs.some((a) => a.id === id) ? { ...s, adjs: [{ id, to: Math.round(p.shares / 2 / 100) * 100, price: p.mark }, ...s.adjs] } : s)))
-    setActiveKey('draft')
-    if (p.eventId !== mxA) setMxB(p.eventId)
-    toast(`Added “${p.market}” to the draft (half the position, at the mark)`, 'info')
-  }, [params, setParams, toast, setScenarios, setActiveKey, mxA])
+    const evIds = (addEvent ?? '').split(',').filter(Boolean)
+    const ids = [...new Set([...(add ?? '').split(',').filter((id) => POS_BY_ID[id]), ...POSITIONS.filter((p) => evIds.includes(p.eventId)).map((p) => p.id)])]
+    if (!ids.length) { toast('Those holdings aren’t in your portfolio', 'info'); return }
+    setPending(ids)
+  }, [params, setParams, toast])
+  const confirmAdd = (target: string, ids: string[]) => {
+    const adds = ids.map((id) => ({ id, to: POS_BY_ID[id].shares, price: POS_BY_ID[id].mark }))
+    let key = target, name = scenarios.find((x) => x.key === target)?.name ?? 'New scenario'
+    if (target === 'new') {
+      key = `s${Date.now()}`; name = 'New scenario'
+      setScenarios((ss) => [...ss, SC.addPositions(SC.create(key, COLORS[ss.length % COLORS.length]), adds).scenario])
+    } else {
+      setScenarios((ss) => ss.map((x) => (x.key === target ? SC.addPositions(x, adds).scenario : x)))
+    }
+    setActiveKey(key); setPending(null)
+    const ev = POS_BY_ID[ids[0]].eventId
+    if (ev !== mxA) setMxB(ev)
+    toast(`Added ${ids.length > 1 ? `${ids.length} positions` : `“${POS_BY_ID[ids[0]].market}”`} to “${name}” at current size and mark: no change until you edit ${ids.length > 1 ? 'them' : 'it'}`, 'info')
+    window.setTimeout(() => document.getElementById('adjust')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50)
+  }
 
   const update = (fn: (a: Adjustment[]) => Adjustment[]) => {
     if (!active) return
@@ -185,7 +201,7 @@ export default function ScenarioLab() {
         {errorCount > 0 && <Callout tone="warn"><b>{errorCount} adjustment{errorCount > 1 ? 's have' : ' has'} invalid input</b> and {errorCount > 1 ? 'are' : 'is'} left out of the results below. Fix the highlighted fields to include {errorCount > 1 ? 'them' : 'it'}.</Callout>}
         {A.shortfall > 0 && <Callout tone="warn" icon="alert"><b>Needs {fmt(A.shortfall, 2)} more cash than you hold</b> ({(['pm', 'ks'] as const).filter((p) => S.shortfall[p] > 0).map((p) => `${p === 'pm' ? 'Polymarket' : 'Kalshi'} ${fmt(S.shortfall[p], 2)}`).join(', ')}). Results show the purchases as if funded; the extra funding is subtracted from cash, so values stay comparable. With current balances this allocation isn’t reachable without a deposit or selling something else.</Callout>}
 
-        <div className="lab">
+        <div className="lab anchor" id="workspace">
           <Card id="adjust">
             <CardHeader pad title="Adjustments" sub={isBase ? 'Pick or create a scenario to adjust positions' : 'Set a target size and the price you assume you’d trade at'}
               right={!isBase && (
@@ -248,11 +264,12 @@ export default function ScenarioLab() {
                   <select className="select" value={mxB} onChange={(e) => setMxB(e.target.value)} aria-label="Second event">{heldEvents.filter((e) => e.id !== mxA).map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}</select>
                   <span className="spacer" />
                   {rel ? <Chip tone={REL_TEXT[rel].tone}>{REL_TEXT[rel].label}</Chip> : <Chip tone="warn">? Unclassified</Chip>}
+                  {[mxA, mxB].sort().join() === 'btc,eth' && <button type="button" className="link" onClick={() => setEditRel(true)}>Change</button>}
                 </div>
                 <p className="t3" style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--space-3)' }}>{
                   rel === 'mutex' ? 'Both can’t resolve YES, so that combination is excluded.'
                     : rel === 'related' ? 'They share drivers but settle on different rules: all four combinations are possible and nothing is netted.'
-                      : rel === 'unknown' ? 'Marked unknown in Risk: all four combinations are shown as possible (unmodeled dependency).'
+                      : rel === 'unknown' ? 'Marked unknown: all four combinations are shown as possible (unmodeled dependency).'
                         : 'Nobody has classified this pair: all four combinations are shown as possible (unmodeled dependency).'}</p>
                 <div className="matrix">
                   <div />
@@ -322,12 +339,14 @@ export default function ScenarioLab() {
             <button type="button" role="switch" aria-checked={includeFees} aria-label="Include estimated fees" className={cx('switch', includeFees && 'on')} onClick={() => setIncludeFees((x) => !x)}><span /></button>
             {includeFees ? `Estimated: Kalshi ${(FEE_RATE.ks * 100).toFixed(1)}% · Polymarket ${(FEE_RATE.pm * 100).toFixed(0)}% of notional` : 'Excluded'}</div></div>
           <div><div className="l">Slippage / depth</div><div className="v">Not modeled</div></div>
-          <div><div className="l">Event relationships</div><div className="v">BTC × ETH: {REL_TEXT[crypto].short} · macro: related <Link className="link" to="/risk#rel">edit in Risk</Link></div></div>
+          <div><div className="l">Event relationships</div><div className="v">BTC × ETH: {REL_TEXT[crypto].short} · macro: related <button type="button" className="link" onClick={() => setEditRel(true)} title="Shared with Risk">Change</button></div></div>
         </section>
 
         <div className="footer-note"><span>Scenario results show what happens under the outcomes and prices you choose. They aren’t forecasts or recommendations.</span><span>Sample portfolio · fictional data</span></div>
       </main>
 
+      {editRel && <RelationshipModal current={crypto} onClose={() => setEditRel(false)} />}
+      {pending && <AddToScenarioModal ids={pending} scenarios={scenarios} defaultTarget={!isBase && active ? active.key : scenarios[0]?.key ?? 'new'} onCancel={() => setPending(null)} onConfirm={confirmAdd} />}
       {confirmDelete && active && (
         <Modal title={`Delete “${active.name}”?`} sub="This can’t be undone" onClose={() => setConfirmDelete(false)}
           footer={<><Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancel</Button><Button variant="primary" onClick={remove}>Delete scenario</Button></>}>
@@ -432,5 +451,38 @@ function Dumbbell({ events, base, S }: { events: RiskEvent[]; base: Simulation; 
         })}
       </svg>
     </div>
+  )
+}
+
+/** Confirms an incoming “add to scenario” request: which scenario, and which holdings. Nothing changes until Add. */
+function AddToScenarioModal({ ids, scenarios, defaultTarget, onCancel, onConfirm }: {
+  ids: string[]; scenarios: Scenario[]; defaultTarget: string; onCancel: () => void; onConfirm: (target: string, ids: string[]) => void
+}) {
+  const [target, setTarget] = useState(defaultTarget)
+  const [picked, setPicked] = useState<string[]>(ids)
+  const present = new Set(scenarios.find((x) => x.key === target)?.adjs.map((a) => a.id) ?? [])
+  const addable = picked.filter((id) => !present.has(id))
+  return (
+    <Modal title="Add to a scenario" sub="Positions start at their current size and mark, so the scenario doesn’t change until you edit them" onClose={onCancel}
+      footer={<><Button variant="ghost" onClick={onCancel}>Cancel</Button><Button variant="primary" disabled={addable.length === 0} onClick={() => onConfirm(target, addable)}>{addable.length ? `Add ${addable.length} position${addable.length > 1 ? 's' : ''}` : 'Nothing to add'}</Button></>}>
+      <label className="add-field"><span className="l">Scenario</span>
+        <select data-autofocus className="select" value={target} onChange={(e) => setTarget(e.target.value)} aria-label="Target scenario">
+          {scenarios.map((x) => <option key={x.key} value={x.key}>{x.name} · {x.adjs.length} change{x.adjs.length === 1 ? '' : 's'}</option>)}
+          <option value="new">New scenario</option>
+        </select>
+      </label>
+      <fieldset className="add-list"><legend className="l">Holdings</legend>
+        {ids.map((id) => {
+          const p = POS_BY_ID[id], already = present.has(id)
+          return (
+            <label key={id} className={cx('choice', picked.includes(id) && !already && 'on')} style={already ? { opacity: 0.6, cursor: 'not-allowed' } : undefined}>
+              <input type="checkbox" disabled={already} checked={already || picked.includes(id)} onChange={(e) => setPicked((x) => (e.target.checked ? [...x, id] : x.filter((y) => y !== id)))} />
+              <span><span className="row" style={{ gap: 'var(--space-2)' }}><PlatformBadge p={p.platform} />{p.market}<SideChip side={p.side} /></span>
+                <small>{already ? 'Already in this scenario: left as it is' : `${int(p.shares)} shares at ${p.mark.toFixed(2)}`}</small></span>
+            </label>
+          )
+        })}
+      </fieldset>
+    </Modal>
   )
 }

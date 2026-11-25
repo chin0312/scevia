@@ -31,6 +31,7 @@ The app imports data only through `web/src/data/portfolio.ts`.
 | Cash | Net deposits + realized − Σ (cost + fees) of open fills, per platform. |
 | Portfolio value | Cash + Σ shares × mark. **Invariant:** value − net deposits = net P&L. |
 | Win rate | Trades that resolved in your favour ÷ resolved trades. Early exits are excluded. |
+| Allocation share / weight | A position's or segment's shares × mark ÷ Σ shares × mark of open positions in the current platform scope. Cash is excluded. Segment shares sum to 100%, and each segment's positions partition it (`allocation()`). |
 
 Platform filters apply the same formulas to that platform's records. Platform figures always sum to the total.
 

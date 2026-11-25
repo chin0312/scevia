@@ -71,8 +71,8 @@ export function LineChart({ label = 'Line chart', series, w = 820, h = 250, min,
 }
 
 export interface Slice { key: string; value: number; color: string }
-export function Donut({ parts, size = 132, thickness = 14, center, active, onHover }: {
-  parts: Slice[]; size?: number; thickness?: number; center: ReactNode; active?: string | null; onHover?: (k: string | null) => void
+export function Donut({ parts, size = 132, thickness = 14, center, active, onHover, onSelect }: {
+  parts: Slice[]; size?: number; thickness?: number; center: ReactNode; active?: string | null; onHover?: (k: string | null) => void; onSelect?: (k: string) => void
 }) {
   const r = size / 2 - thickness / 2, c = 2 * Math.PI * r, tot = parts.reduce((a, p) => a + p.value, 0)
   const offs = parts.map((_, i) => parts.slice(0, i).reduce((a, p) => a + (p.value / tot) * c, 0))
@@ -85,7 +85,7 @@ export function Donut({ parts, size = 132, thickness = 14, center, active, onHov
             <circle key={p.key} className={cx('hoverable', active === p.key && 'hot')} cx={size / 2} cy={size / 2} r={r} fill="none"
               style={{ stroke: p.color }} strokeWidth={active === p.key ? thickness + 4 : thickness}
               strokeDasharray={`${Math.max(len - 3, 0)} ${c}`} strokeDashoffset={-off}
-              onMouseEnter={() => onHover?.(p.key)} onMouseLeave={() => onHover?.(null)} />
+              onMouseEnter={() => onHover?.(p.key)} onMouseLeave={() => onHover?.(null)} onClick={() => onSelect?.(p.key)} />
           )
         })}
       </svg>

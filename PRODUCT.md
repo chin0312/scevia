@@ -25,6 +25,15 @@
 - **In scope:** tracking positions and value, performance review, event-level risk, and hypothetical position changes, across Polymarket and Kalshi, read-only.
 - **Out of scope:** trade execution, copy trading, signals or advice, probability forecasts, tax reporting, custody.
 
+## Interaction principles
+
+- **Four independent modules.** Overview, Analytics, Risk and Scenario Lab each answer their own question and are complete on their own. They share one data layer, not each other's screens.
+- **Inspect, explore, navigate.** *Inspect* opens a detail panel (position, event, group of holdings, trades) on top of the current page. *Explore* changes a local view (grouping, period, a selected allocation segment) without changing portfolio-wide figures. *Navigate* moves to another module and is always an explicit, labelled action (“Analyze in Risk →”, “Simulate in Scenario Lab”).
+- **No navigation just to see data.** Anything shown in one module that is defined in another (an event's exposure, a position's fills) is inspectable in place.
+- **Scenario state only changes on purpose.** Nothing outside Scenario Lab edits a scenario. Hand-offs ask which scenario and which holdings to add; new positions start at the current holding and mark; Cancel changes nothing; reloading never repeats a hand-off.
+- **One copy of every assumption.** Relationship classifications and guardrails are shared state, editable wherever they are used.
+- **Drill-downs keep scope.** A panel opened from a filtered view says which period and platform scope it reflects.
+
 ## Terminology (use these words in the UI)
 
 | Term | Meaning |
