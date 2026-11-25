@@ -529,3 +529,14 @@ export const dataCoverage = scevia.table(
     index('data_coverage_account_updated_idx').on(table.providerAccountId, table.updatedAt),
   ],
 )
+
+// Counts source rows committed within one attempt, independently of economic multiplicity.
+export const activityFactOccurrences = scevia.table('activity_fact_occurrences', {
+  syncRunId: uuid('sync_run_id').notNull().references(() => syncRuns.id, { onDelete: 'cascade' }),
+  activityFactId: uuid('activity_fact_id').notNull().references(() => providerActivityFacts.id, { onDelete: 'cascade' }),
+  observations: integer('observations').notNull(),
+}, (table) => [
+  uniqueIndex('activity_fact_occurrences_run_fact_unique').on(table.syncRunId, table.activityFactId),
+  index('activity_fact_occurrences_fact_idx').on(table.activityFactId),
+  check('activity_fact_occurrences_positive', sql`${table.observations} > 0`),
+])

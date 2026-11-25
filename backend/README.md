@@ -87,3 +87,5 @@ The application requires Node.js 24. Development bearer authentication is reject
 This phase does not store provider credentials. Future integrations should use public read-only wallet data or least-privilege read scopes. Never provide a private key, seed phrase, trading permission, or withdrawal permission to Scevia.
 
 The API is a backend foundation, not a production-ready authentication service. Source payloads and private financial records are stored in plaintext for backend processing; there is no user-facing retention, export, or deletion workflow. These trust boundaries and the planned user-controlled source model are documented in [the architecture and threat model](docs/ARCHITECTURE.md) and [frontend integration notes](docs/FRONTEND_INTEGRATION.md).
+
+The live Polymarket HTTP integration defaults to disabled. Enable it only for permitted local development on a loopback bind by setting `POLYMARKET_LIVE_DATA_AUTHORIZED=YES` in the server environment. This setting records an operator decision and does not grant data-use rights. Fixture adapters and injected contract-test transports work without live access.

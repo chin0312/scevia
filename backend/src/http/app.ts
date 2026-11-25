@@ -9,6 +9,7 @@ import type { ServerConfig } from '../config.js'
 import type { Database } from '../db/client.js'
 import {
   cashBalanceSnapshots,
+  activityFactOccurrences,
   cashMovements,
   dataCoverage,
   events,
@@ -305,6 +306,7 @@ function errorBody(requestId: string, code: string, message: string) {
 export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
   const registry = options.registry ?? providerRegistry
   const ingestion = new IngestionService(options.database, registry)
+  const liveAllowed = options.config.polymarketLiveEnabled === true
   const marketData = options.marketData ?? new PolymarketMarketDataService()
   const app = Fastify({
     logger: {
@@ -439,9 +441,12 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
           page: { type: 'integer', minimum: 1, maximum: 100, default: 1 },
         },
       },
-      response: { 200: marketSearchResponseSchema, 400: errorResponseSchema, 502: errorResponseSchema },
+      response: { 200: marketSearchResponseSchema, 400: errorResponseSchema, 502: errorResponseSchema, 503: errorResponseSchema },
     },
   }, async (request, reply) => {
+    if (!liveAllowed && !options.marketData) {
+      return reply.code(503).send(errorBody(request.id, 'provider_live_disabled', 'Live market access is disabled.'))
+    }
     try {
       return await marketData.search(request.query.q, request.query.limit ?? 5, request.query.page ?? 1, request.raw.signal)
     } catch (error) {
@@ -461,9 +466,12 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         type: 'object', additionalProperties: false, required: ['url'],
         properties: { url: { type: 'string', minLength: 1, maxLength: 2048 } },
       },
-      response: { 200: marketResolveResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 502: errorResponseSchema },
+      response: { 200: marketResolveResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 502: errorResponseSchema, 503: errorResponseSchema },
     },
   }, async (request, reply) => {
+    if (!liveAllowed && !options.marketData) {
+      return reply.code(503).send(errorBody(request.id, 'provider_live_disabled', 'Live market access is disabled.'))
+    }
     try {
       return await marketData.resolve(request.body.url, request.raw.signal)
     } catch (error) {
@@ -489,9 +497,12 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
           cursor: { type: 'string', minLength: 1, maxLength: 4096 },
         },
       },
-      response: { 200: priceHistoryResponseSchema, 400: errorResponseSchema, 502: errorResponseSchema },
+      response: { 200: priceHistoryResponseSchema, 400: errorResponseSchema, 502: errorResponseSchema, 503: errorResponseSchema },
     },
   }, async (request, reply) => {
+    if (!liveAllowed && !options.marketData) {
+      return reply.code(503).send(errorBody(request.id, 'provider_live_disabled', 'Live market access is disabled.'))
+    }
     try {
       return await marketData.priceHistory({
         tokenId: request.query.tokenId,
@@ -947,18 +958,19 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       return { items, pagination: pagination(limit, offset, items.length) }
     })
 
-    privateApi.get<{ Params: PortfolioParams } & { Querystring: SourcePageQuery }>('/portfolios/:portfolioId/activity-facts', {
+    privateApi.get<{ Params: PortfolioParams } & { Querystring: SourcePageQuery & { syncRunId?: string } }>('/portfolios/:portfolioId/activity-facts', {
       schema: {
         ...authSchema,
         tags: ['portfolio data'],
         summary: 'List provider activity that has not been reconciled to canonical financial records',
         params: portfolioParamsSchema,
-        querystring: sourcePaginationQuerySchema,
+        querystring: { ...sourcePaginationQuerySchema, properties: { ...sourcePaginationQuerySchema.properties, syncRunId: uuidSchema } },
         response: {
           200: paginatedSchema({
             id: uuidSchema,
             providerAccountId: uuidSchema,
             providerCode: { type: 'string' },
+            observationsInRun: { type: ['integer', 'null'] },
             activityType: { type: 'string' },
             identityKind: { type: 'string', enum: ['provider_native', 'source_fingerprint'] },
             sourceEndpoint: { type: 'string', enum: ['activity', 'trades', 'positions'] },
@@ -981,12 +993,17 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       const portfolio = await getOwnedPortfolio(options.database, request.params.portfolioId, request.principalId!)
       if (!portfolio) return reply.code(404).send(errorBody(request.id, 'not_found', 'The requested resource was not found.'))
       const { limit, offset } = request.query
+      const run = request.query.syncRunId
+      const occurrence = run ? sql<number>`(select observations from ${activityFactOccurrences}
+        where ${activityFactOccurrences.activityFactId} = ${providerActivityFacts.id}
+        and ${activityFactOccurrences.syncRunId} = ${run})` : sql<null>`null`
       const items = await options.database.select({
         id: providerActivityFacts.id,
         providerAccountId: providerAccounts.id,
         providerCode: providerAccounts.providerCode,
         identityKind: providerActivityFacts.identityKind,
         sourceEndpoint: providerActivityFacts.sourceEndpoint,
+        observationsInRun: occurrence.as('observations_in_run'),
         activityType: providerActivityFacts.activityType,
         occurredAt: providerActivityFacts.occurredAt,
         transactionHash: providerActivityFacts.transactionHash,
@@ -1004,6 +1021,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         .innerJoin(portfolios, eq(providerAccounts.portfolioId, portfolios.id))
         .where(and(
           eq(portfolios.id, portfolio.id), eq(portfolios.ownerId, request.principalId!),
+          run ? sql`${occurrence} is not null` : undefined,
           request.query.providerAccountId ? eq(providerAccounts.id, request.query.providerAccountId) : undefined,
         ))
         .orderBy(desc(providerActivityFacts.occurredAt), desc(providerActivityFacts.id))
@@ -1307,13 +1325,14 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       return { items, pagination: pagination(limit, offset, items.length) }
     })
 
-    privateApi.post<{ Params: AccountParams }>('/provider-accounts/:accountId/sync', {
+    privateApi.post<{ Params: AccountParams; Querystring: { scope?: 'all' | 'current' | 'history' } }>('/provider-accounts/:accountId/sync', {
       config: { rateLimit: { max: 5, timeWindow: '1 minute' } },
       schema: {
         ...authSchema,
         tags: ['synchronization'],
         summary: 'Run a bounded read-only synchronization for an owned provider account',
         params: accountParamsSchema,
+        querystring: { type: 'object', properties: { scope: { type: 'string', enum: ['all', 'current', 'history'] } } },
         response: {
           200: {
             type: 'object',
@@ -1357,7 +1376,10 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       const account = await getOwnedProviderAccount(options.database, request.params.accountId, request.principalId!)
       if (!account) return reply.code(404).send(errorBody(request.id, 'not_found', 'The requested resource was not found.'))
       try {
-        const result = await ingestion.syncProviderAccount(account.id)
+        if (account.providerCode === 'polymarket' && !liveAllowed && !options.registry) {
+          return reply.code(422).send(errorBody(request.id, 'provider_live_disabled', 'Live account synchronization is disabled.'))
+        }
+        const result = await ingestion.syncProviderAccount(account.id, request.query.scope)
         if (result.status === 'failed') {
           return reply.code(502).send(errorBody(request.id, 'sync_failed', 'All synchronization streams failed.'))
         }
@@ -1392,7 +1414,7 @@ async function getOwnedPortfolio(database: Database, portfolioId: string, ownerI
 }
 
 async function getOwnedProviderAccount(database: Database, accountId: string, ownerId: string) {
-  const [account] = await database.select({ id: providerAccounts.id })
+  const [account] = await database.select({ id: providerAccounts.id, providerCode: providerAccounts.providerCode })
     .from(providerAccounts)
     .innerJoin(portfolios, eq(providerAccounts.portfolioId, portfolios.id))
     .where(and(

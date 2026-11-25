@@ -22,3 +22,40 @@ At one premium read per wallet per day, 10 wallets would use roughly 300 premium
 One venue account should hold the portfolio association. Each supplemental observation must retain acquisition source, endpoint, source version, record identity and observed time. For chain observations retain chain ID, contract, transaction hash, log index, block hash and finality. Use observed time for freshness and source event time for economic ordering. Cross-source observations are candidates for reconciliation against one economic event. Store third-party P&L as an external observation until its fee, cost basis and coverage assumptions are checked. Phase 3 owns conflicts, correction replay, fee attribution, collateral transfers, settlement and redemption accounting, and CSV overlap.
 
 The [Polymarket Terms of Use](https://polymarket.com/tos) remain a dependency for live validation. Obtain confirmation of applicable rights for capture, commercial analytics, derived results, caching, retention and display separately from software licenses and pricing. No intermediary was verified to confer those rights. A wallet-filtered hosted query reveals the selected wallet to the service even if it carries no Scevia user ID. Confirm query logging and retention, use server-side credentials, and avoid forwarding any unnecessary account identifiers. The next evidence milestone is an authorized wallet sample plus a bounded comparison of source fill IDs, decoded fees and portfolio readback.
+
+## Acquisition decision for the restricted baseline
+
+Use deterministic fixtures for Phase 2B until permitted data is available. Use venue OPEN observations for current holdings and Gamma/CLOB for market discovery and reference marks only after the intended use is confirmed. Start Phase 3 with user-provided imports and explicitly unresolved evidence. Evaluate bounded Polygon receipt/log retrieval as the strongest candidate for fill identity and fee verification. Identify logs by chain, transaction and log index and retain block hash and contract version for reorg handling. Determine actual fees with the version-specific ABI and fee/refund semantics. Treat deposits, withdrawals, splits, merges and redemptions as source evidence until matched to the appropriate account and collateral ledger.
+
+### Predexon contract check and reproduction
+
+The [historical trades schema](https://docs.predexon.com/api-reference/trading/trades) documents token and condition IDs, raw and normalized shares, price, maker and taker addresses, transaction hash, order hash, fee_usd and exchange versions 1–3. The wallet filter matches maker attribution. A transaction can include several fills and an order can be filled in parts. The reviewed schema has no documented per-fill ID or log index. It therefore does not establish unique economic events or complete wallet coverage on its own. The documented fee field defaults to zero, so compare it against actual fee logs before treating zero as verified. Blockchain-oriented fields do not independently establish completeness or the origin of every field.
+
+Trade history is documented as unmetered, with a page size up to 500 and an API key. [Wallet positions](https://docs.predexon.com/api-reference/wallet/positions) uses up to 200 rows per page and [wallet P&L](https://docs.predexon.com/api-reference/wallet/pnl) reports rolling-window caveats. Verify free entitlement for both; per-market wallet performance is documented as Dev/Pro only. No authorized test key or approved wallet sample was supplied for this evaluation. After the maintainer confirms rights and wallet-query retention, run a bounded test with server-side credentials:
+
+```sh
+curl --fail-with-body -G 'https://api.predexon.com/v2/polymarket/trades' \
+  -H "x-api-key: $PREDEXON_API_KEY" \
+  --data-urlencode "wallet=$AUTHORIZED_WALLET" \
+  --data-urlencode "start_time=$START_UNIX" --data-urlencode "end_time=$END_UNIX" \
+  --data-urlencode 'limit=20'
+```
+
+Repeat the same bounded range and compare transaction/order groups and raw financial fields with approved Polygon receipts, including a multi-fill transaction. Check both role directions, exact fee units, missing versus zero fees, pagination and matching to known instrument IDs. For HyperSync, obtain a token and approval for the intended log use, query one approved block range and the documented exchange contracts, and compare chain, transaction, log index, contract, block hash and decoded fee fields against the receipts. Goldsky order_filled is another candidate for this exact comparison after dataset entitlement and rights are confirmed. The earlier public height response was connectivity evidence only. No new live financial proof of concept was possible with the available access.
+
+### Code reviewed
+
+The MIT [Subgraph V2 exchange handler](https://github.com/psyberck/polymarket-subgraph-v2/blob/main/src/handlers/ExchangeMapping.ts) uses block number plus log index for its indexed row and records decoded fee data before updating position cost basis. Scevia should retain transaction and block hashes as well and test its own version, rollback and role semantics. The MIT [Prediction Market Analysis decoder](https://github.com/Jon-Becker/prediction-market-analysis/blob/main/src/indexers/polymarket/blockchain.py) preserves transaction hash, log index and raw fee. Its ABI is a reference for the contract it decodes, and must be checked against each target deployment. No dataset rights or complete historical coverage were verified for reuse.
+
+### Illustrative monthly request budget
+
+Assume one wallet per user, an initial 10 trade pages and 5 activity pages, and eight on-demand refreshes per wallet per month. Each refresh uses one current position page, one incremental trade page and one activity page. Assume two bounded fee-evidence lookups per wallet in the first month and a 20% retry margin. Public lookup traffic is shared across users. Budget 120 searches, 30 link resolutions, 60 reference-price bundles and 30 history requests per month after cache hits. This is a request estimate. Envio weights depend on the query, and search enrichment can fan out into multiple provider calls.
+
+| Wallets | Initial history plus incremental trade/activity with retries | Current pages with retries | Fee lookups with retries | Public requests with retries |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 38 | 10 | 3 | 288 |
+| 10 | 372 | 96 | 24 | 288 |
+| 50 | 1,860 | 480 | 120 | 288 |
+| 100 | 3,720 | 960 | 240 | 288 |
+
+If current pages are one premium request each and all relevant history qualifies as unmetered, that workload fits the published 1,000 premium quota at all four sizes, narrowly at 100 wallets. An additional premium call per refresh moves 100 wallets over the quota. At 1 request/sec the 100-wallet initial history alone takes at least 30 minutes with the retry allowance. Spread backfills out and keep holdings refresh on demand. If higher throughput or paid entitlements are required, the advertised Predexon Dev price starts at $49/month. Hosted data rights, Envio query costs and the cost of higher-cardinality histories still require measurement.

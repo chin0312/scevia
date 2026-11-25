@@ -61,3 +61,5 @@ The script only accepts the local API at `http://127.0.0.1:3001`. It labels API 
 - [Current pUSD collateral](https://docs.polymarket.com/concepts/pusd)
 - [Current fee schedule](https://docs.polymarket.com/trading/fees)
 - [Terms of Use](https://polymarket.com/tos)
+
+Current-only sync is available as `POST /v1/provider-accounts/{id}/sync?scope=current`. History uses `scope=history` and keeps separate checkpoints under the same account lease. A completed position retrieval with unusable rows reports a partial attempt and does not advance usable freshness. Ambiguous deposits and withdrawals remain signed activity facts; native activity IDs are scoped to the activity endpoint and movement type. Legacy cash fingerprints still require Phase 3 review. For any run, activity fact occurrences count committed rows, including identical rows across pages. Counts are separate across resumed and repeated attempts and do not establish economic multiplicity.

@@ -94,6 +94,13 @@ if (mode === 'market-services') {
     ),
   ])
 
+  const runEvidence = await Promise.all(firstSync.streams.map((stream) =>
+    request<{ items: Array<{ providerAccountId: string; observationsInRun: number }> }>(
+      `/v1/portfolios/${encodeURIComponent(portfolioId)}/activity-facts?${sourceQuery}&syncRunId=${encodeURIComponent(stream.runId)}`,
+      { headers: authHeaders },
+    )))
+  const observedFacts = runEvidence.flatMap((page) => page.items)
+  const sourceFactOccurrencesOnFirstPages = observedFacts.reduce((sum, row) => sum + row.observationsInRun, 0)
   const secondSync = mode === 'repeat' ? await sync(registration.id, authHeaders) : null
   const repeatedFills = secondSync === null ? null : await readFills()
   const sourceRows = [
@@ -141,6 +148,17 @@ if (mode === 'market-services') {
     providerCode: 'polymarket',
     sourceRegistration: registration.alreadyRegistered ? 'already_registered' : 'created',
     selectedProviderAccountId: registration.id,
+    milestones: {
+      connectivity: firstSync.streams.some((stream) => stream.pagesRead > 0) ? 'observed' : 'unverified',
+      populatedRetrieval: hasProviderEvidence ? 'observed' : 'unverified',
+      evidencePreservation: observedFacts.length > 0
+        && observedFacts.every((row) => row.providerAccountId === registration.id) ? 'observed_on_first_pages' : 'unverified',
+      sourceFactOccurrencesOnFirstPages,
+      canonicalIngestion: hasRetainedFinancialFacts && allRowsBelongToSelectedSource ? 'observed_for_new_source' : 'unverified',
+      canonicalTradeIngestion: !registration.alreadyRegistered && fills.items.length > 0 ? 'observed_for_new_source' : 'unverified',
+      reconciliationReadiness: 'unverified',
+      repeatability: repeatedSyncEvidence?.deduplicationObserved === true ? 'stable_fill_sample_observed' : 'unverified',
+    },
     providerConnectivity: allStreamsComplete ? 'reachable' : 'reached_but_sync_incomplete',
     providerData: hasProviderEvidence ? 'populated_response' : 'empty_response',
     syncCompleteness: {

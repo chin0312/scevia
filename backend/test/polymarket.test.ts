@@ -212,8 +212,10 @@ describe('Polymarket provider adapter', () => {
   it('maps deposits and withdrawals as signed cash flows while keeping other account events unreconciled', async () => {
     const client = new PolymarketHttpClient(async () => jsonResponse({
       data: [
-        { type: 'DEPOSIT', transaction_hash: '0x01', proxy_wallet: WALLET, timestamp: 1795564800, usdc_size: '10.25' },
-        { type: 'WITHDRAWAL', transaction_hash: '0x02', proxy_wallet: WALLET, timestamp: 1795564801, usdc_size: '3' },
+        { id: 'deposit-confirmed', type: 'DEPOSIT', transaction_hash: '0x01', proxy_wallet: WALLET, timestamp: 1795564800, usdc_size: '10.25' },
+        { id: 'withdrawal-confirmed', type: 'WITHDRAWAL', transaction_hash: '0x02', proxy_wallet: WALLET, timestamp: 1795564801, usdc_size: '3' },
+        { type: 'WITHDRAWAL', transaction_hash: '0x07', proxy_wallet: WALLET, timestamp: 1795564801, usdc_size: '5' },
+        { type: 'WITHDRAWAL', transaction_hash: '0x07', proxy_wallet: WALLET, timestamp: 1795564801, usdc_size: '6' },
         { type: 'REDEEM', transaction_hash: '0x03', proxy_wallet: WALLET, timestamp: 1795564802, condition_id: 'condition-a', token_id: '101', size: '4', usdc_size: '4' },
         { type: 'MERGE', transaction_hash: '0x04', proxy_wallet: WALLET, timestamp: 1795564803, size: '2' },
         { type: 'TRADE', transaction_hash: '0x05', proxy_wallet: WALLET, timestamp: 1795564804, size: '1', is_combo: false },
@@ -229,7 +231,11 @@ describe('Polymarket provider adapter', () => {
 
     expect(cash).toHaveLength(2)
     expect(cash.map((record) => record.kind === 'cash_movement' ? record.signedAmount : null)).toEqual(['10.25', '-3'])
-    expect(facts.map((record) => record.kind === 'activity_fact' ? record.activityType : null)).toEqual(['REDEEM', 'MERGE', 'TRADE', 'TRADE'])
+    expect(facts.map((record) => record.kind === 'activity_fact' ? record.activityType : null)).toEqual(['WITHDRAWAL', 'WITHDRAWAL', 'REDEEM', 'MERGE', 'TRADE', 'TRADE'])
+    expect(facts.slice(0, 2)).toMatchObject([
+      { amount: '-5', resolutionReason: 'cash_movement_identity_ambiguous' },
+      { amount: '-6', resolutionReason: 'cash_movement_identity_ambiguous' },
+    ])
     expect(facts.filter((record) => record.kind === 'activity_fact' && record.classification === 'overlap_candidate')).toHaveLength(2)
     expect(page.coverage.activity?.status).toBe('partial')
     expect(page.coverage.cash_movements?.status).toBe('partial')

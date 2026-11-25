@@ -200,10 +200,11 @@ export class PolymarketAdapter implements ProviderAdapter {
           continue
         }
         if (type === 'DEPOSIT' || type === 'WITHDRAWAL') {
-          const movement = cashMovementFromActivity(row)
+          const nativeId = nativeActivityId(row)
+          const movement = nativeId ? cashMovementFromActivity(row, nativeId) : null
           if (movement) { records.push(movement); sourceRowsRetained += 1 }
           else {
-            const unresolved = activityFactFromRow(row, 'unresolved', 'cash_movement_fields_invalid', 'activity')
+            const unresolved = activityFactFromRow(row, 'unresolved', nativeId ? 'cash_movement_fields_invalid' : 'cash_movement_identity_ambiguous', 'activity')
             if (unresolved) { records.push(unresolved); sourceRowsRetained += 1 } else invalidRecords += 1
           }
           continue
@@ -633,7 +634,7 @@ function marketFromTokenPair(
   }
 }
 
-function cashMovementFromActivity(row: Record<string, unknown>): Record<string, unknown> | null {
+function cashMovementFromActivity(row: Record<string, unknown>, nativeId: string): Record<string, unknown> | null {
   const activityType = nonEmptyString(row.type)?.toUpperCase()
   const occurredAt = epochSecondsToIso(row.timestamp)
   const amount = decimalString(row.usdc_size)
@@ -642,7 +643,7 @@ function cashMovementFromActivity(row: Record<string, unknown>): Record<string, 
   if (absoluteAmount.isZero()) return null
   const movementKind = activityType === 'DEPOSIT' ? 'deposit' : 'withdrawal'
   const signedAmount = movementKind === 'deposit' ? absoluteAmount.toFixed() : absoluteAmount.negated().toFixed()
-  const id = fingerprint('cash', activityIdentity(row, occurredAt, amount))
+  const id = `activity:provider:${activityType}:${nativeId}`
   return {
     kind: 'cash_movement',
     externalId: `polymarket-v2:${id}`,
@@ -666,7 +667,10 @@ function activityFactFromRow(
   const activityType = activityTypeOverride ?? nonEmptyString(row.type)?.toUpperCase().slice(0, 64)
   const occurredAt = epochSecondsToIso(row.timestamp)
   if (!activityType || !hasRetainableSourceEvidence(row)) return null
-  const amount = decimalString(row.usdc_size ?? row.current_value)
+  const reportedAmount = decimalString(row.usdc_size ?? row.current_value)
+  const amount = reportedAmount === null ? null : activityType === 'WITHDRAWAL'
+    ? new Decimal(reportedAmount).abs().negated().toFixed()
+    : activityType === 'DEPOSIT' ? new Decimal(reportedAmount).abs().toFixed() : reportedAmount
   const quantity = decimalString(row.size ?? row.current_size)
   const id = sourceObservationIdentity(row, activityType, occurredAt)
   return {
@@ -712,7 +716,7 @@ function sourceObservationIdentity(
   type: string,
   occurredAt: string | null,
 ): { value: string; identityKind: 'provider_native' | 'source_fingerprint' } {
-  const nativeId = nonEmptyString(row.id) ?? nonEmptyString(row.activity_id) ?? nonEmptyString(row.trade_id)
+  const nativeId = nativeActivityId(row) ?? nonEmptyString(row.trade_id)
   if (nativeId) return { value: `provider:${type}:${nativeId}`, identityKind: 'provider_native' }
   return {
     value: fingerprint('source-observation', [
@@ -743,18 +747,8 @@ function providerEventIdentity(
   return { externalId: `polymarket:event:market:${marketId}`, kind: 'market_scoped_fallback' }
 }
 
-function activityIdentity(row: Record<string, unknown>, occurredAt: string, amount: string): unknown[] {
-  return [
-    nonEmptyString(row.proxy_wallet)?.toLowerCase() ?? '',
-    nonEmptyString(row.transaction_hash)?.toLowerCase() ?? '',
-    nonEmptyString(row.type)?.toUpperCase() ?? '',
-    occurredAt,
-    nonEmptyString(row.condition_id) ?? '',
-    nonEmptyString(row.token_id) ?? '',
-    nonEmptyString(row.side) ?? '',
-    decimalString(row.size) ?? '',
-    amount,
-  ]
+function nativeActivityId(row: Record<string, unknown>): string | null {
+  return nonEmptyString(row.id) ?? nonEmptyString(row.activity_id)
 }
 
 function minimalActivityPayload(row: Record<string, unknown>): Record<string, unknown> {

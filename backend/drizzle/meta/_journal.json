@@ -43,6 +43,13 @@
       "when": 1795596412953,
       "tag": "0005_misty_sphinx",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1795600940861,
+      "tag": "0006_remarkable_magma",
+      "breakpoints": true
     }
   ]
 }

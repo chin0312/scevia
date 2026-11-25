@@ -54,14 +54,17 @@ export class IngestionService {
     private readonly registry: ProviderRegistry,
   ) {}
 
-  async syncProviderAccount(account: string | { id: string }): Promise<SyncResult> {
+  async syncProviderAccount(account: string | { id: string }, scope: 'all' | 'current' | 'history' = 'all'): Promise<SyncResult> {
     const accountId = typeof account === 'string' ? account : account.id
     const storedAccount = await this.loadSyncAccount(accountId)
     const adapter = this.registry.get(storedAccount.providerCode)
     this.validateStreams(adapter)
+    const streams = adapter.capabilities.streams.filter((stream) => scope === 'all'
+      || (scope === 'current') === (stream.snapshotSemantics.positions !== undefined || stream.snapshotSemantics.cash_balances !== undefined))
+    if (streams.length === 0) throw new IngestionError('sync_scope_unavailable')
     const startedAt = new Date().toISOString()
     const deadline = Date.now() + MAX_SYNC_DURATION_MS
-    const streamBudgetMs = Math.max(1, Math.floor(MAX_SYNC_DURATION_MS / adapter.capabilities.streams.length))
+    const streamBudgetMs = Math.max(1, Math.floor(MAX_SYNC_DURATION_MS / streams.length))
 
     const accountCheckpointId = await this.getOrCreateCheckpoint(accountId, ACCOUNT_LOCK_NAME)
     const leaseToken = randomUUID()
@@ -70,7 +73,7 @@ export class IngestionService {
     const results: StreamSyncResult[] = []
     try {
       await this.database.transaction((tx) => initializeCoverage(tx, accountId, adapter.capabilities, new Date()))
-      for (const stream of adapter.capabilities.streams) {
+      for (const stream of streams) {
         results.push(await this.syncStream({
           account: storedAccount,
           adapter,
@@ -256,7 +259,12 @@ export class IngestionService {
         seenCursors.add(cursor)
         if (pagesRead >= MAX_PAGE_COUNT) throw new IngestionError('provider_page_limit_reached')
       }
-      status = 'complete'
+      if (stream.snapshotSemantics.positions === 'incremental' && (invalidRecords > 0 || excludedRecords > 0 || unresolvedRecords > 0)) {
+        status = 'partial'
+        errorCode = 'position_refresh_contains_unusable_rows'
+      } else {
+        status = 'complete'
+      }
     } catch (error) {
       status = pagesRead > 0 ? 'partial' : 'failed'
       errorCode = this.safeErrorCode(error)

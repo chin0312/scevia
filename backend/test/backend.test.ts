@@ -4,6 +4,7 @@ import { Pool } from 'pg'
 import { createDatabase, type Database } from '../src/db/client.js'
 import { runMigrations } from '../src/db/migrate.js'
 import {
+  activityFactOccurrences,
   cashMovements,
   events,
   fills,
@@ -136,9 +137,27 @@ describe('migrations and canonical persistence', () => {
     const wallet = '0x1234567890abcdef1234567890abcdef12345678'
     let omitPositions = false
     let failSync = false
+    let currentOnlyScenario = false
+    let interruptSecondPage = true
+    const openCursors: Array<string | null> = []
     const fetcher: typeof fetch = async (input) => {
       const url = new URL(String(input))
       if (failSync) return new Response(null, { status: 403 })
+      if (currentOnlyScenario) {
+        if (!url.pathname.endsWith('/v2/positions') || url.searchParams.get('status') !== 'OPEN') {
+          throw new Error('Current scope must not call historical endpoints')
+        }
+        const cursor = url.searchParams.get('cursor')
+        openCursors.push(cursor)
+        if (cursor && interruptSecondPage) return new Response(null, { status: 403 })
+        const token = cursor ? '402' : '401'
+        return new Response(JSON.stringify({
+          data: [{ proxy_wallet: wallet, condition_id: 'current-' + token, token_id: token,
+            opposite_token_id: token + '0', title: 'Current holding ' + token, outcome: 'Yes',
+            opposite_outcome: 'No', current_size: '1', status: 'OPEN' }],
+          pagination: { next_cursor: cursor ? null : 'open-page-2' },
+        }), { headers: { 'content-type': 'application/json' } })
+      }
       if (url.pathname.endsWith('/v2/positions')) {
         if (omitPositions) {
           return new Response(JSON.stringify({ data: [], pagination: { next_cursor: null } }), { status: 200, headers: { 'content-type': 'application/json' } })
@@ -180,8 +199,11 @@ describe('migrations and canonical persistence', () => {
         }), { status: 200, headers: { 'content-type': 'application/json' } })
       }
       if (url.pathname.endsWith('/v2/trades')) {
+        const ambiguous = { proxy_wallet: wallet, transaction_hash: '0xno-id', condition_id: 'condition-a',
+          token_id: '101', side: 'BUY', size: '2', price: '0.25', timestamp: 1795564600 }
+        const later = url.searchParams.has('cursor')
         return new Response(JSON.stringify({
-          data: [{
+          data: later ? [ambiguous] : [{
             proxy_wallet: wallet,
             id: 'native-fill',
             transaction_hash: '0xabc123',
@@ -202,8 +224,8 @@ describe('migrations and canonical persistence', () => {
             size: '2.5',
             price: '0.3',
             timestamp: 1795564700,
-          }],
-          pagination: { next_cursor: null },
+          }, ambiguous],
+          pagination: { next_cursor: later ? null : 'trade-page-2' },
         }), { status: 200, headers: { 'content-type': 'application/json' } })
       }
       if (url.pathname.endsWith('/v2/tokens')) {
@@ -217,7 +239,7 @@ describe('migrations and canonical persistence', () => {
       if (url.pathname.endsWith('/v2/activity')) {
         return new Response(JSON.stringify({
           data: [
-            { type: 'DEPOSIT', transaction_hash: '0xdeposit', proxy_wallet: wallet, timestamp: 1795564800, usdc_size: '10.25' },
+            { id: 'native-deposit', type: 'DEPOSIT', transaction_hash: '0xdeposit', proxy_wallet: wallet, timestamp: 1795564800, usdc_size: '10.25' },
             { type: 'REDEEM', transaction_hash: '0xredeem', proxy_wallet: wallet, timestamp: 1795564900, condition_id: 'condition-a', token_id: '101', size: '1', usdc_size: '1' },
           ],
           pagination: { next_cursor: null },
@@ -244,21 +266,21 @@ describe('migrations and canonical persistence', () => {
     const second = await app.inject({ method: 'POST', url: `/v1/provider-accounts/${accountId}/sync`, headers: auth })
 
     expect(first.statusCode).toBe(200)
-    expect(first.json().status).toBe('complete')
+    expect(first.json().status).toBe('partial')
     expect(second.statusCode).toBe(200)
-    expect(second.json().status).toBe('complete')
+    expect(second.json().status).toBe('partial')
     const firstStreams = first.json().streams as Array<Record<string, unknown>>
     const secondStreams = second.json().streams as Array<Record<string, unknown>>
     expect(firstStreams.find((stream) => stream.streamName === 'positions')).toMatchObject({
       rowsReceived: 2, sourceRowsRetained: 1, excludedRecords: 1,
     })
     expect(firstStreams.find((stream) => stream.streamName === 'trades')).toMatchObject({
-      rowsReceived: 2, sourceRowsRetained: 2, unresolvedRecords: 1,
+      rowsReceived: 4, sourceRowsRetained: 4, unresolvedRecords: 3,
     })
     expect((secondStreams.find((stream) => stream.streamName === 'trades')?.exactDuplicates as number)).toBeGreaterThan(0)
     expect(await database.select({ id: fills.id }).from(fills)).toHaveLength(1)
     expect(await database.select({ id: cashMovements.id }).from(cashMovements)).toHaveLength(1)
-    expect(await database.select({ id: providerActivityFacts.id }).from(providerActivityFacts)).toHaveLength(2)
+    expect(await database.select({ id: providerActivityFacts.id }).from(providerActivityFacts)).toHaveLength(3)
     const [fill] = await database.select({ quantity: fills.quantity, feeAmount: fills.feeAmount, feeStatus: fills.feeStatus }).from(fills)
     expect(fill).toEqual({ quantity: '4.500000000000000001', feeAmount: null, feeStatus: 'unavailable' })
 
@@ -302,10 +324,23 @@ describe('migrations and canonical persistence', () => {
     expect(factsResponse.body).not.toContain('rawPayload')
     expect(hiddenFacts.statusCode).toBe(404)
 
+    const observedAttempts = await database.select({ observations: activityFactOccurrences.observations }).from(activityFactOccurrences)
+    expect(observedAttempts.map((row) => row.observations).sort()).toEqual([1, 1, 1, 1, 2, 2])
+    const tradeRun = firstStreams.find((stream) => stream.streamName === 'trades')?.runId
+    const runEvidence = await app.inject({
+      method: 'GET', url: `/v1/portfolios/${PORTFOLIO_ID}/activity-facts?providerAccountId=${accountId}&syncRunId=${tradeRun}`, headers: auth,
+    })
+    expect(runEvidence.statusCode).toBe(200)
+    expect(runEvidence.json().items).toHaveLength(2)
+    expect(runEvidence.json().items).toContainEqual(expect.objectContaining({
+      resolutionReason: 'trade_identity_ambiguous', observationsInRun: 2,
+    }))
+
     omitPositions = true
-    const emptyRefresh = await app.inject({ method: 'POST', url: `/v1/provider-accounts/${accountId}/sync`, headers: auth })
+    const emptyRefresh = await app.inject({ method: 'POST', url: `/v1/provider-accounts/${accountId}/sync?scope=current`, headers: auth })
     expect(emptyRefresh.statusCode).toBe(200)
     expect(emptyRefresh.json().status).toBe('complete')
+    expect(emptyRefresh.json().streams.map((stream: { streamName: string }) => stream.streamName)).toEqual(['positions'])
     const stalePositionRead = await app.inject({
       method: 'GET',
       url: `/v1/portfolios/${PORTFOLIO_ID}/positions?providerAccountId=${encodeURIComponent(accountId)}`,
@@ -317,8 +352,25 @@ describe('migrations and canonical persistence', () => {
       observationStatus: 'not_seen_in_latest_successful_refresh',
       positionState: 'not_seen_in_latest_successful_refresh',
     })
+    currentOnlyScenario = true
+    const refreshCurrent = () => app.inject({ method: 'POST', url: `/v1/provider-accounts/${accountId}/sync?scope=current`, headers: auth })
+    expect((await refreshCurrent()).json().status).toBe('partial')
+    interruptSecondPage = false
+    expect((await refreshCurrent()).json().status).toBe('complete')
+    expect(openCursors).toEqual([null, 'open-page-2', null, 'open-page-2'])
+    const refreshed = await app.inject({
+      method: 'GET', url: `/v1/portfolios/${PORTFOLIO_ID}/positions?providerAccountId=${accountId}`, headers: auth,
+    })
+    expect(refreshed.json().items.filter((item: { observationStatus: string }) =>
+      item.observationStatus === 'observed_in_latest_successful_refresh')).toHaveLength(2)
+    currentOnlyScenario = false
     failSync = true
-    const failure = await app.inject({ method: 'POST', url: `/v1/provider-accounts/${accountId}/sync`, headers: auth })
+    const failureApp = await buildApp({
+      config: testConfig(), database,
+      registry: new ProviderRegistry([new PolymarketAdapter(new PolymarketHttpClient(fetcher))]),
+    })
+    openApps.push(failureApp)
+    const failure = await failureApp.inject({ method: 'POST', url: `/v1/provider-accounts/${accountId}/sync`, headers: auth })
     expect(failure.statusCode).toBe(502)
     expect(failure.body).toContain('sync_failed')
 
@@ -1246,6 +1298,12 @@ describe('provider contracts and API security', () => {
     expect(search.headers['access-control-allow-origin']).toBeUndefined()
     expect(unsafeUrl.statusCode).toBe(400)
     expect(upstreamCalls).toBe(1)
+
+    const disabledApp = await buildApp({ config: testConfig(), database })
+    openApps.push(disabledApp)
+    const disabledSearch = await disabledApp.inject({ method: 'GET', url: '/v1/market-data/search?q=public%20event' })
+    expect(disabledSearch.statusCode).toBe(503)
+    expect(disabledSearch.json().error.code).toBe('provider_live_disabled')
 
     const productionApp = await buildApp({ config: { ...testConfig(), nodeEnv: 'production' }, database })
     openApps.push(productionApp)

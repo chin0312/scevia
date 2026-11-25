@@ -5,6 +5,7 @@ import type { NodePgTransaction } from 'drizzle-orm/node-postgres'
 import * as schema from '../db/schema.js'
 import type { Database } from '../db/client.js'
 import {
+  activityFactOccurrences,
   cashBalanceSnapshots,
   cashMovements,
   events,
@@ -436,7 +437,7 @@ export async function persistPage(input: PersistPageInput): Promise<PersistPageR
           },
         })
       } else if (record.kind === 'activity_fact') {
-        await tx.insert(providerActivityFacts).values({
+        const [fact] = await tx.insert(providerActivityFacts).values({
           providerAccountId: input.providerAccountId,
           sourceRecordId,
           externalId: record.externalId,
@@ -473,6 +474,13 @@ export async function persistPage(input: PersistPageInput): Promise<PersistPageR
             classification: record.classification ?? 'unreconciled',
             resolutionReason: record.resolutionReason ?? null,
           },
+        }).returning({ id: providerActivityFacts.id })
+        if (!fact) throw new IngestionError('activity_fact_persist_failed')
+        await tx.insert(activityFactOccurrences).values({
+          syncRunId: input.runId, activityFactId: fact.id, observations: 1,
+        }).onConflictDoUpdate({
+          target: [activityFactOccurrences.syncRunId, activityFactOccurrences.activityFactId],
+          set: { observations: sql`${activityFactOccurrences.observations} + 1` },
         })
       } else if (record.kind === 'position') {
         const instrumentId = await resolveInstrument(tx, input.providerCode, record.externalMarketId, record.externalInstrumentId)
@@ -824,7 +832,7 @@ export async function writeStreamCoverage(tx: DatabaseTransaction, input: Covera
       lastAttemptAt: attemptedAt,
       lastAttemptStatus: input.syncStatus,
       lastAttemptCoverageStatus: report?.status ?? 'unknown' as const,
-      lastAttemptReasonCode: staleSnapshotNotPublished ? 'stale_snapshot_rejected' : report?.reasonCode ?? input.errorCode,
+      lastAttemptReasonCode: staleSnapshotNotPublished ? 'stale_snapshot_rejected' : input.errorCode ?? report?.reasonCode,
       lastSuccessfulSyncAt: input.syncStatus === 'complete'
         && (report?.status === 'complete' || report?.status === 'partial')
         && (entityType !== 'positions' || input.stream.snapshotSemantics.positions !== 'complete' || input.positionSnapshotComplete)
