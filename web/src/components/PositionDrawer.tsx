@@ -1,14 +1,14 @@
 /* Position detail: drill-down to fills, how each number is derived, and the settlement payoff. */
 import { useNavigate } from 'react-router-dom'
-import { PLATFORM_NAME, SOURCES } from '../data/sample'
-import { fmtDate, type Position } from '../lib/finance'
+import { PLATFORM_NAME } from '../data/labels'
+import { fmtDate, sourceOf, type Position } from '../lib/finance'
 import { fmt, int, sfmt } from '../lib/format'
 import { Drawer } from './overlays'
 import { Button, Callout, Chip, PlatformBadge, SideChip, cx } from './ui'
 
 export function PositionDrawer({ p, onClose }: { p: Position; onClose: () => void }) {
   const nav = useNavigate()
-  const src = SOURCES[p.platform]
+  const src = sourceOf(p.platform)
   return (
     <Drawer title={p.market} sub={`${PLATFORM_NAME[p.platform]} · ${p.category} · resolves ${fmtDate(p.resolves, { month: 'short', day: 'numeric', year: 'numeric' })} (in ${p.days} days)`} onClose={onClose}>
       <div className="row"><PlatformBadge p={p.platform} /><SideChip side={p.side} /><Chip>{int(p.shares)} shares</Chip><span className="spacer" />

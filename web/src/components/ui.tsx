@@ -1,7 +1,7 @@
 /* Small presentational primitives. Each maps 1:1 to an entry in design-system/components.md. */
 import type { ReactNode } from 'react'
-import type { Platform, Side } from '../data/sample'
-import { PLATFORM_NAME } from '../data/sample'
+import type { Platform, Side } from '../data/types'
+import { PLATFORM_NAME } from '../data/labels'
 import { splitMoney } from '../lib/format'
 import { Icon, type IconName } from './Icon'
 import { InfoTip } from './overlays'

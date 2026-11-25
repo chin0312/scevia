@@ -1,7 +1,7 @@
 # AGENTS.md
 
-Scevia: a read-only prediction-market portfolio intelligence app. Product context: `PRODUCT.md`.
-Frontend prototype: `web/` (Vite + React + TS, mock data, no backend). Run `npm run dev` in `web/`. Visual reference: `design-concepts/v2/`.
+Scevia: read-only prediction-market portfolio intelligence. Product rules and terminology: `PRODUCT.md`.
+App: `web/` (Vite + React + TS). Run `npm run dev` in `web/`. Current state, limitations and integration plan: `docs/DEVELOPMENT.md` (read only when relevant).
 
 ## UI rules (hard)
 1. Before any UI work, read `DESIGN.md`, then `design-system/components.md` for the components you'll touch.
@@ -12,8 +12,12 @@ Frontend prototype: `web/` (Vite + React + TS, mock data, no backend). Run `npm 
 6. To change a value, edit `tokens.json`, then run `node design-system/tokens/build.mjs`.
 
 ## Numbers
-- Every figure comes from `web/src/lib/finance.ts` over the sample ledger in `web/src/data/sample.ts`. Never hard-code a metric, summary sentence or insight in a page.
+- Every figure comes from `web/src/lib/finance.ts`, which reads data only via `web/src/data/portfolio.ts`. Never hard-code a metric, summary sentence or insight in a page, and never import `data/sample.ts` directly.
+- Changing a calculation means updating `docs/METHODOLOGY.md` and the tests in the same change.
 - If a metric can't be computed honestly (small sample, no prior period), show it as unavailable.
+
+## Copy
+- No development-stage wording in the UI. Sample data is labelled "Sample portfolio". Unavailable actions are disabled or removed, never simulated (see `PRODUCT.md`).
 
 ## Before finishing UI work
 - In `web/`: `npm run check` (lint, design checks, unit tests, build) and `npm run test:e2e` must pass.

@@ -2,10 +2,11 @@ import { useMemo, useRef, useState } from 'react'
 import { Drawer } from '../components/overlays'
 import { SectionRail, useHashScroll, type RailSection } from '../components/shell'
 import { Button, Callout, Card, CardHeader, Chip, Delta, Legend, PageHead, Pills, PlatformBadge, Seg, SideChip, Tabs, cx } from '../components/ui'
-import { PLATFORM_NAME, type Platform } from '../data/sample'
+import { PLATFORM_NAME } from '../data/labels'
+import type { Platform } from '../data/types'
 import { PERIODS, attribution, entryBuckets, fmtDate, insights, periodRange, periodStats, series, tradeNet, type Period, type PeriodStats, type PlatformFilter } from '../lib/finance'
 import { fmt, kfmt, pct, sfmt } from '../lib/format'
-import type { ClosedTrade } from '../data/sample'
+import type { ClosedTrade } from '../data/types'
 
 const RAIL: RailSection[] = [
   { id: 'summary', label: 'Summary', icon: 'home' },
@@ -93,7 +94,6 @@ export default function Analytics() {
   const attr = attribution(stats.trades, attrBy === 'Category' ? 'category' : 'platform').map((a) => ({ ...a, label: attrBy === 'Platform' ? PLATFORM_NAME[a.key as Platform] : a.key }))
   const ins = useMemo(() => insights(stats.trades), [stats])
   const buckets = useMemo(() => entryBuckets(stats.trades), [stats])
-  const openChange = stats.netPnl - stats.realized
   const top = attr[0], worst = [...attr].sort((a, b) => a.net - b.net)[0]
   const gains = attr.filter((a) => a.net > 0).reduce((s, a) => s + a.net, 0)
   const worstMonth = [...stats.months].sort((a, b) => a.realized - b.realized)[0]
@@ -109,7 +109,7 @@ export default function Analytics() {
     ['Win rate (resolved)', (s) => (s.winRate == null ? '—' : `${pct(s.winRate * 100, 0)} · n=${s.resolved}`), (a, b) => (a.winRate == null || b.winRate == null ? null : { text: `${((a.winRate - b.winRate) * 100).toFixed(0)} pts`, good: a.winRate >= b.winRate })],
     ['Average win / loss', (s) => `${fmtOpt(s.avgWin, (v) => fmt(v))} / ${fmtOpt(s.avgLoss, (v) => fmt(v))}`, null],
     ['Profit factor', (s) => fmtOpt(s.profitFactor, (v) => v.toFixed(2)), null],
-    ['Largest drawdown', (s) => (s.drawdown ? sfmt(-s.drawdown.amount) : 'none'), (a, b) => ({ text: sfmt((b.drawdown?.amount ?? 0) - (a.drawdown?.amount ?? 0)), good: (a.drawdown?.amount ?? 0) <= (b.drawdown?.amount ?? 0) })],
+    ['Largest drawdown (weekly)', (s) => (s.drawdown ? sfmt(-s.drawdown.amount) : 'none'), (a, b) => ({ text: sfmt((b.drawdown?.amount ?? 0) - (a.drawdown?.amount ?? 0)), good: (a.drawdown?.amount ?? 0) <= (b.drawdown?.amount ?? 0) })],
     ['Best month (realized)', (s) => { const m = [...s.months].sort((x, y) => y.realized - x.realized)[0]; return m ? `${monthLabel(m.month)} ${sfmt(m.realized)}` : '—' }, null],
     ['Worst month (realized)', (s) => { const m = [...s.months].sort((x, y) => x.realized - y.realized)[0]; return m ? `${monthLabel(m.month)} ${sfmt(m.realized)}` : '—' }, null],
   ]
@@ -118,32 +118,32 @@ export default function Analytics() {
   return (
     <div className="shell">
       <SectionRail title="Analytics" sections={RAIL}>
-        <div className="rail-card"><b>Definitions</b>Net P&amp;L = realized + change in open positions − fees on new fills. Deposits and withdrawals never count as performance.</div>
+        <div className="rail-card"><b>Definitions</b>Net P&amp;L = realized + change in unrealized − fees on new fills. Deposits and withdrawals never count as performance. <span className="t3">History uses weekly snapshots.</span></div>
       </SectionRail>
       <main>
         <PageHead caption={`Performance · ${range.label} · ${scope}`} title="Where your results come from"
           actions={<>
             <Pills label="Platform" options={PLATFORM_FILTER} value={plat} onChange={setPlat} />
             <Seg label="Period" options={PERIODS} value={period} onChange={setPeriod} />
-            <Button icon="compare" variant={compare ? undefined : 'ghost'} disabled={!prior} title={prior ? undefined : 'The sample history doesn’t cover a full prior period'} onClick={() => setCompareOn((c) => !c)}>{!prior ? 'No prior period' : compare ? 'Comparing to prior' : 'Compare to prior'}</Button>
+            <Button icon="compare" variant={compare ? undefined : 'ghost'} disabled={!prior} title={prior ? undefined : 'Your history doesn’t cover a full prior period'} onClick={() => setCompareOn((c) => !c)}>{!prior ? 'No prior period' : compare ? 'Comparing to prior' : 'Compare to prior'}</Button>
           </>} />
 
         <p className="summary">
-          Over this period you made <b className={stats.netPnl >= 0 ? 'gain' : 'loss'}>{sfmt(stats.netPnl, 2)}</b> net{compare && prior ? <>, <b>{sfmt(stats.netPnl - prior.netPnl)}</b> vs. the prior period</> : ''}: <b>{sfmt(stats.realized)}</b> realized on {stats.trades.length} closed trades and <b>{sfmt(openChange)}</b> from open positions and fees.
+          Over this period you made <b className={stats.netPnl >= 0 ? 'gain' : 'loss'}>{sfmt(stats.netPnl, 2)}</b> net{compare && prior ? <>, <b>{sfmt(stats.netPnl - prior.netPnl)}</b> vs. the prior period</> : ''}: <b>{sfmt(stats.realized)}</b> realized on {stats.trades.length} trades closed in the period, and <b>{sfmt(stats.unrealizedChange)}</b> change in unrealized P&amp;L{stats.openFillFees ? <>, less <b>{fmt(stats.openFillFees, 2)}</b> fees on new fills</> : ''}.
           {top && top.net > 0 && <> <a href="#attribution">{top.label}</a> made {gains > 0 ? pct((top.net / gains) * 100, 0) : '—'} of realized gains.</>}
           {worst && worst.net < 0 && <> The weakest group was <a href="#attribution">{worst.label}</a> ({sfmt(worst.net)}).</>}
           {worstMonth && worstMonth.realized < 0 && <> Worst month: {monthLabel(worstMonth.month)} ({sfmt(worstMonth.realized)}).</>}
         </p>
 
         <Card id="highlights">
-          <CardHeader title="Highlights" sub={compare ? 'Compared with the prior period of the same length' : prior ? 'This period' : 'This period · no prior period in the sample history'} />
+          <CardHeader title="Highlights" sub={compare ? 'Compared with the prior period of the same length' : prior ? 'This period' : 'This period · history doesn’t cover a prior period'} />
           <div className="card-b hl">
             <div className="hl-group"><h5 className="caps">Return</h5>
               <div className={cx('hl-tile', stats.netPnl >= 0 ? 'good' : 'bad')}><div className="l">Net P&amp;L</div><div className={cx('v', stats.netPnl >= 0 ? 'gain' : 'loss')}>{sfmt(stats.netPnl)}</div><div className="f">{compare && prior ? `${stats.netPnl >= prior.netPnl ? '▲' : '▼'} ${sfmt(stats.netPnl - prior.netPnl)} vs prior` : 'after fees, deposits excluded'}</div></div>
               <div className={cx('hl-tile', stats.realized >= 0 ? 'good' : 'bad')}><div className="l">Realized (closed trades)</div><div className={cx('v', stats.realized >= 0 ? 'gain' : 'loss')}>{sfmt(stats.realized)}</div><div className="f">{stats.trades.length} trades · fees {fmt(stats.fees)}</div></div>
             </div>
-            <div className="hl-group"><h5 className="caps">Risk &amp; consistency</h5>
-              <div className={cx('hl-tile', stats.drawdown ? 'bad' : 'neutral')}><div className="l">Largest drawdown</div><div className={cx('v', stats.drawdown && 'loss')}>{stats.drawdown ? sfmt(-stats.drawdown.amount) : 'None'}</div><div className="f">{stats.drawdown ? `${fmtDate(stats.drawdown.from)} – ${fmtDate(stats.drawdown.to)} · ${stats.drawdown.recoveredOn ? `recovered ${fmtDate(stats.drawdown.recoveredOn)}` : 'not yet recovered'}` : 'weekly net P&L never fell from a peak'}</div></div>
+            <div className="hl-group"><h5 className="caps">Risk</h5>
+              <div className={cx('hl-tile', stats.drawdown ? 'bad' : 'neutral')}><div className="l">Largest drawdown <span className="t3">· weekly</span></div><div className={cx('v', stats.drawdown && 'loss')}>{stats.drawdown ? sfmt(-stats.drawdown.amount) : 'None'}</div><div className="f">{stats.drawdown ? `${fmtDate(stats.drawdown.from)} – ${fmtDate(stats.drawdown.to)} · ${stats.drawdown.recoveredOn ? `recovered ${fmtDate(stats.drawdown.recoveredOn)}` : 'not yet recovered'}` : 'no weekly snapshot fell below an earlier peak'}</div></div>
               <div className="hl-tile neutral"><div className="l">Win rate <span className="t3">· n = {stats.resolved}</span></div><div className="v">{stats.winRate == null ? '—' : pct(stats.winRate * 100, 0)}</div><div className="f">{stats.resolved < 30 ? 'small sample · treat as indicative' : `profit factor ${fmtOpt(stats.profitFactor, (v) => v.toFixed(2))}`}</div></div>
             </div>
           </div>
@@ -176,8 +176,10 @@ export default function Analytics() {
                 </div>
               ))}
               <div className="attr" style={{ fontWeight: 'var(--font-weight-semibold)' }}><span>Realized</span><span /><span /><span className={cx('r', stats.realized >= 0 ? 'gain' : 'loss')}>{sfmt(stats.realized)}</span><span className="r t3">{stats.trades.length}</span></div>
-              <div className="attr t2"><span>Open positions & fees</span><span /><span /><span className={cx('r', openChange >= 0 ? 'gain' : 'loss')}>{sfmt(openChange)}</span><span className="r t3">—</span></div>
+              <div className="attr t2"><span>Change in unrealized</span><span /><span /><span className={cx('r', stats.unrealizedChange >= 0 ? 'gain' : 'loss')}>{sfmt(stats.unrealizedChange)}</span><span className="r t3">—</span></div>
+              {stats.openFillFees > 0 && <div className="attr t2"><span>Fees on new fills</span><span /><span /><span className="r loss">{sfmt(-stats.openFillFees)}</span><span className="r t3">—</span></div>}
               <div className="attr" style={{ fontWeight: 'var(--font-weight-semibold)' }}><span>Net P&amp;L</span><span /><span /><span className={cx('r', stats.netPnl >= 0 ? 'gain' : 'loss')}>{sfmt(stats.netPnl)}</span><span className="r t3" /></div>
+              <p className="t3" style={{ fontSize: 'var(--font-size-xs)', marginTop: 'var(--space-3)' }}>Realized counts each trade closed in this period in full, including gains or losses that built up before the period began. That earlier part is reversed in “Change in unrealized”, so the rows add up to the period’s net P&amp;L.</p>
             </div>
           </Card>
         </div>
@@ -192,17 +194,17 @@ export default function Analytics() {
           </div>
           <div className="card insight"><Chip tone="info">Early exits</Chip>
             {ins.earlyExits ? (<>
-              <h4>{ins.earlyExits.missed} of {ins.earlyExits.n} early exits later paid out</h4>
-              <p>Holding those to resolution would have added about <b className="gain">{fmt(ins.earlyExits.leftOnTable)}</b>. The other exits avoided about <b>{fmt(ins.earlyExits.avoided)}</b> of value that went to $0. This is hindsight, not a strategy verdict.</p>
+              <h4>{ins.earlyExits.missed} of {ins.earlyExits.n} early exits later resolved in your favour</h4>
+              <p>In hindsight, holding those would have paid about <b className="gain">{fmt(ins.earlyExits.leftOnTable)}</b> more; the other {ins.earlyExits.n - ins.earlyExits.missed} exits kept about <b>{fmt(ins.earlyExits.avoided)}</b> that went to $0. Outcomes weren’t known when you exited, so this measures opportunity cost, not whether the exits were mistakes.</p>
               <div className="meta"><span>n = {ins.earlyExits.n} · hindsight view</span><button type="button" className="link" onClick={() => openTrades('Positions sold before resolution', ins.earlyExits!.trades)}>Review exits →</button></div>
             </>) : <p className="unavailable">Fewer than 5 early exits in this period.</p>}
           </div>
-          <div className="card insight"><Chip tone="yes">Strongest category</Chip>
+          <div className="card insight"><Chip tone="yes">Largest contributor</Chip>
             {ins.strongest ? (<>
-              <h4>{ins.strongest.c} made the most: <span className="gain">{sfmt(ins.strongest.net)}</span></h4>
+              <h4>{ins.strongest.c} contributed the most: <span className="gain">{sfmt(ins.strongest.net)}</span></h4>
               <p>{ins.strongest.n} closed trades; {pct(ins.strongest.winRate * 100, 0)} of the {ins.strongest.resolved} that resolved went your way. The single best trade is {pct(Math.min(1, ins.strongest.topShare) * 100, 0)} of the category’s result{ins.strongest.topShare > 0.5 ? ', so one outcome drives most of it' : ''}.</p>
               <div className="meta"><span>n = {ins.strongest.n} · {ins.strongest.n < 30 ? 'small sample' : 'moderate sample'}</span><button type="button" className="link" onClick={() => openTrades(`${ins.strongest!.c} trades`, ins.strongest!.trades)}>Open category →</button></div>
-            </>) : <p className="unavailable">No category has 5+ resolved trades with a positive result in this period.</p>}
+            </>) : <p className="unavailable">No category has 5+ closed trades with a positive result in this period.</p>}
           </div>
         </section>
 
@@ -226,7 +228,7 @@ export default function Analytics() {
             </div>
           </Card>
           <Card id="metrics" flush>
-            <CardHeader pad title="Metrics" sub={compare ? 'This period vs. the prior period of the same length' : prior ? 'This period' : 'This period · the sample history doesn’t cover a prior period'} />
+            <CardHeader pad title="Metrics" sub={compare ? 'This period vs. the prior period of the same length' : prior ? 'This period' : 'This period · history doesn’t cover a prior period'} />
             <div className="dt-wrap"><table className="dt cmp">
               <thead><tr><th scope="col">Metric</th><th scope="col" className="r">This period</th>{compare && <><th scope="col" className="r">Prior period</th><th scope="col" className="r">Change</th></>}</tr></thead>
               <tbody>{metrics.map(([k, val, diff]) => {
@@ -237,7 +239,7 @@ export default function Analytics() {
           </Card>
         </div>
 
-        <div className="footer-note"><span>Analytics describe past results on fictional sample data. They don’t predict future ones and aren’t investment advice.</span><span>Sample portfolio · fictional data</span></div>
+        <div className="footer-note"><span>Analytics describe past results. They don’t predict future ones and aren’t investment advice.</span><span>Sample portfolio · fictional data</span></div>
       </main>
 
       {drawer && (

@@ -4,10 +4,12 @@ import { Icon } from '../components/Icon'
 import { Modal, useToast } from '../components/overlays'
 import { SectionRail, useHashScroll, type RailSection } from '../components/shell'
 import { Button, Callout, Card, CardHeader, Chip, Legend, PageHead, PlatformBadge, Seg, Tabs, Tile, cx } from '../components/ui'
-import { CATEGORIES, CAT_COLOR, PLATFORM_NAME, TODAY } from '../data/sample'
+import { TODAY } from '../data/portfolio'
+import { CATEGORIES, CAT_COLOR, PLATFORM_NAME } from '../data/labels'
 import { REL_TEXT, useRelations, type RelClass } from '../data/relations'
-import { account, addDays, baseHoldings, exposures, fmtDate, pairRelation, positionsFor, settlementRange, type EventExposure } from '../lib/finance'
+import { account, addDays, baseHoldings, exposures, fmtDate, pairRelation, positionsFor, settlementRange, settlementRangeFor, type EventExposure } from '../lib/finance'
 import { fmt, kfmt, pct, sfmt } from '../lib/format'
+import { useSessionState } from '../lib/useSessionState'
 
 const RAIL: RailSection[] = [
   { id: 'summary', label: 'Exposure summary', icon: 'home' },
@@ -39,7 +41,7 @@ export default function Risk() {
   const focus = params.get('event')
   const { crypto, setCrypto, rels } = useRelations()
   const [groupBy, setGroupBy] = useState<'By event' | 'By category' | 'By platform'>('By event')
-  const [limit, setLimit] = useState(15)
+  const [limit, setLimit] = useSessionState('scevia-guardrail', 15)
   const [editLimit, setEditLimit] = useState<number | null>(null)
   const [filter, setFilter] = useState<'All events' | 'Next 30 days' | 'Over guardrail'>('All events')
   const [classify, setClassify] = useState<RelClass | null>(null)
@@ -74,11 +76,12 @@ export default function Risk() {
   const soon = exps.filter((e) => e.days <= 30)
   const week = busiestWeek(exps)
 
-  // Feasible settlement range over the rows shown (impossible joint outcomes are excluded, not patched).
+  // Portfolio scope: always every holding. Table scope: only the filtered rows. Both exclude impossible joint outcomes.
+  const portfolio = settlementRange(Object.values(baseHoldings()), rels)
   const shownIds = new Set(rows.map((e) => e.event.id))
-  const holdings = Object.values(baseHoldings()).filter((h) => shownIds.has(h.eventId))
-  const settle = settlementRange(holdings, rels)
+  const table = settlementRangeFor([...shownIds], rels)
   const unclassifiedPair = crypto === 'unknown' && shownIds.has('btc') && shownIds.has('eth')
+  const worstValue = acct.cash + committed + portfolio.min
 
   return (
     <div className="shell">
@@ -86,14 +89,13 @@ export default function Risk() {
         <div><h6 className="caps" style={{ paddingLeft: 'var(--space-3)', marginBottom: 'var(--space-2)' }}>Guardrails</h6>
           <ol>
             <li><a href="#conc" onClick={(e) => { e.preventDefault(); setEditLimit(limit) }}><Icon name="shield" />Event ≤ {limit}%<span className="count">edit</span></a></li>
-            <li><a href="#conc" aria-disabled="true" title="Category guardrails aren’t editable in the prototype" onClick={(e) => e.preventDefault()}><Icon name="shield" />Category ≤ 40%<span className="count">fixed</span></a></li>
           </ol>
         </div>
         <div className="rail-card"><b>How risk is measured</b>Deterministic payoffs: what you gain or lose if each event resolves one way or the other. Scevia never assigns probabilities.</div>
       </SectionRail>
 
       <main>
-        <PageHead caption={`Risk · ${acct.openCount} positions across ${exps.length} events · sample portfolio`} title="What you’re exposed to"
+        <PageHead caption={`Risk · ${acct.openCount} positions across ${exps.length} events`} title="What you’re exposed to"
           actions={<><Seg label="Group by" options={['By event', 'By category', 'By platform'] as const} value={groupBy} onChange={setGroupBy} /><Link className="btn btn-primary" to="/scenario-lab"><Icon name="flask" size={15} />Stress-test in Lab</Link></>} />
 
         <p className="summary">You have <b>{fmt(committed)}</b> committed across {exps.length} events. {over.length > 0
@@ -102,10 +104,10 @@ export default function Risk() {
 
         <div className="tiles">
           <Tile label="Capital committed" info="Cost basis of open positions." value={fmt(committed)} foot={`${pct((committed / acct.totalValue) * 100, 0)} of portfolio value`} />
-          <Tile label="Worst feasible outcome" info="Lowest settlement P&L across joint outcomes that are possible given confirmed relationships. Unclassified pairs are assumed able to go either way." value={sfmt(settle.min)} tone="loss" foot={`${fmt(acct.cash)} cash would remain`} />
+          <Tile label="Worst feasible outcome" info="Lowest settlement P&L of the whole portfolio across joint outcomes that are possible given confirmed relationships. Unclassified pairs can go either way. Not affected by the table filter below." value={sfmt(portfolio.min)} tone="loss" foot={`You’d hold ${fmt(worstValue)} (cash + payouts)`} />
           <Tile label="Largest single event" info="Capital committed to one event (the same outcome across platforms counts once) ÷ total committed." value={pct(shareOf(exps[0].cost))} tone={shareOf(exps[0].cost) > limit ? 'warn' : undefined} foot={`${exps[0].event.short} · ${shareOf(exps[0].cost) > limit ? `over ${limit}% guardrail` : `within ${limit}%`}`} />
           <Tile label="Top-3 concentration" info="Share of committed capital in your three largest events." value={pct(shareOf(top3), 0)} foot={`${fmt(top3)} of committed`} />
-          <Tile label="Resolving ≤ 30 days" info="Capital committed to events that resolve within 30 days of the sample date." value={fmt(soon.reduce((a, e) => a + e.cost, 0))} foot={soon.length ? `${soon.length} events · first ${fmtDate([...soon].sort((a, b) => a.days - b.days)[0].resolves)}` : 'none'} />
+          <Tile label="Resolving ≤ 30 days" info="Capital committed to events that resolve within 30 days." value={fmt(soon.reduce((a, e) => a + e.cost, 0))} foot={soon.length ? `${soon.length} events · first ${fmtDate([...soon].sort((a, b) => a.days - b.days)[0].resolves)}` : 'none'} />
         </div>
 
         <div className="grid g-21">
@@ -163,7 +165,7 @@ export default function Risk() {
         <Card id="payoffs" flush>
           <CardHeader pad title="Outcome payoffs" sub="P&L at settlement vs. cost basis (fees already paid not included) · click a row to simulate" right={<Tabs label="Filter events" options={['All events', 'Next 30 days', 'Over guardrail'] as const} value={filter} onChange={setFilter} />} />
           <div className="po-row h"><span>Event · your side</span><span>Resolves</span><span>If it resolves for you</span><span>If it resolves against you</span><span className="r">Share</span></div>
-          {rows.length === 0 && <div className="empty"><p>No events match “{filter}”.</p></div>}
+          {rows.length === 0 && <div className="empty"><p>No events match “{filter}”. This filter only changes the table: the portfolio’s worst feasible outcome is still <b className="loss">{sfmt(portfolio.min)}</b>.</p><button type="button" className="link" onClick={() => setFilter('All events')}>Show all events</button></div>}
           {rows.map((e) => {
             const rel = relationOf(e.event.id)
             const chip = rel === 'equivalent' ? { tone: 'accent' as const, text: `${e.positions.length} contracts · equivalent` } : rel ? { tone: REL_TEXT[rel].tone, text: REL_TEXT[rel].short } : null
@@ -179,9 +181,9 @@ export default function Risk() {
               </div>
             )
           })}
-          {rows.length > 0 && <div className="po-row t"><span>{filter === 'All events' ? 'All events' : `${rows.length} events shown`} · feasible range</span><span /><span className="gain r">{sfmt(settle.max)} <small className="t3">best case</small></span><span className="loss r">{sfmt(settle.min)} <small className="t3">worst case</small></span><span className="r">{pct(rows.reduce((a, e) => a + shareOf(e.cost), 0), 0)}</span></div>}
+          {table && <div className="po-row t"><span>{filter === 'All events' ? 'Whole portfolio' : `${rows.length} event${rows.length > 1 ? 's' : ''} shown (subtotal)`} · feasible range</span><span /><span className="gain r">{sfmt(table.max)} <small className="t3">best case</small></span><span className="loss r">{sfmt(table.min)} <small className="t3">worst case</small></span><span className="r">{pct(rows.reduce((a, e) => a + shareOf(e.cost), 0), 0)}</span></div>}
           <div className="foot"><span>
-            Best and worst cases search every joint outcome of the events shown and skip impossible ones{settle.excluded ? ` (${settle.excluded} combinations excluded because BTC and ETH are mutually exclusive)` : ''}.
+            Best and worst cases search every joint outcome of the events {filter === 'All events' ? 'in the portfolio' : 'shown'} and skip impossible ones{table?.excluded ? ` (${table.excluded} combinations excluded because BTC and ETH are mutually exclusive)` : ''}.{filter !== 'All events' && ` Portfolio-wide: ${sfmt(portfolio.min)} to ${sfmt(portfolio.max)}.`}
             {unclassifiedPair ? ' BTC × ETH is unclassified, so outcomes that may be unrealistic together are still included (unmodeled dependency).' : ''} Related events are never netted against each other.
           </span></div>
         </Card>
@@ -216,15 +218,15 @@ export default function Risk() {
 
       {editLimit != null && (
         <Modal title="Single-event guardrail" sub="Flag any event holding more than this share of committed capital" onClose={() => setEditLimit(null)}
-          footer={<><Button variant="ghost" onClick={() => setEditLimit(null)}>Cancel</Button><Button variant="primary" onClick={() => { setLimit(editLimit); setEditLimit(null); toast(`Guardrail set to ${editLimit}% for this page`) }}>Save guardrail</Button></>}>
+          footer={<><Button variant="ghost" onClick={() => setEditLimit(null)}>Cancel</Button><Button variant="primary" onClick={() => { setLimit(editLimit); setEditLimit(null); toast(`Guardrail set to ${editLimit}%`) }}>Save guardrail</Button></>}>
           <div className="row"><span className="hero-fig" style={{ fontSize: 'var(--font-size-display)' }} aria-live="polite">{editLimit}%</span></div>
           <input data-autofocus className="slider" type="range" min={5} max={40} step={1} value={editLimit} onChange={(e) => setEditLimit(Number(e.target.value))} aria-label="Guardrail percent" />
-          <Callout>{exps.filter((e) => shareOf(e.cost) > editLimit).length} event(s) would be over this limit. Guardrails only flag; Scevia never trades. In the prototype the setting resets when you leave the page.</Callout>
+          <Callout>{exps.filter((e) => shareOf(e.cost) > editLimit).length} event(s) would be over this limit. Guardrails only flag; Scevia never trades.</Callout>
         </Modal>
       )}
       {classify && (
         <Modal title="Classify relationship" sub="Bitcoin above $150k (Dec 31) · ETH ETF inflows > $1B (Nov)" onClose={() => setClassify(null)}
-          footer={<><Button variant="ghost" onClick={() => setClassify(null)}>Cancel</Button><Button variant="primary" onClick={() => { setCrypto(classify); setClassify(null); toast('Relationship saved for this session') }}>Save</Button></>}>
+          footer={<><Button variant="ghost" onClick={() => setClassify(null)}>Cancel</Button><Button variant="primary" onClick={() => { setCrypto(classify); setClassify(null); toast('Relationship saved') }}>Save</Button></>}>
           <div role="radiogroup" aria-label="Relationship" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
             {([['related', 'They share drivers. All combinations stay possible; outcomes are never netted.'], ['mutex', 'Both can’t resolve YES. That combination is excluded from best/worst cases here and in Scenario Lab.'], ['unknown', 'Keep every combination possible and flag it as an unmodeled dependency.']] as const).map(([k, d]) => (
               <label key={k} className={cx('choice', classify === k && 'on')}><input type="radio" name="rel" checked={classify === k} onChange={() => setClassify(k)} /><span>{REL_TEXT[k].label}<small>{d}</small></span></label>

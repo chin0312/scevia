@@ -51,10 +51,10 @@ Required states for every interactive component: **default, hover, focus-visible
 - **InfoTip**: "How calculated" popover on hover and focus; Esc closes. Text must match the definitions in `web/src/lib/finance.ts`.
 - **InfoModal** (Help menu): the shared definitions list and the prototype's data & privacy statement. Keep both literally true for the current build.
 - **PositionDrawer** `PositionDrawer`: position drill-down showing cost/value/unrealized, payoff if for/against, the fills behind the average cost, source freshness, and actions (Simulate, See event risk). Opens from any position row (click or Enter).
-- **ConnectSources** `useConnect()`: the data-source flow, run as a labelled **demo**. Never request a real wallet address or file, never claim a connection, sync or verification happened.
-- **DemoTag** `.demo-tag`: marks anything simulated (connect flow, sample coverage results).
+- **DataSources** `useConnect()` (`ConnectSources.tsx`): shows the active data source (sample portfolio), each platform's connection status and sample coverage. Connect actions stay disabled until real connections exist; never simulate a connection, import, sync or verification.
 - **Staleness** `.stale`: warn-coloured source age when data is older than 24h. Pair it with an explanation of what “stale” means for the numbers.
-- **AdjustmentRow** (Scenario Lab): slider + target-shares field + hypothetical-price field with inline validation (`role="alert"`), and a plain-language line saying what the trade does to cash. Invalid rows are excluded from results and block Save.
+- **AdjustmentRow** (Scenario Lab): slider + target-shares field + assumed-fill-price field. Invalid input shows inline (`role="alert"`); that row is excluded from results and blocks Save. A funding shortfall is a status note (`role="status"`), not an error: the trade stays in the results as if funded.
+- **Scenario status** (`lib/scenarios.ts`): `Not saved` / `Saved` / `Unsaved changes`, based on name + adjustments vs. the saved snapshot. Revert restores the snapshot.
 
 ## Feedback
 - **EmptyState** `.empty`: one sentence + one action (e.g. "Clear filters").

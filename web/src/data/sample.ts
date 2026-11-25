@@ -7,29 +7,20 @@
  * screenshots are stable.
  */
 import { rng } from '../lib/format'
-
-export type Platform = 'pm' | 'ks'
-export type Side = 'YES' | 'NO'
-export type Category = 'Economics' | 'Climate' | 'Crypto' | 'Politics' | 'Sports'
+import type { CashFlow, Category, ClosedOutcome, ClosedTrade, Fill, OpenPosition, Platform, PortfolioData, RiskEvent, Side } from './types'
 
 /** "Today" for the sample portfolio. All periods are measured back from here. */
-export const TODAY = '2026-11-24'
+const TODAY = '2026-11-24'
 /** Start of the sample history. */
-export const HISTORY_START = '2025-01-06'
+const HISTORY_START = '2025-01-06'
 /** The user's previous visit, used by "What changed". */
-export const LAST_VISIT = '2026-11-17'
+const LAST_VISIT = '2026-11-17'
 
-export const PLATFORM_NAME: Record<Platform, string> = { pm: 'Polymarket', ks: 'Kalshi' }
-export const CATEGORIES: Category[] = ['Economics', 'Climate', 'Crypto', 'Politics', 'Sports']
-export const CAT_COLOR: Record<Category, string> = {
-  Economics: 'var(--color-data-1)', Climate: 'var(--color-data-3)', Crypto: 'var(--color-data-2)', Politics: 'var(--color-data-4)', Sports: 'var(--color-data-5)',
-}
 /** Estimated fee rate on notional, per platform (fictional; Polymarket charged none in this sample). */
-export const FEE_RATE: Record<Platform, number> = { pm: 0, ks: 0.007 }
+const FEE_RATE: Record<Platform, number> = { pm: 0, ks: 0.007 }
 
 /* ── Cash flows (deposits > 0, withdrawals < 0). Never counted as performance. ── */
-export interface CashFlow { date: string; platform: Platform; amount: number }
-export const CASH_FLOWS: CashFlow[] = [
+const CASH_FLOWS: CashFlow[] = [
   { date: '2025-01-06', platform: 'pm', amount: 9000 },
   { date: '2025-01-06', platform: 'ks', amount: 6000 },
   { date: '2025-06-02', platform: 'pm', amount: 3000 },
@@ -41,16 +32,6 @@ export const CASH_FLOWS: CashFlow[] = [
 ]
 
 /* ── Open positions: fills are the source of truth for average cost and fees ── */
-export interface Fill { date: string; shares: number; price: number; fee: number }
-export interface OpenPosition {
-  id: string; market: string; eventId: string; category: Category; platform: Platform; side: Side
-  /** Last traded price on the source platform ("mark"). */
-  mark: number
-  /** Mark at the user's last visit, for "What changed". */
-  markAtLastVisit: number
-  resolves: string
-  fills: Fill[]
-}
 
 const fee = (p: Platform, notional: number) => Math.round(notional * FEE_RATE[p] * 100) / 100
 /** Three buys whose weighted average is exactly `avg`. */
@@ -61,7 +42,7 @@ function fills(p: Platform, shares: number, avg: number, dates: [string, string,
   return [[dates[0], s1, p1], [dates[1], s2, p2], [dates[2], s3, p3]].map(([date, sh, px]) => ({ date: date as string, shares: sh as number, price: px as number, fee: fee(p, (sh as number) * (px as number)) }))
 }
 
-export const OPEN_POSITIONS: OpenPosition[] = [
+const OPEN_POSITIONS: OpenPosition[] = [
   { id: 'fedk', market: 'Fed cuts rates at Dec 2026 FOMC', eventId: 'fed', category: 'Economics', platform: 'ks', side: 'YES', mark: 0.64, markAtLastVisit: 0.62, resolves: '2026-12-16', fills: fills('ks', 4200, 0.58, ['2026-09-21', '2026-10-12', '2026-11-02']) },
   { id: 'fedp', market: 'Fed rate cut in December?', eventId: 'fed', category: 'Economics', platform: 'pm', side: 'YES', mark: 0.64, markAtLastVisit: 0.62, resolves: '2026-12-16', fills: fills('pm', 3000, 0.61, ['2026-10-05', '2026-10-26', '2026-11-09']) },
   { id: 'cpi', market: 'Nov CPI YoY above 3.0%', eventId: 'cpi', category: 'Economics', platform: 'ks', side: 'NO', mark: 0.66, markAtLastVisit: 0.69, resolves: '2026-12-10', fills: fills('ks', 3000, 0.71, ['2026-10-19', '2026-10-28', '2026-11-04']) },
@@ -75,8 +56,7 @@ export const OPEN_POSITIONS: OpenPosition[] = [
 ]
 
 /* ── Events: positions are grouped by the event that decides the payoff ── */
-export interface RiskEvent { id: string; name: string; short: string; category: Category }
-export const EVENTS: RiskEvent[] = [
+const EVENTS: RiskEvent[] = [
   { id: 'hot', name: '2026 hottest year on record', short: 'Hottest year', category: 'Climate' },
   { id: 'fed', name: 'Dec 2026 FOMC decision', short: 'Fed cut', category: 'Economics' },
   { id: 'rec', name: 'US recession in 2027', short: 'Recession', category: 'Economics' },
@@ -89,18 +69,6 @@ export const EVENTS: RiskEvent[] = [
 ]
 
 /* ── Closed trades (resolved or sold early), generated deterministically ── */
-export type ClosedOutcome = 'Won' | 'Lost' | 'Closed early'
-export interface ClosedTrade {
-  id: string; market: string; category: Category; platform: Platform; side: Side
-  opened: string; closed: string; shares: number; entry: number; exit: number
-  /** Total fees for the round trip. */
-  fees: number
-  /** false when the source didn't report fees and the value is an estimate. */
-  feeKnown: boolean
-  outcome: ClosedOutcome
-  /** For trades closed early: would holding to resolution have paid out? */
-  heldWouldWin?: boolean
-}
 
 const TEMPLATES: Record<Category, string[]> = {
   Economics: ['Fed holds at {m} FOMC', '{m} CPI YoY above 3%', '{m} jobs report above 150k', 'Unemployment above 4.3% in {m}', 'GDP growth above 2% (Q ending {m})'],
@@ -145,10 +113,15 @@ function generateClosedTrades(): ClosedTrade[] {
   out.filter((t) => t.platform === 'ks' && t.closed >= '2026-08-01' && t.outcome !== 'Closed early').slice(0, 2).forEach((t) => { t.feeKnown = false })
   return out
 }
-export const CLOSED_TRADES: ClosedTrade[] = generateClosedTrades()
+const CLOSED_TRADES: ClosedTrade[] = generateClosedTrades()
 
-/* ── Data sources (sample). Nothing is synced; this only demonstrates freshness states. ── */
-export const SOURCES: Record<Platform, { label: string; asOf: string; stale: boolean; kind: string }> = {
-  pm: { label: 'Sample Polymarket wallet', asOf: TODAY, stale: false, kind: 'public-wallet style' },
-  ks: { label: 'Sample Kalshi CSV', asOf: '2026-11-22', stale: true, kind: 'CSV-export style' },
+/** The bundled sample portfolio: a deterministic fixture for tests and for exploring Scevia without an account. */
+export const SAMPLE_PORTFOLIO: PortfolioData = {
+  asOf: TODAY, historyStart: HISTORY_START, lastVisit: LAST_VISIT, isSample: true,
+  feeRates: FEE_RATE, cashFlows: CASH_FLOWS, openPositions: OPEN_POSITIONS, closedTrades: CLOSED_TRADES, events: EVENTS,
+  relations: [{ a: 'fed', b: 'cpi', cls: 'related' }, { a: 'fed', b: 'rec', cls: 'related' }, { a: 'cpi', b: 'rec', cls: 'related' }, { a: 'btc', b: 'eth', cls: 'unknown' }],
+  sources: {
+    pm: { label: 'Polymarket', asOf: TODAY, stale: false },
+    ks: { label: 'Kalshi', asOf: '2026-11-22', stale: true },
+  },
 }

@@ -1,14 +1,16 @@
 import { useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Donut, LineChart } from '../components/charts'
-import { coverageFor, useConnect } from '../components/ConnectSources'
+import { useConnect } from '../components/ConnectSources'
 import { Icon } from '../components/Icon'
 import { Drawer } from '../components/overlays'
 import { PositionDrawer } from '../components/PositionDrawer'
 import { SectionRail, useHashScroll, type RailSection } from '../components/shell'
 import { Button, Callout, Card, CardHeader, Chip, Delta, HeroFigure, Legend, PageHead, Pills, PlatformBadge, Seg, SideChip, Tabs, Tile, cx } from '../components/ui'
-import { CATEGORIES, CAT_COLOR, CLOSED_TRADES, LAST_VISIT, PLATFORM_NAME, SOURCES, TODAY, type Category, type Platform } from '../data/sample'
-import { PERIODS, account, exposures, fmtDate, netPnlAt, periodRange, positionsFor, series, tradeNet, type Period, type PlatformFilter, type Position } from '../lib/finance'
+import { CLOSED_TRADES, LAST_VISIT, TODAY } from '../data/portfolio'
+import { CATEGORIES, CAT_COLOR, PLATFORM_NAME } from '../data/labels'
+import type { Category, Platform } from '../data/types'
+import { PERIODS, account, coverage, sourceOf, exposures, fmtDate, netPnlAt, periodRange, positionsFor, series, tradeNet, type Period, type PlatformFilter, type Position } from '../lib/finance'
 import { fmt, int, kfmt, pct, sfmt } from '../lib/format'
 
 const RAIL: RailSection[] = [
@@ -104,17 +106,17 @@ export default function Overview() {
     <div className="shell">
       <SectionRail title="Overview" sections={RAIL}>
         <div className="rail-card">
-          <b>Sources (sample)</b>
+          <b>Data sources</b>
           {(['pm', 'ks'] as Platform[]).map((p) => (
-            <div className="row" key={p}><PlatformBadge p={p} />{PLATFORM_NAME[p]}<span className={cx(SOURCES[p].stale && 'stale')}>{fmtDate(SOURCES[p].asOf)}</span></div>
+            <div className="row" key={p}><PlatformBadge p={p} />{PLATFORM_NAME[p]}<span className={cx(sourceOf(p).stale && 'stale')}>{fmtDate(sourceOf(p).asOf)}</span></div>
           ))}
-          <button type="button" className="link" style={{ textAlign: 'left' }} onClick={() => connect()}>Data sources (demo)</button>
+          <button type="button" className="link" style={{ textAlign: 'left' }} onClick={() => connect()}>Manage data sources</button>
         </div>
       </SectionRail>
 
       <main>
         <PageHead caption={f === 'all' ? 'Sample portfolio · Polymarket + Kalshi' : `Sample portfolio: ${plat} only · ${plat === 'Polymarket' ? 'Kalshi' : 'Polymarket'} excluded`} title="Portfolio overview"
-          actions={<><Pills label="Platform" options={PLATFORM_FILTER} value={plat} onChange={setPlat} counts={counts} /><Button icon="download" disabled title="Export isn’t available in the prototype">Export</Button></>} />
+          actions={<><Pills label="Platform" options={PLATFORM_FILTER} value={plat} onChange={setPlat} counts={counts} /></>} />
 
         <div className="grid g-21">
           <div className="card hero-card">
@@ -206,7 +208,7 @@ export default function Overview() {
                   })}
                 </tbody>
               </table></div>
-              <div className="foot"><span>Mark = last traded price on the platform (sample). Values exclude estimated exit fees. Click a row or press Enter for fills and payoff.</span><span>Sorted by {sort.key} {sort.dir === 1 ? '↑' : '↓'}</span></div>
+              <div className="foot"><span>Mark = last traded price on the platform. Values exclude estimated exit fees. Click a row or press Enter for fills and payoff.</span><span>Sorted by {sort.key} {sort.dir === 1 ? '↑' : '↓'}</span></div>
             </>
           )}
           {holdTab === 'Resolved' && (
@@ -262,9 +264,9 @@ export default function Overview() {
           <Card id="coverage">
             <CardHeader title="Data coverage" sub="What these numbers are based on" />
             <div className="card-b">
-              <p className="t3" style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--space-2)' }}>Sample sources bundled with the prototype. Nothing is synced from a real account.</p>
+              <p className="t3" style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--space-2)' }}>Sample portfolio. No account is connected.</p>
               {(['pm', 'ks'] as Platform[]).filter((p) => f === 'all' || p === f).map((p) => {
-                const c = coverageFor(p), src = SOURCES[p]
+                const c = coverage(p), src = sourceOf(p)
                 return <div className="cov" key={p}><PlatformBadge p={p} /><span>{c.fills} fills · {c.settlements} settlements</span><span className={src.stale ? 'stale' : 't3'} title={src.stale ? 'Older than 24 hours' : undefined}>as of {fmtDate(src.asOf)}{src.stale ? ' · stale' : ''}</span></div>
               })}
               {feeEstimateTrades.length > 0 && <div style={{ marginTop: 'var(--space-3)' }}>
@@ -279,12 +281,12 @@ export default function Overview() {
 
       {openPos && <PositionDrawer p={openPos} onClose={() => setOpenPos(null)} />}
       {feeReview && (
-        <Drawer title="Settlements with estimated fees" sub={`${SOURCES.ks.label} · as of ${fmtDate(SOURCES.ks.asOf)}`} onClose={() => setFeeReview(false)}>
-          <Callout tone="warn">The source didn’t report fees for these settlements. Scevia estimates them at the platform’s sample fee rate and labels them “est.” everywhere.</Callout>
+        <Drawer title="Settlements with estimated fees" sub={`${sourceOf('ks').label} · as of ${fmtDate(sourceOf('ks').asOf)}`} onClose={() => setFeeReview(false)}>
+          <Callout tone="warn">The source didn’t report fees for these settlements. Scevia estimates them at the platform’s fee rate and labels them “est.” everywhere.</Callout>
           {feeEstimateTrades.map((t) => (
             <div className="list-row" key={t.id}><PlatformBadge p={t.platform} /><div><b style={{ fontWeight: 'var(--font-weight-medium)' }}>{t.market}</b><div className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>Settled {fmtDate(t.closed)} · estimated fee {fmt(t.fees, 2)}</div></div><span className="r t3">est.</span></div>
           ))}
-          <div className="row" style={{ marginTop: 'var(--space-2)' }}><Icon name="info" size={14} /><span className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>In the planned product a newer export would replace estimates with reported fees. Confirming fees isn’t part of this prototype.</span></div>
+          <div className="row" style={{ marginTop: 'var(--space-2)' }}><Icon name="info" size={14} /><span className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>A newer export from the source replaces these estimates with the reported fees.</span></div>
         </Drawer>
       )}
     </div>

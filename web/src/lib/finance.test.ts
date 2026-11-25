@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { CASH_FLOWS, CLOSED_TRADES, FEE_RATE, OPEN_POSITIONS, TODAY } from '../data/sample'
+import { CASH_FLOWS, CLOSED_TRADES, FEE_RATE, OPEN_POSITIONS, TODAY } from '../data/portfolio'
 import {
   POSITIONS, POS_BY_ID, account, attribution, baseHoldings, entryBuckets, eventPnl, groupPnl, insights, isFeasible, jointOutcomes,
-  netPnlAt, outcomeRange, periodRange, periodStats, relationsFor, scenarioMetrics, series, settlementRange, simulate, tradesIn,
+  exposures, netPnlAt, outcomeRange, periodRange, periodStats, relationsFor, scenarioMetrics, series, settlementRange, settlementRangeFor, simulate, tradesIn,
   type Outcome, type PlatformFilter,
 } from './finance'
 
@@ -84,6 +84,21 @@ describe('periods and analytics', () => {
       close(s.months.reduce((a, m) => a + m.realized, 0), s.realized)
     }
   })
+  it.each(['1M', '3M', '6M', 'YTD', 'All'] as const)('period %s: realized + change in unrealized − new-fill fees = net', (period) => {
+    for (const f of F) {
+      const s = periodStats(f, periodRange(period))
+      close(s.realized + s.unrealizedChange - s.openFillFees, s.netPnl)
+      close(s.fees, s.trades.reduce((a, t) => a + t.fees, 0) + s.openFillFees)
+    }
+  })
+  it('a trade carried into the period counts fully in realized; its earlier P&L is offset in unrealized change', () => {
+    const r = periodRange('3M')
+    const carried = CLOSED_TRADES.find((t) => t.opened <= r.start && t.closed > r.start && t.closed <= r.end)!
+    expect(carried).toBeTruthy()
+    expect(tradesIn(carried.platform, r.start, r.end).map((t) => t.id)).toContain(carried.id)
+    const s = periodStats('all', r)
+    close(s.realized + s.unrealizedChange - s.openFillFees, netPnlAt('all', r.end) - netPnlAt('all', r.start))
+  })
   it('All-period net P&L equals the account’s net P&L', () => {
     close(periodStats('all', periodRange('All')).netPnl, account('all').netPnl - netPnlAt('all', periodRange('All').start))
   })
@@ -132,6 +147,31 @@ describe('relationships and feasible outcomes', () => {
   })
 })
 
+describe('risk scope', () => {
+  const rels = relationsFor('mutex')
+  const all = Object.values(baseHoldings())
+  it('portfolio range is the same as the range over every event', () => {
+    const r = settlementRange(all, rels), f = settlementRangeFor(exposures().map((e) => e.event.id), rels)!
+    close(f.min, r.min); close(f.max, r.max); expect(f.excluded).toBe(r.excluded)
+  })
+  it('a subset range is local and leaves the portfolio range untouched', () => {
+    const before = settlementRange(all, rels)
+    const hot = exposures().find((e) => e.event.id === 'hot')!
+    const sub = settlementRangeFor(['hot'], rels)!
+    close(sub.min, hot.pnlAgainst); close(sub.max, hot.pnlFor)
+    const after = settlementRange(all, rels)
+    close(after.min, before.min); close(after.max, before.max)
+    expect(sub.min).toBeGreaterThan(before.min)
+  })
+  it('an empty subset has no range (null), not a zero-risk range', () => {
+    expect(settlementRangeFor([], rels)).toBeNull()
+  })
+  it('relationships still apply inside a subset', () => {
+    expect(settlementRangeFor(['btc', 'eth'], rels)!.excluded).toBe(1)
+    expect(settlementRangeFor(['btc', 'hot'], rels)!.excluded).toBe(0)
+  })
+})
+
 describe('scenario simulation', () => {
   const rels = relationsFor('unknown')
   const base = scenarioMetrics(simulate([], { includeFees: true }), rels)
@@ -173,10 +213,28 @@ describe('scenario simulation', () => {
   it('fees can be excluded', () => {
     expect(simulate([{ id: 'hot', to: 0, price: 0.9 }], { includeFees: false }).fees).toBe(0)
   })
-  it('flags insufficient cash per platform', () => {
-    const sim = simulate([{ id: 'eth', to: 200000, price: 0.5 }], { includeFees: true })
-    expect(sim.errors.eth).toMatch(/Not enough Kalshi cash/)
-    expect(scenarioMetrics(sim, rels).valid).toBe(false)
+  it('a funding shortfall is reported, not treated as invalid input, and the trade stays in the results', () => {
+    const eth = POS_BY_ID.eth, add = 200000 - eth.shares, px = 0.5
+    const sim = simulate([{ id: 'eth', to: 200000, price: px }], { includeFees: true })
+    const m = scenarioMetrics(sim, rels)
+    expect(sim.errors).toEqual({})
+    expect(m.valid).toBe(true)
+    expect(sim.holdings.eth.shares).toBe(200000)
+    const needed = add * px * (1 + FEE_RATE.ks) - account('ks').cash
+    close(sim.shortfall.ks, needed)
+    expect(sim.shortfall.pm).toBe(0)
+    close(m.shortfall, needed)
+    close(m.cash, account('all').cash - add * px * (1 + FEE_RATE.ks)) // cash goes negative by the shortfall
+  })
+  it('within available cash there is no shortfall', () => {
+    const sim = simulate([{ id: 'fedk', to: POS_BY_ID.fedk.shares + 100, price: 0.65 }], { includeFees: true })
+    expect(sim.shortfall).toEqual({ pm: 0, ks: 0 })
+  })
+  it('an invalid price is excluded and never creates a shortfall', () => {
+    const sim = simulate([{ id: 'eth', to: 200000, price: 7 }], { includeFees: true })
+    expect(sim.errors.eth).toBeTruthy()
+    expect(sim.shortfall.ks).toBe(0)
+    expect(sim.holdings.eth.shares).toBe(POS_BY_ID.eth.shares)
   })
   it.each([0, 1, 1.5, -0.2, Number.NaN])('rejects invalid price %s and ignores that adjustment', (px) => {
     const sim = simulate([{ id: 'cpi', to: 0, price: px }], { includeFees: true })

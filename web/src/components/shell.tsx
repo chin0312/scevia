@@ -1,13 +1,14 @@
 /* AppShell: TopNav (4 areas + utilities), SectionRail (page sections, scroll-spy), command palette. */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { LAST_VISIT, PLATFORM_NAME, TODAY } from '../data/sample'
+import { LAST_VISIT, TODAY } from '../data/portfolio'
+import { PLATFORM_NAME } from '../data/labels'
 import { POSITIONS, account, exposures, fmtDate } from '../lib/finance'
 import { fmt, sfmt } from '../lib/format'
 import { ConnectProvider, useConnect } from './ConnectSources'
 import { Icon, type IconName } from './Icon'
 import { Layer, Menu, Modal, ToastProvider, useToast } from './overlays'
-import { Button, Callout, cx } from './ui'
+import { Button, cx } from './ui'
 
 const AREAS = [
   { to: '/overview', label: 'Overview' },
@@ -29,7 +30,7 @@ function useNotifications() {
     return [
       { icon: 'cal' as IconName, tone: 'warn', title: `${soonest.market} resolves in ${soonest.days} days`, sub: `${fmt(soonest.cost)} at stake · ${PLATFORM_NAME[soonest.platform]}`, to: `/risk?event=${soonest.eventId}#payoffs` },
       { icon: 'trend' as IconName, tone: moved >= 0 ? 'gain' : 'loss', title: `${mover.market} ${mover.side}: ${mover.markAtLastVisit.toFixed(2)} → ${mover.mark.toFixed(2)}`, sub: `${sfmt(moved)} since ${fmtDate(LAST_VISIT)}`, to: '/overview#holdings' },
-      ...(est ? [{ icon: 'alert' as IconName, tone: 'warn', title: `${est} settlements have estimated fees`, sub: 'Sample Kalshi CSV · net P&L shows them as estimates', to: '/overview#coverage' }] : []),
+      ...(est ? [{ icon: 'alert' as IconName, tone: 'warn', title: `${est} settlements have estimated fees`, sub: 'Kalshi · marked as estimates in net P&L', to: '/overview#coverage' }] : []),
     ]
   }, [])
 }
@@ -61,13 +62,13 @@ function TopNav({ onSearch, onInfo }: { onSearch: () => void; onInfo: (k: 'calc'
       </nav>
       <div className="utils">
         <button type="button" className="search" onClick={onSearch} aria-keyshortcuts="Meta+K"><Icon name="search" size={15} /><span>Search markets, positions…</span><kbd>⌘K</kbd></button>
-        <span className="chip accent" title="Fictional sample portfolio. Nothing is synced from a real account.">Sample data · as of {fmtDate(TODAY)}</span>
+        <button type="button" className="chip accent chip-btn" title="You’re viewing a fictional sample portfolio. No account is connected." onClick={() => connect()}>Sample portfolio · {fmtDate(TODAY)}</button>
         <Menu label="Help" width={300} trigger={(t) => <button type="button" className="icon-btn" aria-label="Help" {...t}><Icon name="help" size={18} /></button>}>
           {(close) => (<>
             <div className="menu-h">Help</div>
             <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); onSearch() }}><Icon name="search" />Search & jump <kbd className="kbd">⌘K</kbd></button>
             <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); onInfo('calc') }}><Icon name="info" />How Scevia calculates P&amp;L</button>
-            <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); onInfo('privacy') }}><Icon name="shield" />Data & privacy in this prototype</button>
+            <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); onInfo('privacy') }}><Icon name="shield" />Data & privacy</button>
           </>)}
         </Menu>
         <Menu label="Notifications" width={360} trigger={(t) => <button type="button" className={cx('icon-btn', !read && 'has-badge')} aria-label={`Notifications${read ? '' : `, ${notifs.length} unread`}`} {...t}><Icon name="bell" size={18} />{!read && <span className="badge" />}</button>}>
@@ -83,15 +84,16 @@ function TopNav({ onSearch, onInfo }: { onSearch: () => void; onInfo: (k: 'calc'
         <Menu label="Settings" width={280} trigger={(t) => <button type="button" className="icon-btn" aria-label="Settings" {...t}><Icon name="gear" size={18} /></button>}>
           {(close) => (<>
             <div className="menu-h">Settings</div>
-            <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); connect() }}><Icon name="link" />Data sources (demo)</button>
+            <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); connect() }}><Icon name="link" />Data sources</button>
             <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); nav('/risk#conc') }}><Icon name="shield" />Guardrails</button>
             <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); onInfo('privacy') }}><Icon name="db" />Data & privacy</button>
           </>)}
         </Menu>
         <Menu label="Account" width={260} trigger={(t) => <button type="button" className="avatar" aria-label="Account" {...t}>AR</button>}>
-          {() => (<>
-            <div className="menu-h"><span>Sample user<small>No account · prototype</small></span></div>
-            <button type="button" role="menuitem" className="menu-i" disabled title="There are no accounts in this prototype"><Icon name="logout" />Sign out (not available)</button>
+          {(close) => (<>
+            <div className="menu-h"><span>Not signed in<small>Viewing the sample portfolio</small></span></div>
+            <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); connect() }}><Icon name="link" />Data sources</button>
+            <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); onInfo('privacy') }}><Icon name="shield" />Data & privacy</button>
           </>)}
         </Menu>
       </div>
@@ -107,11 +109,11 @@ function InfoModal({ kind, onClose }: { kind: 'calc' | 'privacy'; onClose: () =>
     </Modal>
   )
   return (
-    <Modal title="Data & privacy in this prototype" onClose={onClose} width={560}
-      footer={<><Button variant="ghost" onClick={onClose}>Close</Button><Button onClick={() => { sessionStorage.clear(); toast('Saved scenarios and choices cleared for this session'); onClose(); location.reload() }}>Clear my session data</Button></>}>
-      <p className="t2">This is a prototype running on a <b>fictional sample portfolio</b>. It doesn’t connect to Polymarket or Kalshi, doesn’t read wallets or files, and doesn’t send anything to a server.</p>
-      <p className="t2">Scenarios you save and relationships you classify are kept only in this browser tab’s session storage. They disappear when the tab closes, or you can clear them now.</p>
-      <Callout>How a real version would store and delete account data is still to be designed. Nothing here should be read as a privacy commitment for that product.</Callout>
+    <Modal title="Data & privacy" onClose={onClose} width={560}
+      footer={<><Button variant="ghost" onClick={onClose}>Close</Button><Button onClick={() => { sessionStorage.clear(); toast('Saved scenarios and settings cleared'); onClose(); location.reload() }}>Clear saved scenarios & settings</Button></>}>
+      <p className="t2">You’re viewing a <b>sample portfolio</b>: its positions and trades are fictional. Scevia isn’t connected to any Polymarket or Kalshi account and doesn’t send your activity anywhere.</p>
+      <p className="t2">Scenarios you save, your guardrail and relationship choices are kept in this browser tab and are cleared when it closes.</p>
+      <p className="t2">Scevia is read-only: it never places trades, holds funds or asks for keys that can trade.</p>
     </Modal>
   )
 }

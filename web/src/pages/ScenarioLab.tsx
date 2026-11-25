@@ -4,15 +4,18 @@ import { Icon } from '../components/Icon'
 import { Menu, Modal, useToast } from '../components/overlays'
 import { SectionRail, useHashScroll, type RailSection } from '../components/shell'
 import { Button, Callout, Card, CardHeader, Chip, PlatformBadge, SideChip, Tabs, cx } from '../components/ui'
-import { EVENTS, FEE_RATE, type RiskEvent } from '../data/sample'
+import { EVENTS, FEE_RATE } from '../data/portfolio'
+import type { RiskEvent } from '../data/types'
 import { REL_TEXT, useRelations } from '../data/relations'
 import {
   MAX_PRICE, MIN_PRICE, POSITIONS, POS_BY_ID, exposures, fmtDate, groupPnl, isFeasible, pairRelation, scenarioMetrics, simulate, validatePrice,
   type Adjustment, type Outcome, type ScenarioMetrics, type Simulation,
 } from '../lib/finance'
 import { fmt, int, kfmt, sfmt } from '../lib/format'
+import * as SC from '../lib/scenarios'
+import { useSessionState } from '../lib/useSessionState'
+import type { Scenario } from '../lib/scenarios'
 
-interface Scenario { key: string; name: string; adjs: Adjustment[]; saved: Adjustment[] | null; savedAt: string | null; color: string }
 
 const RAIL: RailSection[] = [
   { id: 'adjust', label: 'Adjustments', icon: 'sliders' },
@@ -30,30 +33,23 @@ const TEMPLATE: Record<string, Adjustment[]> = {
 }
 const INITIAL: Scenario[] = [
   { key: 'draft', name: 'Trim crypto, add to Fed', adjs: TEMPLATE.draft, saved: null, savedAt: null, color: COLORS[0] },
-  { key: 'sports', name: 'Exit sports longshots', adjs: TEMPLATE.sports, saved: TEMPLATE.sports, savedAt: '2026-11-21', color: COLORS[1] },
-  { key: 'shut', name: 'Hedge the shutdown', adjs: TEMPLATE.shut, saved: TEMPLATE.shut, savedAt: '2026-11-18', color: COLORS[2] },
+  { key: 'sports', name: 'Exit sports longshots', adjs: TEMPLATE.sports, saved: { name: 'Exit sports longshots', adjs: TEMPLATE.sports }, savedAt: '2026-11-21', color: COLORS[1] },
+  { key: 'shut', name: 'Hedge the shutdown', adjs: TEMPLATE.shut, saved: { name: 'Hedge the shutdown', adjs: TEMPLATE.shut }, savedAt: '2026-11-18', color: COLORS[2] },
 ]
 const NO_ADJ: Adjustment[] = []
-const same = (a: Adjustment[] | null, b: Adjustment[]) => JSON.stringify(a ?? []) === JSON.stringify(b)
 const maxFor = (sh: number) => Math.max(1000, Math.ceil((sh * 1.5) / 1000) * 1000)
 
-/* Session persistence: scenarios survive navigation inside the prototype (no backend). */
-function useSessionState<T>(key: string, initial: T) {
-  const [v, setV] = useState<T>(() => { try { const raw = sessionStorage.getItem(key); return raw ? (JSON.parse(raw) as T) : initial } catch { return initial } })
-  useEffect(() => { sessionStorage.setItem(key, JSON.stringify(v)) }, [key, v])
-  return [v, setV] as const
-}
 
 type Row = { label: string; key: keyof ScenarioMetrics; tone: 'up' | 'down' | 'neutral'; info: string }
 const ROWS: Row[] = [
-  { label: 'Cash', key: 'cash', tone: 'neutral', info: 'Buying spends cash; selling returns it. A transfer, not a gain.' },
-  { label: 'Positions at mark', key: 'positionsValue', tone: 'neutral', info: 'Shares × today’s mark price.' },
-  { label: 'Portfolio value at mark', key: 'totalValue', tone: 'up', info: 'Cash + positions at mark. A trade at your hypothetical price only changes this by the gap to the mark and fees.' },
+  { label: 'Cash', key: 'cash', tone: 'neutral', info: 'Buying spends cash; selling returns it. A transfer, not a gain. Negative means the scenario needs more cash than you hold.' },
+  { label: 'Positions at mark', key: 'positionsValue', tone: 'neutral', info: 'Shares × mark (the last traded price).' },
+  { label: 'Value at mark', key: 'totalValue', tone: 'up', info: 'Cash + positions at mark. A trade at your assumed fill price changes this only by the gap between that price and the mark, plus fees.' },
   { label: 'Capital committed', key: 'committed', tone: 'neutral', info: 'Cost basis of open positions after the scenario.' },
   { label: 'Locked-in from sales', key: 'realized', tone: 'up', info: 'Realized P&L of hypothetical sales after their fees. Purchases never create realized P&L.' },
-  { label: 'Fees on these trades', key: 'fees', tone: 'down', info: 'Estimated at each platform’s sample fee rate when “Include fees” is on.' },
-  { label: 'Value if worst outcome', key: 'worstValue', tone: 'up', info: 'Cash + settlement payouts in the worst joint outcome that’s possible given confirmed relationships.' },
-  { label: 'Value if best outcome', key: 'bestValue', tone: 'up', info: 'Cash + settlement payouts in the best possible joint outcome.' },
+  { label: 'Est. fees on these trades', key: 'fees', tone: 'down', info: 'Estimated at each platform’s fee rate when “Trading fees” is on. Fees already paid on existing positions aren’t included.' },
+  { label: 'Value if worst feasible outcome', key: 'worstValue', tone: 'up', info: 'Cash + $1 per winning share in the worst joint outcome that’s possible given confirmed relationships. Any extra funding the scenario needs is subtracted (cash can be negative).' },
+  { label: 'Value if best feasible outcome', key: 'bestValue', tone: 'up', info: 'Cash + $1 per winning share in the best possible joint outcome, net of any extra funding needed.' },
   { label: 'Largest single-event loss', key: 'largestEventLoss', tone: 'down', info: 'Biggest cost basis riding on one event (what you’d lose if it went against you).' },
 ]
 
@@ -62,8 +58,8 @@ export default function ScenarioLab() {
   const toast = useToast()
   const [params, setParams] = useSearchParams()
   const { crypto, rels } = useRelations()
-  const [scenarios, setScenarios] = useSessionState<Scenario[]>('scevia-scenarios-v2', INITIAL)
-  const [activeKey, setActiveKey] = useSessionState<string>('scevia-active-v2', 'draft')
+  const [scenarios, setScenarios] = useSessionState<Scenario[]>('scevia-scenarios-v3', INITIAL)
+  const [activeKey, setActiveKey] = useSessionState<string>('scevia-active-v3', 'draft')
   const [includeFees, setIncludeFees] = useSessionState('scevia-fees', true)
   const [renaming, setRenaming] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -74,7 +70,6 @@ export default function ScenarioLab() {
   const isBase = activeKey === 'base'
   const active = scenarios.find((s) => s.key === activeKey)
   const adjs = active?.adjs ?? NO_ADJ
-  const dirty = (s: Scenario) => !same(s.saved, s.adjs)
 
   // ?add=<positionId> from Overview / Risk / ⌘K → add to the draft (ref guards StrictMode double-run)
   const handled = useRef<string | null>(null)
@@ -84,7 +79,7 @@ export default function ScenarioLab() {
     handled.current = id
     setParams({}, { replace: true })
     const p = POS_BY_ID[id]
-    if (!p) { toast('That position isn’t in the sample portfolio', 'info'); return }
+    if (!p) { toast('That position isn’t in your portfolio', 'info'); return }
     setScenarios((ss) => (ss.some((s) => s.key === 'draft') ? ss : [{ ...INITIAL[0], adjs: [] }, ...ss])
       .map((s) => (s.key === 'draft' && !s.adjs.some((a) => a.id === id) ? { ...s, adjs: [{ id, to: Math.round(p.shares / 2 / 100) * 100, price: p.mark }, ...s.adjs] } : s)))
     setActiveKey('draft')
@@ -120,25 +115,24 @@ export default function ScenarioLab() {
 
   const save = () => {
     if (!active || errorCount) return
-    setScenarios((ss) => ss.map((s) => (s.key === active.key ? { ...s, saved: s.adjs.map((a) => ({ ...a })), savedAt: 'this session' } : s)))
-    toast(`Saved “${active.name}” for this session`)
+    setScenarios((ss) => ss.map((s) => (s.key === active.key ? SC.save(s, 'this session') : s)))
+    toast(`Saved “${active.name}”`)
   }
   const nextColor = () => COLORS[scenarios.length % COLORS.length]
   const duplicate = () => {
     if (!active) return
     const key = `s${Date.now()}`
-    setScenarios((ss) => [...ss, { ...active, key, name: `${active.name} (copy)`, saved: null, savedAt: null, color: nextColor(), adjs: active.adjs.map((a) => ({ ...a })) }])
-    setActiveKey(key); toast('Scenario duplicated (unsaved)')
+    setScenarios((ss) => [...ss, SC.duplicate(active, key, nextColor())])
+    setActiveKey(key); toast('Scenario duplicated (not saved yet)')
   }
   const create = () => {
     const key = `s${Date.now()}`
-    setScenarios((ss) => [...ss, { key, name: 'Untitled scenario', adjs: [], saved: null, savedAt: null, color: nextColor() }])
+    setScenarios((ss) => [...ss, SC.create(key, nextColor())])
     setActiveKey(key); setRenaming(true)
   }
   const revert = () => {
     if (!active) return
-    const target = active.saved ?? TEMPLATE[active.key] ?? []
-    update(() => target.map((a) => ({ ...a })))
+    setScenarios((ss) => ss.map((s) => (s.key === active.key ? SC.revert(s, TEMPLATE[s.key]) : s)))
     toast(active.saved ? 'Reverted to the saved version' : 'Reset to the starting adjustments', 'info')
   }
   const remove = () => {
@@ -164,7 +158,7 @@ export default function ScenarioLab() {
             <a href="#adjust" role="option" aria-selected={isBase} className={cx(isBase && 'on')} onClick={(e) => { e.preventDefault(); setActiveKey('base'); setRenaming(false) }}><i style={{ background: 'var(--color-text-tertiary)' }} />Current portfolio<small>base</small></a>
             {scenarios.map((s) => (
               <a key={s.key} href="#adjust" role="option" aria-selected={activeKey === s.key} className={cx(activeKey === s.key && 'on')} onClick={(e) => { e.preventDefault(); setActiveKey(s.key); setRenaming(false) }}>
-                <i style={{ background: s.color }} />{s.name}<small>{dirty(s) ? 'unsaved' : s.savedAt === 'this session' ? 'saved' : `saved ${fmtDate(s.savedAt!)}`}</small>
+                <i style={{ background: s.color }} />{s.name}<small>{SC.status(s) === 'saved' ? (s.savedAt === 'this session' ? 'saved' : `saved ${fmtDate(s.savedAt!)}`) : SC.status(s) === 'new' ? 'not saved' : 'edited'}</small>
               </a>
             ))}
             <a href="#adjust" className="t3" onClick={(e) => { e.preventDefault(); create() }}>+ New scenario</a>
@@ -175,20 +169,21 @@ export default function ScenarioLab() {
       <main>
         <section className="page-head anchor" id="summary">
           <div>
-            <div className="caps"><span className="accent">Scenario Lab</span> · {isBase ? 'Your current portfolio, unchanged' : active && dirty(active) ? 'Unsaved changes' : 'Saved'}</div>
+            <div className="caps"><span className="accent">Scenario Lab</span> · {isBase ? 'Your current portfolio, unchanged' : active ? SC.statusLabel(active) : ''}</div>
             {isBase ? <h1>Current portfolio</h1> : renaming
-              ? <input className="inline-edit" aria-label="Scenario name" autoFocus defaultValue={active?.name} onBlur={(e) => { const v = e.target.value.trim() || 'Untitled scenario'; setScenarios((ss) => ss.map((s) => (s.key === activeKey ? { ...s, name: v } : s))); setRenaming(false) }} onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') setRenaming(false) }} />
+              ? <input className="inline-edit" aria-label="Scenario name" autoFocus defaultValue={active?.name} onBlur={(e) => { const v = e.target.value; setScenarios((ss) => ss.map((s) => (s.key === activeKey ? SC.rename(s, v) : s))); setRenaming(false) }} onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') setRenaming(false) }} />
               : <h1>{active?.name}<button type="button" className="edit-btn" aria-label="Rename scenario" onClick={() => setRenaming(true)}><Icon name="edit" size={16} /></button></h1>}
           </div>
           <div className="actions">
             {!isBase && <Button variant="ghost" icon="trash" onClick={() => setConfirmDelete(true)}>Delete</Button>}
-            <Button variant="ghost" icon="reset" onClick={revert} disabled={isBase || !active || same(active.saved ?? TEMPLATE[active.key] ?? [], active.adjs)}>{active?.saved ? 'Revert' : 'Reset'}</Button>
+            <Button variant="ghost" icon="reset" onClick={revert} disabled={isBase || !active || !SC.canRevert(active, TEMPLATE[active.key])}>{active?.saved ? 'Revert' : 'Reset'}</Button>
             <Button icon="copy" onClick={duplicate} disabled={isBase}>Duplicate</Button>
-            <Button variant="primary" icon="save" onClick={save} disabled={isBase || !active || !dirty(active) || errorCount > 0} title={errorCount ? 'Fix the highlighted adjustments first' : undefined}>{!isBase && active && !dirty(active) ? 'Saved' : 'Save scenario'}</Button>
+            <Button variant="primary" icon="save" onClick={save} disabled={isBase || !active || !SC.isDirty(active) || errorCount > 0} title={errorCount ? 'Fix the highlighted inputs first' : undefined}>{!isBase && active && !SC.isDirty(active) ? 'Saved' : 'Save scenario'}</Button>
           </div>
         </section>
         <Callout icon="shield"><b>Hypothetical only.</b> No orders are placed. Prices are what <i>you</i> assume you could trade at, not guaranteed fills. Outcomes are shown without probabilities.</Callout>
-        {errorCount > 0 && <Callout tone="warn"><b>{errorCount} adjustment{errorCount > 1 ? 's' : ''} can’t be applied</b> and {errorCount > 1 ? 'are' : 'is'} left out of the results below. Fix the highlighted fields to include {errorCount > 1 ? 'them' : 'it'}.</Callout>}
+        {errorCount > 0 && <Callout tone="warn"><b>{errorCount} adjustment{errorCount > 1 ? 's have' : ' has'} invalid input</b> and {errorCount > 1 ? 'are' : 'is'} left out of the results below. Fix the highlighted fields to include {errorCount > 1 ? 'them' : 'it'}.</Callout>}
+        {A.shortfall > 0 && <Callout tone="warn" icon="alert"><b>Needs {fmt(A.shortfall, 2)} more cash than you hold</b> ({(['pm', 'ks'] as const).filter((p) => S.shortfall[p] > 0).map((p) => `${p === 'pm' ? 'Polymarket' : 'Kalshi'} ${fmt(S.shortfall[p], 2)}`).join(', ')}). Results show the purchases as if funded; the extra funding is subtracted from cash, so values stay comparable. With current balances this allocation isn’t reachable without a deposit or selling something else.</Callout>}
 
         <div className="lab">
           <Card id="adjust">
@@ -212,11 +207,11 @@ export default function ScenarioLab() {
                 {isBase && scenarios[0] && <Button size="sm" onClick={() => setActiveKey(scenarios[0].key)}>Open “{scenarios[0].name}”</Button>}
               </div>
             )}
-            {adjs.map((a, k) => <AdjustmentRow key={a.id} a={a} error={errors[a.id]} includeFees={includeFees}
+            {adjs.map((a, k) => <AdjustmentRow key={`${activeKey}:${a.id}`} a={a} error={errors[a.id]} shortfall={S.shortfall[POS_BY_ID[a.id]?.platform ?? 'pm']} includeFees={includeFees}
               onChange={(next) => update((list) => list.map((x, i) => (i === k ? next : x)))} onRemove={() => update((list) => list.filter((_, i) => i !== k))} />)}
             <div className="sumbar">
               <div><div className="l">Net cash change</div><div className={cx('v', A.cash - B.cash >= 0 ? 'gain' : 'loss')}>{sfmt(A.cash - B.cash, 2)}</div></div>
-              <div><div className="l">Cash left · Poly / Kalshi</div><div className="v" style={{ fontSize: 'var(--font-size-md)' }}><span className={cx(S.cash.pm < 0 && 'loss')}>{fmt(S.cash.pm)}</span> / <span className={cx(S.cash.ks < 0 && 'loss')}>{fmt(S.cash.ks)}</span></div></div>
+              <div><div className="l">Cash after trades · Poly / Kalshi</div><div className="v" style={{ fontSize: 'var(--font-size-md)' }}><span className={cx(S.cash.pm < 0 && 'loss')}>{fmt(S.cash.pm)}</span> / <span className={cx(S.cash.ks < 0 && 'loss')}>{fmt(S.cash.ks)}</span></div></div>
             </div>
           </Card>
 
@@ -293,7 +288,7 @@ export default function ScenarioLab() {
                     <button type="button" className="col-btn" aria-pressed={s.key === activeKey} onClick={() => { setActiveKey(s.key); setRenaming(false); document.getElementById('summary')?.scrollIntoView({ behavior: 'smooth' }) }}>
                       <i style={{ background: s.color }} />{s.name}
                     </button>
-                    <small>{s.adjs.length} change{s.adjs.length === 1 ? '' : 's'} · {dirty(s) ? 'unsaved' : 'saved'}{Object.keys(sims[s.key].errors).length ? ' · has errors' : ''}</small>
+                    <small>{s.adjs.length} change{s.adjs.length === 1 ? '' : 's'} · {SC.statusLabel(s).toLowerCase()}{Object.keys(sims[s.key].errors).length ? ' · invalid input' : ''}{sims[s.key].shortfall.pm + sims[s.key].shortfall.ks > 0 ? ` · needs ${fmt(sims[s.key].shortfall.pm + sims[s.key].shortfall.ks)} more cash` : ''}</small>
                   </th>
                 ))}
               </tr></thead>
@@ -318,14 +313,14 @@ export default function ScenarioLab() {
               </tbody>
             </table>
           </div>
-          <div className="foot"><span>Green = better for you, red = worse, grey = a transfer (e.g. cash into contracts). Worst/best use only possible joint outcomes.</span><span>{scenarios.length} scenarios</span></div>
+          <div className="foot"><span>All scenarios use the current assumptions: fees {includeFees ? 'estimated' : 'excluded'}, BTC × ETH {REL_TEXT[crypto].short.toLowerCase()}. Green = better for you, red = worse, grey = a transfer (e.g. cash into contracts).</span><span>{scenarios.length} scenarios</span></div>
         </Card>
 
         <section className="card assume anchor" id="assume" aria-label="Assumptions">
-          <div><div className="l">Fill prices</div><div className="v">Your hypothetical prices ({MIN_PRICE.toFixed(2)}–{MAX_PRICE.toFixed(2)})</div></div>
+          <div><div className="l">Fill prices</div><div className="v">Your assumed prices ({MIN_PRICE.toFixed(2)}–{MAX_PRICE.toFixed(2)})</div></div>
           <div><div className="l">Trading fees</div><div className="v">
             <button type="button" role="switch" aria-checked={includeFees} aria-label="Include estimated fees" className={cx('switch', includeFees && 'on')} onClick={() => setIncludeFees((x) => !x)}><span /></button>
-            {includeFees ? `Kalshi ${(FEE_RATE.ks * 100).toFixed(1)}% · Polymarket ${(FEE_RATE.pm * 100).toFixed(0)}% (sample rates)` : 'Excluded'}</div></div>
+            {includeFees ? `Estimated: Kalshi ${(FEE_RATE.ks * 100).toFixed(1)}% · Polymarket ${(FEE_RATE.pm * 100).toFixed(0)}% of notional` : 'Excluded'}</div></div>
           <div><div className="l">Slippage / depth</div><div className="v">Not modeled</div></div>
           <div><div className="l">Event relationships</div><div className="v">BTC × ETH: {REL_TEXT[crypto].short} · macro: related <Link className="link" to="/risk#rel">edit in Risk</Link></div></div>
         </section>
@@ -334,7 +329,7 @@ export default function ScenarioLab() {
       </main>
 
       {confirmDelete && active && (
-        <Modal title={`Delete “${active.name}”?`} sub="It’s only stored in this browser session" onClose={() => setConfirmDelete(false)}
+        <Modal title={`Delete “${active.name}”?`} sub="This can’t be undone" onClose={() => setConfirmDelete(false)}
           footer={<><Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancel</Button><Button variant="primary" onClick={remove}>Delete scenario</Button></>}>
           <p className="t2">This removes the scenario and its {active.adjs.length} adjustment{active.adjs.length === 1 ? '' : 's'}. Your current portfolio isn’t affected.</p>
         </Modal>
@@ -349,7 +344,7 @@ function groupPnlFor(S: Simulation, id: string, o: Outcome) {
   return (h.shares > 0 ? (h.side === o ? h.shares : 0) - h.cost : 0) + (S.realizedBy[id] ?? 0) - (id in S.realizedBy ? 0 : S.feesBy[id] ?? 0)
 }
 
-function AdjustmentRow({ a, error, includeFees, onChange, onRemove }: { a: Adjustment; error?: string; includeFees: boolean; onChange: (a: Adjustment) => void; onRemove: () => void }) {
+function AdjustmentRow({ a, error, shortfall, includeFees, onChange, onRemove }: { a: Adjustment; error?: string; shortfall: number; includeFees: boolean; onChange: (a: Adjustment) => void; onRemove: () => void }) {
   const p = POS_BY_ID[a.id]
   const valid = !validatePrice(a.price)
   const [priceText, setPriceText] = useState(valid ? a.price.toFixed(2) : '')
@@ -379,14 +374,15 @@ function AdjustmentRow({ a, error, includeFees, onChange, onRemove }: { a: Adjus
       <div className="f2">
         <div className="field"><label htmlFor={`sh-${a.id}`}>Target shares</label>
           <input id={`sh-${a.id}`} inputMode="numeric" value={a.to} onChange={(e) => { const v = Number(e.target.value.replace(/[^0-9]/g, '')); if (Number.isFinite(v)) onChange({ ...a, to: Math.min(max, v) }) }} /></div>
-        <div className="field" style={priceErr ? { borderColor: 'var(--color-loss-fg)' } : undefined}><label htmlFor={`px-${a.id}`}>Hypothetical price ($)</label>
+        <div className="field" style={priceErr ? { borderColor: 'var(--color-loss-fg)' } : undefined}><label htmlFor={`px-${a.id}`}>Assumed fill price ($)</label>
           <input id={`px-${a.id}`} inputMode="decimal" value={priceText} aria-invalid={!!priceErr} aria-describedby={msg ? `err-${a.id}` : undefined}
             onChange={(e) => { setPriceText(e.target.value); commitPrice(e.target.value) }} onBlur={(e) => { const t = e.target.value.replace('$', '').trim(); const err = t === '' ? 'Enter a price' : validatePrice(Number(t)); setPriceErr(err); if (err) onChange({ ...a, price: -1 }); else setPriceText(a.price.toFixed(2)) }} /></div>
       </div>
       <div className="t3" style={{ fontSize: 'var(--font-size-xs)', marginTop: 'var(--space-2)' }}>
-        {!valid ? 'Waiting for a valid price' : d === 0 ? 'No trade' : d > 0 ? `Spends ${fmt(notional + fee, 2)}${fee ? ` incl. ${fmt(fee, 2)} fee` : ''} · at today’s mark worth ${fmt(Math.abs(d) * p.mark, 2)}` : `Returns ${fmt(notional - fee, 2)}${fee ? ` after ${fmt(fee, 2)} fee` : ''} · locks in ${sfmt(-d * (a.price - p.avg) - fee, 2)}`}
+        {!valid ? 'Waiting for a valid price' : d === 0 ? 'No trade' : d > 0 ? `Spends ${fmt(notional + fee, 2)}${fee ? ` incl. ${fmt(fee, 2)} est. fee` : ''} · worth ${fmt(Math.abs(d) * p.mark, 2)} at the mark · pays ${fmt(Math.abs(d), 0)} if it resolves for you` : `Returns ${fmt(notional - fee, 2)}${fee ? ` after ${fmt(fee, 2)} est. fee` : ''} · realizes ${sfmt(-d * (a.price - p.avg) - fee, 2)} vs. average cost`}
       </div>
-      {msg && <div id={`err-${a.id}`} role="alert" className="loss" style={{ fontSize: 'var(--font-size-xs)', marginTop: 'var(--space-1)' }}>{msg}</div>}
+      {msg && <div id={`err-${a.id}`} role="alert" className="loss" style={{ fontSize: 'var(--font-size-xs)', marginTop: 'var(--space-1)' }}>{msg}. Left out of the results until fixed.</div>}
+      {!msg && d > 0 && shortfall > 0 && <div role="status" className="stale" style={{ marginTop: 'var(--space-1)' }}>{p.platform === 'pm' ? 'Polymarket' : 'Kalshi'} purchases in this scenario exceed available cash; included as if funded.</div>}
     </div>
   )
 }

@@ -2,7 +2,8 @@
    The rules live in lib/finance.ts; this file only holds the user's choice and its labels, shared by Risk and Scenario Lab.
    The choice is kept for the browser session only (prototype, no backend). */
 import { useEffect, useState } from 'react'
-import { relationsFor, type RelClass } from '../lib/finance'
+import { relationsFor } from '../lib/finance'
+import type { RelClass } from './types'
 
 export type { RelClass }
 export const REL_TEXT: Record<RelClass, { label: string; short: string; tone: 'yes' | 'info' | 'warn' | 'accent' }> = {

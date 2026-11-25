@@ -19,3 +19,30 @@
 **Accessibility:** WCAG 2.1 AA. Colour never carries meaning alone (YES/NO and gain/loss always have a sign, label, or icon). Fully keyboard operable. Respect reduced motion.
 
 **Platform:** Desktop web first (1280–1600). Mobile later, with Overview and single-event What-if first.
+
+## Scope
+
+- **In scope:** tracking positions and value, performance review, event-level risk, and hypothetical position changes, across Polymarket and Kalshi, read-only.
+- **Out of scope:** trade execution, copy trading, signals or advice, probability forecasts, tax reporting, custody.
+
+## Terminology (use these words in the UI)
+
+| Term | Meaning |
+|---|---|
+| Mark | Last traded price on the platform. |
+| Cost basis / capital committed | What an open position cost (shares × fill price), excluding fees. |
+| Realized / unrealized P&L | From closed trades after their fees / from open positions at mark, before fees. |
+| Net P&L | Realized + unrealized − fees on open fills. Never includes deposits. |
+| Settlement payoff | $1 per share if your side wins, $0 otherwise. |
+| Feasible outcome | A combination of event results that can actually happen given confirmed relationships. |
+| Assumed fill price | The price a scenario assumes a trade executes at. Not a quote. |
+| Funding shortfall | Extra cash a scenario needs beyond the platform's balance. |
+
+Full definitions: `docs/METHODOLOGY.md`.
+
+## Product copy
+
+- Write for the user of a real product. No development-stage words in the UI ("prototype", "demo", "coming soon", "planned").
+- Sample data is always identifiable as **Sample portfolio**. Never claim an account was connected, imported, synced or verified when it wasn't.
+- Unavailable actions are removed or disabled with a short reason. They are never simulated.
+- Put assumptions and limitations next to the figure they qualify, not in page-wide disclaimers.

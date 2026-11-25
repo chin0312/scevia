@@ -5,111 +5,87 @@
   </picture>
 </p>
 
-<p align="center"><b>Prediction Market Portfolio Intelligence</b><br/>Track your positions · Understand your performance · Explore what-if scenarios</p>
+<h3 align="center">Prediction Market Portfolio Intelligence</h3>
+<p align="center">Track your positions. Understand your performance. Explore what-if scenarios.</p>
 
 ---
 
-## What is Scevia?
+## Why Scevia
 
-Prediction-market traders often hold positions across Polymarket and Kalshi, but platform dashboards answer only part of what they need to know. Questions like these are hard to answer with them:
+Active prediction-market traders often hold positions on Polymarket and Kalshi at the same time. Platform dashboards show balances and open contracts, but they leave the questions that matter most for the next decision hard to answer:
 
-- How much did I actually make after fees?
-- Which kinds of trades drive my results?
-- Which event could hurt me most?
-- What would happen if I resized a position?
+- What did I actually make after fees?
+- Where do my results come from?
+- Which single event could hurt me most?
+- What would change if I resized a position?
 
-Scevia is a **read-only** workspace that brings those answers together. It never places trades or holds funds.
+Scevia brings those answers into one workspace. It is **read-only**: it never places trades, holds funds, or asks for keys that can trade.
 
-> **Status: early prototype for user testing.** Everything runs in the browser on a **fictional, deterministic sample portfolio**. There is no backend, no real account connection and no trading. Numbers are internally consistent and tested, but this is not financial software and nothing here is investment advice.
+## Modules
 
-## The four modules
+**Overview — what you own and what changed.**
+Portfolio value against net deposits, realized and unrealized P&L, holdings with drill-down to individual fills, allocation, upcoming resolutions, and data freshness.
 
-| Module | Question it answers | What's implemented |
-|---|---|---|
-| **Overview** | What do I own, and what changed? | Portfolio value vs. net deposits over time, P&L tiles, holdings with drill-down to fills, allocation, upcoming resolutions, and data coverage with staleness and fee-estimate flags. Platform filter (all / Polymarket / Kalshi) scopes every number. |
-| **Analytics** | Where do my results come from? | Period and platform filters, net P&L reconciled into realized vs. open positions, attribution by category or platform, computed insights (hidden when the sample is too small), entry price vs. outcome, and a comparison with the prior period when the history covers it. |
-| **Risk** | What am I exposed to? | Event-level concentration (the same outcome on two platforms counts once), an editable guardrail, a downside ladder, settlement payoffs, best/worst cases over **feasible** joint outcomes, event relationships, and a resolution calendar. |
-| **Scenario Lab** | What if I change something? | Resize positions at hypothetical prices with per-platform cash checks and optional fees, see before/after portfolio value and settlement range, an outcome matrix for any two events, and a live comparison of saved scenarios. |
+**Analytics — where your results come from.**
+Net P&L by period and platform, reconciled into realized results, changes in open positions, and fees. Attribution by category or platform, entry price vs. outcome, and descriptive patterns that are shown only when there are enough trades to describe.
 
-## How the numbers work
+**Risk — what you're exposed to.**
+Exposure grouped by the event that decides the payoff, so the same outcome held on two platforms counts once. It also covers concentration against your own guardrail, a downside ladder, settlement payoffs, and best and worst cases over outcome combinations that can actually happen.
 
-All figures come from one sample ledger (`web/src/data/sample.ts`): cash flows, fills of open positions, closed trades, and current marks. One pure calculation module (`web/src/lib/finance.ts`) derives everything from it, so pages can't disagree.
+**Scenario Lab — what happens if you change something.**
+Resize positions at the prices you assume you could trade at. Compare portfolio value and settlement range before and after, see two events' joint outcomes side by side, and compare saved scenarios. Funding gaps are flagged, and no orders are ever placed.
 
-- **Net P&L** = realized P&L (after each closed trade's fees) + unrealized P&L − fees on open fills. Every fee is counted once.
-- **Portfolio value** = cash + positions at mark, and **portfolio value − net deposits = net P&L**. Deposits and withdrawals are never treated as performance.
-- **Settlement payoffs** are deterministic: $1 per share if your side wins, $0 otherwise. Scevia never assigns probabilities.
-- **Event relationships** (equivalent / mutually exclusive / related / unknown) constrain which joint outcomes are possible. Best and worst cases are searched only over feasible combinations; unclassified pairs are flagged as unmodeled dependencies.
-- **Scenarios** are expressed as portfolio value, so a hypothetical purchase moves cash into contracts and never shows up as profit.
+Every figure explains how it is calculated. Scevia shows payoffs if an event resolves one way or the other. It never presents a probability as its own forecast.
 
-The same definitions are available in the app under **Help → How Scevia calculates P&L**.
+> Scevia currently runs on a bundled **sample portfolio**, labelled as such throughout the app.
 
 ## Tech stack
 
-- **App:** React 19, TypeScript, Vite, React Router. Charts are hand-written SVG, with no chart library.
-- **Design system:** W3C DTCG design tokens → generated CSS custom properties, plus a custom design lint and a WCAG contrast check.
-- **Tests:** Vitest for the calculation layer, Playwright for the main user journeys, and GitHub Actions on every PR.
+- **App:** React 19, TypeScript, Vite, React Router. Charts are hand-built SVG.
+- **Calculations:** a single pure TypeScript module over a typed portfolio model.
+- **Design system:** W3C DTCG design tokens compiled to CSS custom properties, enforced by a design lint and a WCAG contrast check.
+- **Quality:** Vitest unit tests, Playwright end-to-end tests, and GitHub Actions CI.
 
-## Repository structure
+## Repository
 
 ```text
-web/                     the prototype app
-  src/data/sample.ts     fictional sample ledger (single data source)
-  src/lib/finance.ts     all calculations (accounts, history, periods, relationships, scenarios)
-  src/lib/*.test.ts      unit tests
-  src/pages/             Overview, Analytics, Risk, Scenario Lab
-  src/components/        shell, overlays, charts, shared UI
-  e2e/                   Playwright journeys
-design-system/
-  tokens/                tokens.json (source) → tokens.css (generated)
-  lint/                  design lint + contrast check
-  brand/                 logos, marks and icon generator
-  components.md          component inventory and rules
-  DECISIONS.md           why the system looks the way it does
-design-concepts/v2/      the static concept the app was built from
-DESIGN.md · PRODUCT.md · AGENTS.md   visual intent, product rules, contributor rules
+web/                 the Scevia web app
+  src/data/          portfolio model (types.ts), data entry point, bundled sample
+  src/lib/           calculations (finance.ts), scenario state, formatting
+  src/pages/         Overview, Analytics, Risk, Scenario Lab
+  src/components/    app shell, overlays, charts, shared UI
+  e2e/               end-to-end journeys
+design-system/       tokens, component inventory, design lint, brand assets
+docs/                development notes and calculation methodology
+PRODUCT.md · DESIGN.md · AGENTS.md
 ```
 
 ## Getting started
 
-Requires Node 20+ (CI uses Node 24).
+Requires Node 20 or newer.
 
 ```bash
 cd web
 npm install
-npm run dev          # http://localhost:5173
+npm run dev        # http://localhost:5173
 ```
 
-## Checks
+## Testing
 
-Run from `web/`:
+From `web/`:
 
 ```bash
-npm run lint         # oxlint
-npm run check:design # design lint, WCAG contrast, tokens in sync
-npm test             # unit tests (Vitest)
-npm run build        # typecheck + production build
-npm run test:e2e     # browser journeys (Playwright; uses local Chrome, CI installs Chromium)
-npm run check        # lint + design + unit tests + build
+npm run check      # lint, design-system checks, unit tests, typecheck + build
+npm run test:e2e   # end-to-end journeys (Playwright; uses a local Chrome)
 ```
 
-## Design system
+CI runs both on every pull request.
 
-The UI is dark-only, built around a near-black canvas, grey surfaces, one violet accent, and green/red reserved for signed money.
+## Contributing
 
-- Tokens live in `design-system/tokens/tokens.json`.
-- `node design-system/tokens/build.mjs` regenerates `tokens.css`.
-- Components may only use semantic tokens. The design lint fails on raw colours, font sizes, font families and unknown tokens.
+Read [`AGENTS.md`](AGENTS.md) before changing the UI. It is short and lists the hard rules: semantic tokens only, reuse listed components, and keep every number coming from the calculation layer.
 
-See `DESIGN.md` for visual intent and `design-system/components.md` for the component inventory.
-
-## Implemented vs. planned
-
-| Implemented in this prototype | Planned / not built |
-|---|---|
-| Four modules on a consistent sample ledger | Real Polymarket wallet ingestion and Kalshi import |
-| Platform and period filters across pages | Accounts, auth, persistence beyond the browser session |
-| Feasible-outcome risk and scenario engine | Fee schedules from platforms (sample rates are used) |
-| Demo of the data-source flow, clearly labelled | Slippage and order-book depth in scenarios |
-| Unit tests, browser journeys, CI | Mobile layouts (desktop ≥ 1280 px today) |
-
-Out of scope by design: trade execution, tax reporting, investment advice, and probability forecasts.
+- Product principles and terminology: [`PRODUCT.md`](PRODUCT.md)
+- Visual intent: [`DESIGN.md`](DESIGN.md)
+- How figures are calculated: [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md)
+- Current state, limitations and integration plan: [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)

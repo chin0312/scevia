@@ -12,10 +12,9 @@
  *  - Portfolio value   cash + Σ shares × mark.   Identity: value − net deposits = net P&L.
  *  - Settlement payoff a contract pays $1 per share if its side wins, $0 otherwise.
  */
-import {
-  CASH_FLOWS, CLOSED_TRADES, EVENTS, FEE_RATE, HISTORY_START, LAST_VISIT, OPEN_POSITIONS, TODAY,
-  type Category, type ClosedTrade, type OpenPosition, type Platform, type RiskEvent, type Side,
-} from '../data/sample'
+import { CASH_FLOWS, CLOSED_TRADES, EVENTS, FEE_RATE, HISTORY_START, LAST_VISIT, OPEN_POSITIONS, PORTFOLIO, TODAY } from '../data/portfolio'
+import type { Category, ClosedTrade, DataSource, OpenPosition, Platform, RelClass, Relation, RiskEvent, Side } from '../data/types'
+export type { RelClass, Relation }
 
 export type PlatformFilter = 'all' | Platform
 const inPlatform = (f: PlatformFilter, p: Platform) => f === 'all' || f === p
@@ -25,6 +24,19 @@ export const daysBetween = (a: string, b: string) => Math.round((dayMs(b) - dayM
 export const addDays = (iso: string, d: number) => new Date(dayMs(iso) + d * 86400000).toISOString().slice(0, 10)
 export const fmtDate = (iso: string, opts: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' }) =>
   new Date(dayMs(iso)).toLocaleDateString('en-US', { ...opts, timeZone: 'UTC' })
+
+/* ───────────── Sources & coverage ───────────── */
+export const sourceOf = (p: Platform): DataSource => PORTFOLIO.sources[p] ?? { label: p === 'pm' ? 'Polymarket' : 'Kalshi', asOf: TODAY, stale: false }
+/** What a source's numbers are based on: open positions, fills, settlements, and how many fees are estimates. */
+export function coverage(p: Platform) {
+  const open = OPEN_POSITIONS.filter((x) => x.platform === p), closed = CLOSED_TRADES.filter((t) => t.platform === p)
+  return {
+    open: open.length,
+    fills: open.reduce((a, x) => a + x.fills.length, 0) + closed.reduce((a, t) => a + (t.outcome === 'Closed early' ? 2 : 1), 0),
+    settlements: closed.filter((t) => t.outcome !== 'Closed early').length,
+    feeEstimates: closed.filter((t) => !t.feeKnown).length,
+  }
+}
 
 /* ───────────── Positions ───────────── */
 export interface Position extends OpenPosition {
@@ -129,7 +141,10 @@ export function periodRange(p: Period): Range & { label: string; prior: Range | 
 }
 
 export interface PeriodStats {
-  netPnl: number; realized: number; unrealizedChange: number; fees: number; trades: ClosedTrade[]
+  /** netPnl = realized + unrealizedChange − openFillFees.
+   *  realized counts each trade closed in the period in full, including P&L that built up before the period
+   *  started; that earlier part reappears as a negative unrealizedChange, so the sum stays correct. */
+  netPnl: number; realized: number; unrealizedChange: number; openFillFees: number; fees: number; trades: ClosedTrade[]
   wins: number; losses: number; resolved: number; winRate: number | null; avgWin: number | null; avgLoss: number | null
   profitFactor: number | null; months: { month: string; realized: number }[]
   drawdown: { amount: number; from: string; to: string; recoveredOn: string | null } | null
@@ -155,7 +170,7 @@ export function periodStats(f: PlatformFilter, r: Range): PeriodStats {
   }
   if (dd) { const target = pts.find((p) => p.date > dd!.to && p.netPnl >= dd!.amount + pts.find((q) => q.date === dd!.to)!.netPnl); dd.recoveredOn = target?.date ?? null }
   return {
-    netPnl, realized, unrealizedChange: netPnl - realized + openFillFees, fees: sum(trades, (t) => t.fees) + openFillFees, trades,
+    netPnl, realized, unrealizedChange: netPnl - realized + openFillFees, openFillFees, fees: sum(trades, (t) => t.fees) + openFillFees, trades,
     wins: wins.length, losses: res.length - wins.length, resolved: res.length, winRate: res.length ? wins.length / res.length : null,
     avgWin: posNet.length ? grossWin / posNet.length : null, avgLoss: negNet.length ? grossLoss / negNet.length : null,
     profitFactor: grossLoss > 0 ? grossWin / grossLoss : null, months, drawdown: dd,
@@ -208,13 +223,9 @@ const EDGE_LABEL: Record<Category, true> = { Economics: true, Climate: true, Cry
 
 /* ───────────── Events & relationships ───────────── */
 export type Outcome = 'YES' | 'NO'
-export type RelClass = 'equivalent' | 'mutex' | 'related' | 'unknown'
-export interface Relation { a: string; b: string; cls: RelClass }
-/** Default relationships in the sample. Only BTC × ETH is user-classifiable. */
-export const relationsFor = (crypto: RelClass): Relation[] => [
-  { a: 'fed', b: 'cpi', cls: 'related' }, { a: 'fed', b: 'rec', cls: 'related' }, { a: 'cpi', b: 'rec', cls: 'related' },
-  { a: 'btc', b: 'eth', cls: crypto },
-]
+/** The portfolio's relationships with the user's override for the one classifiable pair (BTC × ETH) applied. */
+export const relationsFor = (crypto: RelClass): Relation[] =>
+  PORTFOLIO.relations.map((r) => ((r.a === 'btc' && r.b === 'eth') || (r.a === 'eth' && r.b === 'btc') ? { ...r, cls: crypto } : r))
 export function pairRelation(a: string, b: string, rels: Relation[]): RelClass | null {
   if (a === b) return 'equivalent'
   return rels.find((r) => (r.a === a && r.b === b) || (r.a === b && r.b === a))?.cls ?? null
@@ -268,10 +279,18 @@ export function exposures(f: PlatformFilter = 'all'): EventExposure[] {
   }).filter((x): x is EventExposure => x !== null).sort((a, b) => b.cost - a.cost)
 }
 
-/** Portfolio-wide settlement range over feasible joint outcomes (P&L vs. cost basis). */
+/** Settlement range over feasible joint outcomes (P&L vs. cost basis) for the given holdings. */
 export function settlementRange(hs: Holding[], rels: Relation[]) {
   const ids = [...new Set(hs.filter((h) => h.shares > 0).map((h) => h.eventId))]
   return outcomeRange(ids, rels, (o) => sum(ids, (id) => eventPnl(hs, id, o[id])))
+}
+
+/** Settlement range for a subset of events (e.g. a table filter), or null when the subset is empty.
+ *  Relationships still apply inside the subset. Portfolio-level figures must use `settlementRange` on all holdings. */
+export function settlementRangeFor(eventIds: string[], rels: Relation[]) {
+  const ids = new Set(eventIds)
+  const hs = Object.values(baseHoldings()).filter((h) => ids.has(h.eventId))
+  return hs.length ? settlementRange(hs, rels) : null
 }
 
 /* ───────────── Scenario simulation ───────────── */
@@ -279,7 +298,12 @@ export interface Adjustment { id: string; to: number; price: number }
 export interface Simulation {
   holdings: Record<string, Holding>; cash: Record<Platform, number>
   /** Realized P&L locked in by hypothetical sales (after their fees). Purchases never create realized P&L. */
-  realized: number; fees: number; errors: Record<string, string>
+  realized: number; fees: number
+  /** Invalid inputs. These adjustments are left out of the results. */
+  errors: Record<string, string>
+  /** Cash a platform would need on top of its balance to fund the scenario's purchases. The trades stay in
+   *  the results (shown as if funded): a funding gap is a property of the scenario, not an input error. */
+  shortfall: Record<Platform, number>
   /** Per position: realized P&L from hypothetical sales and fees on hypothetical trades. */
   realizedBy: Record<string, number>; feesBy: Record<string, number>
 }
@@ -313,19 +337,19 @@ export function simulate(adjs: Adjustment[], opts: { includeFees: boolean }): Si
     h.shares = to
     if (to === 0) h.cost = 0
   }
-  for (const p of ['pm', 'ks'] as Platform[]) {
-    if (cash[p] < -0.005) {
-      const buys = adjs.filter((a) => holdings[a.id]?.platform === p && a.to > (POS_BY_ID[a.id]?.shares ?? 0) && !errors[a.id])
-      for (const a of buys) errors[a.id] = `Not enough ${p === 'pm' ? 'Polymarket' : 'Kalshi'} cash: short by $${(-cash[p]).toFixed(2)}`
-    }
-  }
-  return { holdings, cash, realized, fees, errors, realizedBy, feesBy }
+  const gap = (v: number) => (v < -0.005 ? -v : 0)
+  const shortfall: Record<Platform, number> = { pm: gap(cash.pm), ks: gap(cash.ks) }
+  return { holdings, cash, realized, fees, errors, shortfall, realizedBy, feesBy }
 }
 
 export interface ScenarioMetrics {
   cash: number; positionsValue: number; totalValue: number; committed: number; realized: number; fees: number
   worstValue: number; bestValue: number; worst: Record<string, Outcome>; best: Record<string, Outcome>; excluded: number
-  largestEventLoss: number; valid: boolean
+  largestEventLoss: number
+  /** No invalid inputs. */
+  valid: boolean
+  /** Total extra cash needed across platforms (0 when the scenario fits current balances). */
+  shortfall: number
 }
 /** Everything is expressed as portfolio value (cash + holdings) so a purchase can never look like profit:
  *  buying moves cash into contracts; at mark it costs the spread and fees; only settlement changes the range. */
@@ -340,7 +364,7 @@ export function scenarioMetrics(sim: Simulation, rels: Relation[]): ScenarioMetr
   return {
     cash, positionsValue, totalValue: cash + positionsValue, committed, realized: sim.realized, fees: sim.fees,
     worstValue: cash + (ids.length ? range.min : 0), bestValue: cash + (ids.length ? range.max : 0), worst: range.argmin, best: range.argmax,
-    excluded: range.excluded, largestEventLoss, valid: Object.keys(sim.errors).length === 0,
+    excluded: range.excluded, largestEventLoss, valid: Object.keys(sim.errors).length === 0, shortfall: sim.shortfall.pm + sim.shortfall.ks,
   }
 }
 
