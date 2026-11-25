@@ -44,13 +44,13 @@ Run `node --import tsx scripts/benchmark-analytics.ts 364` from the backend dire
 | 30 | 742 | 32 | 1 | 5,770 | 75 ms | 6 MiB |
 | 90 | 1,648 | 92 | 3 | 21,019 | 163 ms | 39 MiB |
 | 180 | 2,557 | 182 | 6 | 49,178 | 290 ms | 37 MiB |
-| 364 | 4,195 | 366 | 12 | 131,675 | 702 ms | 79 MiB |
+| 364 | 4,195 | 366 | 12 | 131,675 | 689 ms | 90 MiB |
 
 These synthetic measurements exclude database, HTTP and concurrent load. The 364-day run produced a selected closing value of 33,776.50 and an eligible endpoint TWR; sparse marks still leave daily gaps.
 
 ### Additional coverage and eligibility
 
-- Independently reviewed rule rows provide verified binary payout structure. Available native market metadata identifies outcomes and lifecycle, but currently supplies no structured proof of the full payout contract and exceptions. A current open market can use a reviewed rule that was recorded by the cutoff. Resolved, closed, unknown or unreviewed structures remain unsupported for ordinary binary enumeration. Pending ledger entitlements remain separate from open positions. Current catalog lifecycle is not a historical market record.
+- Independently reviewed rule rows provide verified binary payout structure. Available native market metadata identifies outcomes and lifecycle, but currently supplies no structured proof of the full payout contract and exceptions. Open and closed unresolved markets can use a reviewed rule recorded by the cutoff. Resolved, unknown or unreviewed structures remain unsupported for ordinary binary enumeration. Pending ledger entitlements remain separate from open positions. Current catalog lifecycle is not a historical market record.
 - Provider-reported exposure is returned separately from the effective ledger. Its rows include account, instrument, source record, observation and mark dates, membership and coverage. Only a recent row seen in the latest usable refresh by the cutoff enters reported settlement exposure. A fresh verified quantity of 100 at a timestamped mark of 0.60 yields a known value of 60 and reviewed payout alternatives of 0 and 100, even when acquisition history is unavailable. A stale or temporally unqualified mark cannot produce mark-relative downside. Partial refresh coverage is never presented as complete account coverage.
 - Conditional settlement allows a member to supply one bounded binary declaration for an owned venue/account scope. It has a separate response and does not write catalog rules, affect the verified view, or accept cross-market assumptions. For example, an explicit two-unit payout applied to the demonstrated 80/100-share example produces a conditional range of 160–200. Unsupported positions in the verified view do not acquire payout rules from this calculation.
 - Runtime response schemas cover performance, exposure and conditional results. Use the selected-account evidence digest with the exposure catalog digest and settlement evidence digest. Cash and observed exposure outside the selected denomination remain isolated. Sharpe, Sortino, correlation, reviewed native exceptions, and verified FX conversion remain evidence-dependent extensions.

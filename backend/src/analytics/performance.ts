@@ -334,7 +334,8 @@ export function analyzePerformance(evidence: Evidence[], accounts: string[], ass
   const realized = sum([...attribution.values()].map((amount) => amount.toFixed()))
   const eligibleTrades = posted.filter((event) => event.type === 'buy' || event.type === 'sell')
   const postedFeeRows = entries.flatMap((entry) => entry.feeEffect
-    ? [{ ...entry.feeEffect, timestamp: byId.get(entry.eventId)!.timestamp }] : [])
+    ? [{ ...entry.feeEffect, timestamp: byId.get(entry.eventId)!.timestamp,
+      venue: byId.get(entry.eventId)!.venue, account: byId.get(entry.eventId)!.account }] : [])
   const feeSum = (rows: typeof postedFeeRows, kind: 'execution' | 'standalone' | 'funding', negative: boolean) => sum(rows
     .filter((row) => row.kind === kind && row.amount !== null && (negative ? decimal(row.amount).lt(0) : decimal(row.amount).gte(0)))
     .map((row) => decimal(row.amount!).abs().toFixed()))
@@ -356,6 +357,16 @@ export function analyzePerformance(evidence: Evidence[], accounts: string[], ass
     return { fills: trades.length, buys: buys.length, sells: sells.length,
       buyNotional: notional(buys).toFixed(), sellNotional: notional(sells).toFixed(), grossNotional: gross.toFixed(),
       averageExecutionNotional: trades.length === 0 ? null : gross.div(trades.length).toFixed() }
+  }
+  function groupActivity<Row extends { venue: string; account: string }, Total>(rows: Row[], summarize: (rows: Row[]) => Total) {
+    const groups = new Map<string, { venue: string; account: string; rows: Row[] }>()
+    for (const row of rows) {
+      const key = JSON.stringify([row.venue, row.account])
+      const group = groups.get(key) ?? { venue: row.venue, account: row.account, rows: [] }
+      group.rows.push(row)
+      groups.set(key, group)
+    }
+    return [...groups.values()].map(({ venue, account, rows }) => ({ venue, account, totals: summarize(rows) }))
   }
   const periodicSeries = (frequency: 'daily' | 'weekly' | 'monthly') => periodic(frequency).map((point) => {
     const within = ({ timestamp }: { timestamp: string }) => timestamp > point.from && timestamp <= point.through
@@ -410,12 +421,17 @@ export function analyzePerformance(evidence: Evidence[], accounts: string[], ass
       }),
       byActivity: [...activities].map(([type, amount]) => ({ type, knownRealized: amount.toFixed() })),
       unattributedResidual: pnl?.minus(realized).minus(knownUnrealizedChange).toFixed() ?? null },
-    fees: { asset, ...feeSummary(feeRows), coverage: 'known_posted_components' },
+    fees: { asset, ...feeSummary(feeRows), byAccount: groupActivity(feeRows, feeSummary), coverage: 'known_posted_components' },
     trading: { knownRealizedExitFills: exits.length, winningExitFills: wins,
       lossExitFills: exits.filter((entry) => decimal(entry.realized!).lt(0)).length,
       exitWinRate: metric(exits.length ? decimal(wins).div(exits.length) : null, 'no_known_realized_exits'),
       exitProfitFactor: metric(losses.gt(0) ? gains.div(losses) : null, 'no_known_gross_exit_loss'),
       ...tradeSummary(eligibleTrades),
+      byAccount: groupActivity(eligibleTrades, tradeSummary),
+      netExecutionFeeToNotional: metric(notional(eligibleTrades).gt(0)
+        && feeRows.filter((row) => row.kind === 'execution').every((row) => row.amount !== null)
+        && eligibleTrades.every((event) => !event.feeAsset || event.feeAsset === asset)
+        ? executionCharges.minus(executionRebates).div(notional(eligibleTrades)) : null, 'compatible_posted_fees_or_notional_missing'),
       grossRealizedExitGains: gains.toFixed(), grossRealizedExitLosses: losses.toFixed(),
       attachedFeeObservations: feeRows.filter((row) => row.kind === 'execution' && row.amount !== null).length,
       missingAttachedFees: feeRows.filter((row) => row.kind === 'execution' && row.amount === null).length,

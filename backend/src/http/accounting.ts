@@ -807,7 +807,10 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const { evidence, context } = analyticalContext(input, [account], asOf, asset, venue)
     const rows = replayAccounting(evidence, asOf).holdings.filter((row) => row.venue === venue && row.asset === asset
       && (row.instrument === yes || row.instrument === no) && new AnalyticalDecimal(row.quantity).gt(0))
-    return { context, scope: 'user_declared_contract_known_selected_quantities', declaration: { venue, yes, no, unitPayout },
+    return { context, scope: 'user_declared_contract_known_selected_quantities',
+      quantityCoverage: !rows.length ? 'unavailable' : rows.every((row) => row.quantityStatus === 'reconstructed_from_declaration')
+        ? 'reconstructed_from_declaration' : 'known_partial_quantities',
+      declaration: { venue, yes, no, unitPayout },
       holdings: rows.map(({ instrument, quantity, quantityStatus }) => ({ instrument, quantity, quantityStatus })),
       result: rows.length ? settlementRisk([{ id: 'declared', yes, no, unitPayout, legs: rows.map((row) => ({
         account, instrument: row.instrument, quantity: row.quantity, mark: row.markStatus === 'estimated' ? row.mark : null,

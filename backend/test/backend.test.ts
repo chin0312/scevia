@@ -170,6 +170,12 @@ describe('migrations and canonical persistence', () => {
     sampled.set('sampling', 'monthly')
     const monthly = await app.inject({ method: 'GET', url: prefix + '/analytics/performance?' + sampled, headers })
     expect(monthly.json().returns).toEqual(perf.json().returns)
+    expect(monthly.json().periodicReturns).toEqual(perf.json().periodicReturns)
+    expect(monthly.json().periodicReturns.monthly).toMatchObject([{ partial: true, knownNetExternalFlows: '1000',
+      twr: { value: '0.155', quality: 'reconstructed_selected_value' } }])
+    expect(risk.json()).toMatchObject({ catalogRevision: expect.any(String), snapshotRevision: expect.any(String),
+      settlementEvidenceRevision: expect.any(String), context: { coverageRevision: expect.any(String),
+        accountIdentities: [{ venue: 'isolated', account: 'risk', knownAssets: ['USDC'], selectedAssetEvidence: 'observed' }] } })
     expect(monthly.json().history).toHaveLength(2)
     const recordPage = await app.inject({ method: 'GET', url: prefix + '/accounting/records?search=growth2', headers })
     const change = { changes: [{ key: recordPage.json().items[0].key, action: 'exclude' }] }

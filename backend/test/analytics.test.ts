@@ -165,6 +165,29 @@ describe('independent analytics examples', () => {
   })
 
 
+  it('allocates known cash against explicitly empty inventory', () => {
+    const asOf = '2026-01-01T00:00:00.000Z'
+    const cash: FinancialObservation = { venue: 'v', account: 'a', asset: 'USD', id: 'cash',
+      type: 'opening_cash', timestamp: asOf, sequence: null, instrument: null,
+      quantity: null, price: null, amount: '5000', fee: null, feeAsset: null }
+    const state = replayAccounting([
+      { batchId: 'b', row: 1, observation: cash },
+      { batchId: 'b', row: 2, observation: { ...cash, id: 'inventory', type: 'opening_inventory', amount: null } },
+    ], asOf)
+    expect(analyzeExposure(state, 'USD', ['a'], [], [], [], new Set(), false).allocationBases.cashInclusive)
+      .toMatchObject({ denominator: '5000', rows: [{ id: 'cash', value: '5000', weight: '1' },
+        { id: 'pending', value: '0', weight: '0' }] })
+  })
+
+  it('retains supported outcomes when another component has a missing connector rule', () => {
+    const group = { id: 'supported', yes: 'yes', no: 'no', legs: [{ instrument: 'yes', quantity: '10', mark: '0.6' }] }
+    const linked = { ...group, id: 'linked' }
+    expect(settlementRisk([group, linked], [{ left: 'linked', right: 'missing', kind: 'exclusive' }], ['missing']))
+      .toMatchObject({ status: 'unavailable', reason: 'connected_rule_unavailable', supportedSubset: {
+        reference: '6', worst: { payout: '0' }, best: { payout: '10' },
+      } })
+  })
+
   it('keeps eligible earlier returns and stops the index at an unclassified provider flow', () => {
     const frame: FinancialObservation = { venue: 'v', account: 'a', asset: 'USD', id: 'opening',
       type: 'opening_cash', timestamp: '2026-01-01T00:00:00.000Z', sequence: null, instrument: null,

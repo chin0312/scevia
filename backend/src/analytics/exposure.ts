@@ -52,7 +52,7 @@ export function analyzeExposure(state: Replay, asset: string, accounts: string[]
   const supported = new Set<string>()
   const groups: BinaryGroup[] = rules.filter((rule) => rule.asset === asset && rule.reviewedAt.toISOString() <= state.asOf
     && instruments.get(rule.yes)?.market === rule.market && instruments.get(rule.no)?.market === rule.market
-    && instruments.get(rule.yes)?.lifecycle === 'open'
+    && ['open', 'closed'].includes(instruments.get(rule.yes)?.lifecycle ?? '')
     && metadata.filter((identity) => identity.market === rule.market).length === 2)
     .flatMap((rule) => {
       const legs = holdings.filter((holding) => [rule.yes, rule.no].includes(holding.instrument)
@@ -192,7 +192,7 @@ export function analyzeReportedExposure(snapshots: ReportedSnapshot[], coverage:
   })
   const eligibleRules = rules.filter((rule) => rule.asset === asset && rule.reviewedAt.toISOString() <= asOf
     && index.get(rule.yes)?.market === rule.market && index.get(rule.no)?.market === rule.market
-    && index.get(rule.yes)?.lifecycle === 'open' && metadata.filter((item) => item.market === rule.market).length === 2)
+    && ['open', 'closed'].includes(index.get(rule.yes)?.lifecycle ?? '') && metadata.filter((item) => item.market === rule.market).length === 2)
   const matched = rows.filter((row) => row.eligibleQuantity && new D(row.quantity).gt(0)
     && eligibleRules.some((rule) => rule.yes === row.instrument || rule.no === row.instrument))
   const connected = connectedMarkets(matched.flatMap((row) => row.market ?? []), edges)
