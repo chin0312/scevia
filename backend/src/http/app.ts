@@ -31,6 +31,7 @@ import { PolymarketMarketDataService, PublicMarketError } from '../providers/pol
 import { IngestionError, SyncAlreadyRunningError } from '../ingestion/errors.js'
 import { IngestionService } from '../ingestion/sync.js'
 import { matchesDevelopmentBearer } from './auth.js'
+import { registerAccountingRoutes } from './accounting.js'
 
 export interface AppOptions {
   config: ServerConfig
@@ -528,6 +529,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       }
       request.principalId = options.config.devPrincipalId
     })
+
+    registerAccountingRoutes(privateApi, options.database)
 
     privateApi.get('/portfolios', {
       schema: {

@@ -112,6 +112,43 @@ afterAll(async () => {
 })
 
 describe('migrations and canonical persistence', () => {
+  it('previews and confirms owned financial CSV batches idempotently', async () => {
+    const app = await createTestApp()
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const prefix = `/v1/portfolios/${PORTFOLIO_ID}`
+    const header = 'venue,account,id,timestamp,sequence,type,instrument,asset,quantity,price,amount,fee,fee_asset'
+    const cash = 'fixture,import,open,2026-11-25T00:00:00Z,,opening_cash,,USDC,,,0,,'
+    const deposit = 'fixture,import,deposit,2026-11-25T01:00:00Z,,deposit,,USDC,,,40,,'
+    const preview = (rows: string[]) => app.inject({
+      method: 'POST', url: prefix + '/imports/preview', headers, payload: { csv: [header, ...rows].join('\n') },
+    })
+    const first = await preview([cash, deposit])
+    expect(first.statusCode).toBe(200)
+    const batch = first.json().batchId
+    expect((await preview([deposit, cash])).json().batchId).toBe(batch)
+    expect((await preview([cash, 'invalid'])).statusCode).toBe(422)
+    const read = () => app.inject({ method: 'GET', url: prefix + '/accounting?asOf=2026-11-25T02:00:00Z', headers })
+    expect((await read()).json().events).toEqual([])
+    const confirm = () => app.inject({ method: 'POST', url: prefix + '/imports/' + batch + '/confirm', headers })
+    const confirmed = await confirm()
+    expect(confirmed.statusCode).toBe(200)
+    expect((await confirm()).json()).toEqual(confirmed.json())
+    expect((await read()).json().events).toHaveLength(2)
+    const revised = await preview([cash, deposit.replace(',40,,', ',45,,')])
+    expect(revised.statusCode).toBe(200)
+    const replace = () => app.inject({
+      method: 'POST', url: prefix + '/imports/' + revised.json().batchId + '/confirm?replaces=' + batch, headers,
+    })
+    const replaced = await replace()
+    expect(replaced.statusCode).toBe(200)
+    expect((await replace()).json()).toEqual(replaced.json())
+    expect((await read()).json().cash).toMatchObject([{ knownDelta: '45' }])
+    const unauthorized = await app.inject({
+      method: 'POST', url: `/v1/portfolios/${OTHER_PORTFOLIO_ID}/imports/${batch}/confirm`, headers,
+    })
+    expect(unauthorized.statusCode).toBe(404)
+  })
+
   it('applies a clean migration set and rejects inconsistent fee values', async () => {
     const ingestion = new IngestionService(database, providerRegistry)
     const result = await ingestion.syncProviderAccount({

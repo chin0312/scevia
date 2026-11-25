@@ -50,6 +50,20 @@
       "when": 1795600940861,
       "tag": "0006_remarkable_magma",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1795602437426,
+      "tag": "0007_romantic_vector",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1795602517966,
+      "tag": "0008_daffy_the_hand",
+      "breakpoints": true
     }
   ]
 }

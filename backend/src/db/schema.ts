@@ -540,3 +540,17 @@ export const activityFactOccurrences = scevia.table('activity_fact_occurrences',
   index('activity_fact_occurrences_fact_idx').on(table.activityFactId),
   check('activity_fact_occurrences_positive', sql`${table.observations} > 0`),
 ])
+
+export const financialImportBatches = scevia.table('financial_import_batches', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  portfolioId: uuid('portfolio_id').notNull().references(() => portfolios.id, { onDelete: 'cascade' }),
+  contentHash: text('content_hash').notNull(),
+  observations: jsonb('observations').$type<import('../accounting/csv.js').FinancialObservation[]>().notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
+  supersededAt: timestamp('superseded_at', { withTimezone: true }),
+  supersededBy: uuid('superseded_by'),
+}, (table) => [
+  uniqueIndex('financial_import_batches_portfolio_content').on(table.portfolioId, table.contentHash),
+])
