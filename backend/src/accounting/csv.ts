@@ -11,7 +11,7 @@ const time = z.iso.datetime({ offset: true })
 export function parseFinancialCsv(input: string) {
   const table = csvRows(input.replace(/^\uFEFF/, ''))
   const header = table.shift()
-  const allowed: readonly string[] = [...columns, 'entitlement_id', 'counter_instrument', 'primary_basis_fraction', 'related_event_id']
+  const allowed: readonly string[] = [...columns, 'entitlement_id', 'counter_instrument', 'primary_basis_fraction', 'related_event_id', 'fee_timing', 'coverage_through']
   if (!header || new Set(header).size !== header.length || header.some((name) => !allowed.includes(name))
     || columns.some((name) => !header.includes(name))) throw new Error('invalid_csv_header')
   if (table.length === 0) throw new Error('empty_csv')
@@ -30,6 +30,17 @@ export function parseFinancialCsv(input: string) {
       if (related) {
         if (!['fee', 'rebate'].includes(row.type) || !identifier.test(related)) throw new Error('invalid_fee_event_reference')
         row.relatedEventId = related
+      }
+      const coverage = cells[header.indexOf('coverage_through')]?.trim()
+      if (row.type === 'history_complete') {
+        if (!coverage || !time.safeParse(coverage).success || /\.\d{4}/.test(coverage)
+          || new Date(coverage).toISOString() < row.timestamp) throw new Error('invalid_history_coverage')
+        row.coveredThrough = new Date(coverage).toISOString()
+      } else if (coverage) throw new Error('unexpected_history_coverage')
+      const timing = cells[header.indexOf('fee_timing')]?.trim()
+      if (timing) {
+        if (!row.relatedEventId || (timing !== 'execution_evidence' && timing !== 'separate_cash_flow')) throw new Error('invalid_fee_timing')
+        row.feeTiming = timing
       }
       const counter = cells[header.indexOf('counter_instrument')]?.trim()
       const fraction = cells[header.indexOf('primary_basis_fraction')]?.trim()
@@ -69,7 +80,7 @@ function csvRows(input: string): string[][] {
     } else if (char === '"' && !closed && cell.length === 0) quoted = true
     else if (closed || char === '"') throw new Error('invalid_csv_quote')
     else cell += char
-    if (cell.length > 200 || row.length > columns.length + 4 || rows.length > 2001) throw new Error('csv_limit_exceeded')
+    if (cell.length > 200 || row.length > columns.length + 6 || rows.length > 2001) throw new Error('csv_limit_exceeded')
   }
   if (quoted) throw new Error('invalid_csv_quote')
   if (row.length || cell.length || closed) rows.push([...row, cell])
@@ -96,8 +107,8 @@ function normalize(cells: string[]): FinancialObservation {
   if ((inventory || kind === 'mark') && !instrument) throw new Error('instrument_required')
   if (inventory && (q === null || (q === '0' && kind !== 'opening_position'))) throw new Error('positive_quantity_required')
   if ((trade || kind === 'mark' || kind === 'settlement') && (p === null || (kind !== 'settlement' && new Decimal(p).gt(1)))) throw new Error('invalid_outcome_price')
-  if (!inventory && kind !== 'mark' && kind !== 'split' && kind !== 'merge' && kind !== 'opening_inventory' && a === null) throw new Error('amount_required')
-  if (kind === 'opening_inventory' && a !== null) throw new Error('unexpected_amount')
+  if (!inventory && kind !== 'mark' && kind !== 'split' && kind !== 'merge' && kind !== 'opening_inventory' && kind !== 'history_complete' && a === null) throw new Error('amount_required')
+  if ((kind === 'opening_inventory' || kind === 'history_complete') && a !== null) throw new Error('unexpected_amount')
   if (kind === 'opening_position' && q === '0' && a !== null && a !== '0') throw new Error('invalid_zero_opening_basis')
   if (kind === 'redemption' && a === null) throw new Error('amount_required')
   if (!inventory && kind !== 'split' && kind !== 'merge' && q !== null) throw new Error('unexpected_quantity')
@@ -109,4 +120,18 @@ function normalize(cells: string[]): FinancialObservation {
   return { venue: venue!, account: account!, id: id || null, timestamp: new Date(timestamp!).toISOString(),
     sequence: sequence ? Number(sequence) : null, type: kind, instrument: instrument || null, asset: asset!,
     quantity: q, price: p, amount: a, fee: f, feeAsset: feeAsset || null }
+}
+
+export function normalizeManualEvent(input: Record<string, unknown>): FinancialObservation {
+  const names = ['venue', 'account', 'id', 'timestamp', 'sequence', 'type', 'instrument', 'asset', 'quantity', 'price', 'amount', 'fee', 'feeAsset']
+  if (Object.keys(input).some((key) => !names.includes(key))) throw new Error('unexpected_financial_field')
+  const row = normalize(names.map((key) => {
+    const value = input[key]
+    if (value === undefined || value === null) return ''
+    if (key === 'sequence' && typeof value === 'number' && Number.isSafeInteger(value)) return String(value)
+    if (typeof value !== 'string' || value.length > 200) throw new Error('invalid_financial_field')
+    return value
+  }))
+  if (row.type === 'history_complete') throw new Error('declare_history_via_import')
+  return row
 }

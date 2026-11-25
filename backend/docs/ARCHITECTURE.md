@@ -131,3 +131,5 @@ Activity fact occurrences join one fact to one sync run. The count and cursor co
 Phase 3 adds a source-independent import and replay path. Confirmed CSV evidence, economic identity groups, accounting effects and derived portfolio state are separate surfaces. See [Accounting](ACCOUNTING.md) for event ordering, ownership, corrections and coverage.
 
 Accounting reads a consistent portfolio evidence window from confirmed CSV batches and stored provider records. It scopes identity to the financial account and retains source record digests and import row references. Current positions, cash snapshots and timestamped marks remain evidence rather than trade substitutes. See [Accounting](ACCOUNTING.md) for replay rules, opening assumptions and the limits of provider reconciliation.
+
+Phase 3 portfolio decisions are a separate append-only overlay keyed by stable import row or provider source identity. Review digests bind a bounded change set to current affected evidence. Adjustments preserve original financial evidence and make the selected portfolio distinct from the complete external account.

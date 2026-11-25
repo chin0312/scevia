@@ -119,8 +119,8 @@ describe('migrations and canonical persistence', () => {
     const header = 'venue,account,id,timestamp,sequence,type,instrument,asset,quantity,price,amount,fee,fee_asset'
     const cash = 'fixture,import,open,2026-11-25T00:00:00Z,,opening_cash,,USDC,,,0,,'
     const deposit = 'fixture,import,deposit,2026-11-25T01:00:00Z,,deposit,,USDC,,,40,,'
-    const preview = (rows: string[]) => app.inject({
-      method: 'POST', url: prefix + '/imports/preview', headers, payload: { csv: [header, ...rows].join('\n') },
+    const preview = (rows: string[], replaces?: string) => app.inject({
+      method: 'POST', url: prefix + '/imports/preview', headers, payload: { csv: [header, ...rows].join('\n'), replaces },
     })
     const first = await preview([cash, deposit])
     expect(first.statusCode).toBe(200)
@@ -134,7 +134,7 @@ describe('migrations and canonical persistence', () => {
     expect(confirmed.statusCode).toBe(200)
     expect((await confirm()).json()).toEqual(confirmed.json())
     expect((await read()).json().events).toHaveLength(2)
-    const revised = await preview([cash, deposit.replace(',40,,', ',45,,')])
+    const revised = await preview([cash, deposit.replace(',40,,', ',45,,')], batch)
     expect(revised.statusCode).toBe(200)
     const replace = () => app.inject({
       method: 'POST', url: prefix + '/imports/' + revised.json().batchId + '/confirm?replaces=' + batch, headers,
@@ -155,6 +155,79 @@ describe('migrations and canonical persistence', () => {
       method: 'POST', url: `/v1/portfolios/${OTHER_PORTFOLIO_ID}/imports/${batch}/confirm`, headers,
     })
     expect(unauthorized.statusCode).toBe(404)
+  })
+
+  it('persists portfolio decisions, freezes filtered selections, and restores the reference valuation', async () => {
+    const app = await createTestApp()
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const prefix = `/v1/portfolios/${PORTFOLIO_ID}`
+    const post = (path: string, payload: object) => app.inject({ method: 'POST', url: prefix + path, headers, payload })
+    const get = (path: string) => app.inject({ method: 'GET', url: prefix + path, headers })
+    const newAccount = await post('/accounting/accounts', { venue: 'fixture-multisided', label: 'Independent import' })
+    expect(newAccount.statusCode).toBe(201)
+    const account = newAccount.json().id
+    const csv = [
+      'venue,account,id,timestamp,sequence,type,instrument,asset,quantity,price,amount,fee,fee_asset',
+      'fixture-multisided,local,cash,2026-11-25T00:00:00Z,,opening_cash,,USD,,,0,,',
+      'fixture-multisided,local,inventory,2026-11-25T00:00:00Z,,opening_inventory,,USD,,,,,',
+      'fixture-multisided,local,funding,2026-11-25T01:00:00Z,,deposit,,USD,,,1000,,',
+      'fixture-multisided,local,buy-a,2026-11-25T02:00:00Z,,buy,yes,USD,100,0.4,,0,',
+      'fixture-multisided,local,buy-b,2026-11-25T03:00:00Z,,buy,yes,USD,100,0.6,,0,',
+      'fixture-multisided,local,duplicate-b,2026-11-25T03:00:00Z,,buy,yes,USD,100,0.6,,0,',
+      'fixture-multisided,local,sale,2026-11-25T04:00:00Z,,sell,yes,USD,80,0.75,,0,',
+      'fixture-multisided,local,mark,2026-11-25T05:00:00Z,,mark,yes,USD,,0.55,,,',
+    ].join('\n')
+    const preview = await post('/imports/preview', { csv, providerAccountId: account })
+    expect(preview.statusCode).toBe(200)
+    const batch = preview.json().batchId
+    expect((await post('/imports/' + batch + '/confirm', {})).statusCode).toBe(200)
+    const rows = (await get('/accounting/records?account=' + account + '&type=buy')).json().items
+    const first = rows.find((row: { original: { id: string } }) => row.original.id === 'buy-a')
+    const duplicate = rows.find((row: { original: { id: string } }) => row.original.id === 'duplicate-b')
+    const preferred = rows.find((row: { original: { id: string } }) => row.original.id === 'buy-b')
+    expect(duplicate.potentialOverlap.count).toBe(1)
+    const choose = async (request: object) => {
+      const result = await post('/accounting/adjustments/preview', request)
+      expect(result.statusCode).toBe(200)
+      return post('/accounting/adjustments/confirm', { ...request, revision: result.json().revision })
+    }
+    expect((await choose({ changes: [{ key: duplicate.key, action: 'duplicate', duplicateOf: preferred.key }] })).statusCode).toBe(200)
+    const state = async () => (await get('/accounting?asOf=2026-11-25T06:00:00Z')).json()
+    expect((await state()).cash).toContainEqual(expect.objectContaining({ account, balance: '960', realized: '20', portfolioValue: '1026' }))
+    const bulk = { selection: { batchId: batch, type: 'buy', action: 'exclude', except: [preferred.key, duplicate.key] } }
+    expect((await choose(bulk)).statusCode).toBe(200)
+    const selected = await state()
+    expect(selected.portfolioScope).toBe('user_selected')
+    expect(selected.holdings).toContainEqual(expect.objectContaining({ account, quantity: '20', basis: '12', unrealized: '-1' }))
+    expect(selected.cash).toContainEqual(expect.objectContaining({ account, balance: '1000', realized: '12', portfolioValue: '1011', fullAccountValue: null }))
+    expect((await choose({ changes: [{ key: first.key, action: 'restore' }] })).statusCode).toBe(200)
+    expect((await state()).cash).toContainEqual(expect.objectContaining({ account, portfolioValue: '1026' }))
+    const adjustment = { changes: [{ key: first.key, action: 'correct', correction: { price: '0.45' } }] }
+    const stale = await post('/accounting/adjustments/preview', adjustment)
+    expect(stale.statusCode).toBe(200)
+    const manual = { accountId: account, clientId: '00000000-0000-4000-8000-000000000912',
+      event: { type: 'reward', timestamp: '2026-11-25T05:30:00Z', asset: 'USD', amount: '1' } }
+    const reviewedCsv = [
+      'venue,account,id,timestamp,sequence,type,instrument,asset,quantity,price,amount,fee,fee_asset',
+      'fixture-multisided,local,bonus,2026-11-25T05:40:00Z,,reward,,USD,,,2,,',
+    ].join('\n')
+    const importPreview = await post('/imports/preview', { csv: reviewedCsv, providerAccountId: account })
+    expect(importPreview.statusCode).toBe(200)
+    const added = await post('/accounting/manual-records', manual)
+    expect(added.statusCode).toBe(200)
+    expect((await post('/accounting/manual-records', manual)).json()).toEqual(added.json())
+    expect((await post('/accounting/adjustments/confirm', { ...adjustment, revision: stale.json().revision })).statusCode).toBe(409)
+    const importPath = '/imports/' + importPreview.json().batchId + '/confirm'
+    expect((await post(importPath, {})).json()).toMatchObject({ error: { code: 'import_preview_stale' } })
+    const importRefreshed = await post('/imports/preview', { csv: reviewedCsv, providerAccountId: account })
+    expect(importRefreshed.json().batchId).toBe(importPreview.json().batchId)
+    expect((await post(importPath + '?reviewRevision=' + importRefreshed.json().reviewRevision, {})).statusCode).toBe(200)
+    expect((await choose(adjustment)).statusCode).toBe(200)
+    const revised = (await get('/accounting/records?key=' + encodeURIComponent(first.key))).json().items[0]
+    expect(revised.original.price).toBe('0.4')
+    expect(revised.effective.observation.price).toBe('0.45')
+    expect((await app.inject({ method: 'POST', url: `/v1/portfolios/${OTHER_PORTFOLIO_ID}/accounting/adjustments/preview`,
+      headers, payload: adjustment })).statusCode).toBe(404)
   })
 
   it('replays synchronized provider evidence and coalesces an explicitly linked CSV observation', async () => {
@@ -192,6 +265,42 @@ describe('migrations and canonical persistence', () => {
     expect(after.events.find((event: { economicId: string }) => event.economicId === fill.economicId).sources).toHaveLength(2)
     expect(after.ledger).toEqual(before.ledger)
     expect(after.discrepancies).toContainEqual(expect.objectContaining({ reason: 'cross_source_overlap_unresolved' }))
+    const records = (await app.inject({ method: 'GET', url: prefix + '/accounting/records', headers })).json().items
+    const pending = records.find((item: { originalReason: string }) => item.originalReason === 'cross_source_overlap_unresolved')
+    const providerFill = records.find((item: { original: { id: string }; acquisition: string }) =>
+      item.acquisition === 'provider' && item.original.id === 'fill:fill-multi-001')
+    const adjust = async (changes: Array<{ key: string; action: string }>) => {
+      const proposal = await app.inject({ method: 'POST', url: prefix + '/accounting/adjustments/preview', headers, payload: { changes } })
+      expect(proposal.statusCode).toBe(200)
+      return app.inject({ method: 'POST', url: prefix + '/accounting/adjustments/confirm', headers, payload: { changes, revision: proposal.json().revision } })
+    }
+    expect((await adjust([{ key: pending.key, action: 'include' }, { key: providerFill.key, action: 'exclude' }])).statusCode).toBe(200)
+    await new IngestionService(database, providerRegistry).syncProviderAccount(MULTI_ACCOUNT_ROW_ID)
+    const selected = (await read()).json()
+    expect(selected.portfolioScope).toBe('user_selected')
+    expect(selected.events).toContainEqual(expect.objectContaining({ authority: 'user_accepted', quantity: '12.000000000000000001' }))
+    const decisionRows = (await app.inject({ method: 'GET', url: prefix + '/accounting/records?inclusion=excluded', headers })).json().items
+    expect(decisionRows).toContainEqual(expect.objectContaining({ key: providerFill.key, acquisition: 'provider', inclusion: 'excluded' }))
+
+    const gapCsv = [header, 'fixture-multisided,local,,2026-11-10T12:30:00Z,,reward,,USD,,,4,,'].join('\n')
+    const supplement = await app.inject({ method: 'POST', url: prefix + '/imports/preview', headers,
+      payload: { csv: gapCsv, providerAccountId: MULTI_ACCOUNT_ROW_ID, acceptUnlinked: true } })
+    expect(supplement.statusCode).toBe(200)
+    expect((await confirm(supplement.json().batchId)).statusCode).toBe(200)
+    expect((await read()).json().events).toContainEqual(expect.objectContaining({ type: 'reward', amount: '4',
+      account: MULTI_ACCOUNT_ROW_ID, authority: 'user_accepted' }))
+    const original = new MultiOutcomeFixtureAdapter()
+    const correction: ProviderAdapter = {
+      capabilities: original.capabilities,
+      fetchPage: (request) => original.fetchPage(request.streamName === 'activity' ? { ...request, checkpoint: null } : request),
+      normalizePage: (page, streamName) => original.normalizePage(page, streamName).map((record) =>
+        record.kind !== 'fill' || record.externalId !== 'fill-multi-001' ? record :
+          { ...record, quantity: '13', rawPayload: { ...record.rawPayload, quantity: '13' } }),
+    }
+    await new IngestionService(database, new ProviderRegistry([correction])).syncProviderAccount(MULTI_ACCOUNT_ROW_ID)
+    const revised = (await app.inject({ method: 'GET', url: prefix + '/accounting/records?key=' + encodeURIComponent(providerFill.key), headers })).json().items
+    expect(revised).toContainEqual(expect.objectContaining({ key: providerFill.key, inclusion: 'excluded', revisionChanged: true }))
+
   })
 
   it('applies a clean migration set and rejects inconsistent fee values', async () => {

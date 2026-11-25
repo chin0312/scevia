@@ -51,9 +51,10 @@ export async function loadProviderEvidence(db: Pick<Database, 'select' | 'select
       .where(and(owned, lte(cashBalanceSnapshots.observedAt, asOf)))
       .orderBy(cashBalanceSnapshots.providerAccountId, cashBalanceSnapshots.assetCode, desc(cashBalanceSnapshots.observedAt), desc(cashBalanceSnapshots.ingestedAt), desc(cashBalanceSnapshots.id)).limit(501)
   const coverage = await db.select({ ...account, entity: dataCoverage.entityType, status: dataCoverage.status,
-      lastSuccessfulRunId: dataCoverage.lastSuccessfulRunId, lastAttemptStatus: dataCoverage.lastAttemptStatus })
+      lastSuccessfulRunId: dataCoverage.lastSuccessfulRunId, lastSuccessfulSyncAt: dataCoverage.lastSuccessfulSyncAt,
+      lastAttemptAt: dataCoverage.lastAttemptAt, lastAttemptStatus: dataCoverage.lastAttemptStatus })
       .from(dataCoverage).innerJoin(providerAccounts, eq(dataCoverage.providerAccountId, providerAccounts.id)).where(owned).limit(limit)
-  const accounts = await db.select(account).from(providerAccounts).where(owned).limit(limit)
+  const accounts = await db.select({ ...account, kind: providerAccounts.kind }).from(providerAccounts).where(owned).limit(limit)
   const evidence: Evidence[] = []
   const add = (ref: { account: string; venue: string; sourceRecordId: string; payloadSha256: string },
     event: Pick<FinancialObservation, 'id' | 'timestamp' | 'type' | 'asset'> & Partial<FinancialObservation>, unresolvedReason?: string) => {

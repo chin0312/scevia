@@ -117,6 +117,7 @@ describe('weighted-average replay', () => {
       row('charge', 2, 'fee', { amount: '0.2' }),
     ])
     rows[3]!.observation.relatedEventId = 'buy'
+    rows[3]!.observation.feeTiming = 'execution_evidence'
     const result = replayAccounting(rows, time(3))
     expect(result.cash).toMatchObject([{ balance: '95.8', knownFees: '0.2' }])
     expect(result.holdings).toMatchObject([{ basis: '4.2' }])
@@ -135,6 +136,24 @@ describe('weighted-average replay', () => {
     expect(result.status).toBe('partial')
     expect(result.cash).toContainEqual(expect.objectContaining({ account: 'wallet', balance: '99.2', realized: '1.3', knownFees: '0.3' }))
     expect(result.holdings).toMatchObject([{ quantity: '5', basis: '2.1', unrealized: '0.4' }])
+  })
+
+  it('posts separately paid fees at their economic time and reports unposted execution evidence', () => {
+    const rows = evidence([
+      row('cash', 0, 'opening_cash', { amount: '100' }),
+      row('inventory', 0, 'opening_inventory'),
+      row('buy', 1, 'buy', { instrument: 'A', quantity: '10', price: '0.4', fee: '0.2' }),
+      row('later', 3, 'fee', { amount: '0.2' }),
+      row('missing-inventory', 4, 'sell', { instrument: 'B', quantity: '10', price: '0.5' }),
+      row('unsupported-charge', 5, 'fee', { amount: '0.1' }),
+    ])
+    rows[3]!.observation.relatedEventId = 'buy'
+    rows[5]!.observation.relatedEventId = 'missing-inventory'
+    rows[5]!.observation.feeTiming = 'execution_evidence'
+    expect(replayAccounting(rows, time(2)).cash).toMatchObject([{ balance: '95.8', knownFees: '0.2' }])
+    expect(replayAccounting(rows, time(3)).cash).toMatchObject([{ balance: '95.6', knownFees: '0.4' }])
+    expect(replayAccounting(rows, time(5)).discrepancies.map(({ reason }) => reason))
+      .toEqual(['insufficient_inventory', 'execution_fee_parent_not_posted'])
   })
 
   it('rejects malformed and out-of-bounds CSV', () => {
