@@ -2,21 +2,69 @@ import { Decimal } from 'decimal.js'
 
 const D = Decimal.clone({ precision: 70 })
 export interface SettlementLeg { instrument: string; account?: string; quantity: string; mark: string | null }
-export interface BinaryGroup { id: string; yes: string; no: string; fixed?: 'yes' | 'no'; legs: SettlementLeg[] }
+export interface BinaryGroup { id: string; yes: string; no: string; fixed?: 'yes' | 'no'; unitPayout?: string; legs: SettlementLeg[] }
 export interface SettlementConstraint { left: string; right: string; kind: 'equivalent' | 'exclusive' | 'implies' }
 
 /** Each reviewed group pays one unit to the winning side and zero to the other. */
 export function settlementRisk(groups: BinaryGroup[], constraints: SettlementConstraint[]) {
   if (!groups.length) return { status: 'unavailable' as const, reason: 'no_supported_groups' }
-  if (groups.length > 12) return { status: 'unavailable' as const, reason: 'joint_enumeration_limit' }
+  if (groups.length > 256 || constraints.length > 1000) return { status: 'unavailable' as const, reason: 'joint_graph_limit' }
   const ids = new Map(groups.map((group, index) => [group.id, index]))
   if (ids.size !== groups.length || constraints.some((edge) => !ids.has(edge.left) || !ids.has(edge.right))
     || groups.some((group) => group.yes === group.no || group.legs.some((leg) => ![group.yes, group.no].includes(leg.instrument)
       || new D(leg.quantity).lt(0)))) return { status: 'unavailable' as const, reason: 'invalid_rule_input' }
+  const neighbors = new Map(groups.map(({ id }) => [id, new Set<string>()]))
+  for (const { left, right } of constraints) {
+    neighbors.get(left)!.add(right)
+    neighbors.get(right)!.add(left)
+  }
+  const unseen = new Set(neighbors.keys())
+  const components: string[][] = []
+  while (unseen.size) {
+    const start = unseen.values().next().value!
+    const queue = [start]
+    unseen.delete(start)
+    for (let index = 0; index < queue.length; index += 1) {
+      for (const id of neighbors.get(queue[index]!)!) if (unseen.delete(id)) queue.push(id)
+    }
+    components.push(queue)
+  }
+  if (components.some((component) => component.length > 12)
+    || components.reduce((total, component) => total + 2 ** component.length, 0) > 32_768) {
+    return { status: 'unavailable' as const, reason: 'joint_enumeration_limit' }
+  }
+  const byId = new Map(groups.map((group) => [group.id, group]))
+  const evaluated: Array<Extract<ReturnType<typeof enumerateComponent>, { status: 'exact' }>> = []
+  for (const component of components) {
+    const members = new Set(component)
+    const result = enumerateComponent(component.map((id) => byId.get(id)!),
+      constraints.filter((edge) => members.has(edge.left)))
+    if (result.status !== 'exact') return result
+    evaluated.push(result)
+  }
+  const count = evaluated.reduce((total, result) => total * BigInt(result.feasible), 1n)
+  const combinedReference = evaluated.some((result) => result.reference === null) ? null :
+    evaluated.reduce((total, result) => total.plus(result.reference!), new D(0))
+  const combine = (key: 'best' | 'worst') => {
+    const payout = evaluated.reduce((total, result) => total.plus(result[key].payout), new D(0))
+    return { payout: payout.toFixed(), changeFromReference: combinedReference === null ? null : payout.minus(combinedReference).toFixed(),
+      winners: evaluated.flatMap((result) => result[key].winners),
+      contributions: evaluated.flatMap((result) => result[key].contributions) }
+  }
+  const worst = combine('worst')
+  return { status: 'exact' as const, feasible: count <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(count) : null,
+    feasibleCountExact: count.toString(), componentSizes: components.map((component) => component.length),
+    reference: combinedReference?.toFixed() ?? null, best: combine('best'), worst,
+    downside: combinedReference === null ? null : D.max(0, combinedReference.minus(worst.payout)).toFixed(),
+    events: evaluated.flatMap((result) => result.events) }
+}
+
+function enumerateComponent(groups: BinaryGroup[], constraints: SettlementConstraint[]) {
+  const ids = new Map(groups.map((group, index) => [group.id, index]))
   const standalone = groups.map((group) => {
     const scenarios = [group.yes, group.no].map((winner) => {
       const contributions = group.legs.map((leg) => {
-        const payout = leg.instrument === winner ? leg.quantity : '0'
+        const payout = leg.instrument === winner ? new D(leg.quantity).mul(group.unitPayout ?? '1').toFixed() : '0'
         return { instrument: leg.instrument, account: leg.account ?? null, payout,
           changeFromReference: leg.mark === null ? null : new D(payout).minus(new D(leg.quantity).mul(leg.mark)).toFixed() }
       })

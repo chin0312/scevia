@@ -155,6 +155,14 @@ describe('migrations and canonical persistence', () => {
     const risk = await app.inject({ method: 'GET', url: prefix + '/analytics/exposure?' + riskQuery, headers })
     expect(risk.statusCode, risk.body).toBe(200)
     expect(risk.json().settlement.result).toMatchObject({ reference: '92', worst: { payout: '80' }, best: { payout: '100' } })
+    const conditional = await app.inject({ method: 'POST', url: prefix + '/analytics/conditional-settlement', headers,
+      payload: { venue: 'isolated', account: 'risk', asOf, asset: 'USDC', yes: yes.id, no: no.id, unitPayout: '2' } })
+    expect(conditional.statusCode, conditional.body).toBe(200)
+    expect(conditional.json()).toMatchObject({
+      scope: 'user_declared_contract_known_selected_quantities', result: { worst: { payout: '160' }, best: { payout: '200' } },
+    })
+    const assets = await app.inject({ method: 'GET', url: prefix + '/analytics/scope', headers })
+    expect(assets.json().accounts).toContainEqual(expect.objectContaining({ id: 'risk', assets: ['USDC'] }))
     const beforeMark = new URLSearchParams({ asset: 'USDC', asOf: '2026-11-03T00:00:00Z', accounts: 'risk' })
     const historicalRisk = await app.inject({ method: 'GET', url: prefix + '/analytics/exposure?' + beforeMark, headers })
     expect(historicalRisk.json().settlement.result).toMatchObject({ reference: null, worst: { payout: '80', changeFromReference: null } })
@@ -178,6 +186,45 @@ describe('migrations and canonical persistence', () => {
     riskQuery.set('accounts', 'missing')
     const wrongAccount = await app.inject({ method: 'GET', url: prefix + '/analytics/exposure?' + riskQuery, headers })
     expect(wrongAccount.statusCode).toBe(422)
+  })
+
+  it('loads 30 independent reviewed markets through the authorized exposure API', async () => {
+    const marketsToCreate = Array.from({ length: 30 }, (_, index) => 'depth-' + index)
+    const eventRows = await database.insert(events).values(marketsToCreate.map((externalId) => ({
+      providerCode: 'scale-fixture', externalId, name: externalId,
+    }))).returning()
+    const marketRows = await database.insert(markets).values(eventRows.map((event) => ({
+      providerCode: 'scale-fixture', externalId: event.externalId, eventId: event.id, title: event.name, lifecycle: 'open',
+    }))).returning()
+    const outcomes = await database.insert(instruments).values(marketRows.flatMap((market) => ['yes', 'no'].map((outcome) => ({
+      marketId: market.id, externalId: outcome, outcomeName: outcome,
+    })))).returning()
+    await database.insert(reviewedBinaryRules).values(marketRows.map((market) => ({
+      marketId: market.id, yesInstrumentId: outcomes.find((row) => row.marketId === market.id && row.externalId === 'yes')!.id,
+      noInstrumentId: outcomes.find((row) => row.marketId === market.id && row.externalId === 'no')!.id,
+      assetCode: 'USD', evidence: 'Reviewed independent synthetic rule', reviewedAt: new Date('2026-11-01T00:00:00Z'),
+    })))
+    const csv = [
+      'venue,account,id,timestamp,sequence,type,instrument,asset,quantity,price,amount,fee,fee_asset',
+      'scale-fixture,large,inventory,2026-11-01T00:00:00Z,,opening_inventory,,USD,,,,,',
+      ...outcomes.flatMap((row, i) => [
+        `scale-fixture,large,basis-${i},2026-11-01T00:00:00Z,,opening_position,${row.id},USD,${row.externalId === 'yes' ? 100 : 80},,10,,`,
+        `scale-fixture,large,mark-${i},2026-11-01T01:00:00Z,,mark,${row.id},USD,,${row.externalId === 'yes' ? '0.6' : '0.4'},,,`,
+      ]),
+    ].join('\n')
+    const app = await createTestApp()
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const prefix = `/v1/portfolios/${PORTFOLIO_ID}`
+    const preview = await app.inject({ method: 'POST', url: prefix + '/imports/preview', headers, payload: { csv } })
+    expect(preview.statusCode, preview.body).toBe(200)
+    const { batchId, reviewRevision } = preview.json()
+    const confirmed = await app.inject({ method: 'POST', url: prefix + '/imports/' + batchId + '/confirm?reviewRevision=' + reviewRevision, headers })
+    expect(confirmed.statusCode, confirmed.body).toBe(200)
+    const exposure = await app.inject({ method: 'GET',
+      url: prefix + '/analytics/exposure?' + new URLSearchParams({ asset: 'USD', accounts: 'large', asOf: '2026-11-01T02:00:00Z' }), headers })
+    expect(exposure.statusCode, exposure.body).toBe(200)
+    expect(exposure.json().settlement.result).toMatchObject({ status: 'exact', feasibleCountExact: '1073741824',
+      reference: '2760', downside: '360', worst: { payout: '2400' }, best: { payout: '3000' } })
   })
 
   it('previews and confirms owned financial CSV batches idempotently', async () => {

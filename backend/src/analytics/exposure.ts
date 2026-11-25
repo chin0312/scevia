@@ -43,7 +43,7 @@ export function analyzeExposure(state: Replay, asset: string, accounts: string[]
     const weights = concentration(amounts.map(([, amount]) => amount.toFixed()))
     return {
       rows: amounts.map(([id, amount], index) => ({ id, knownValue: amount.toFixed(), weight: weights?.weights[index] ?? null })),
-      concentration: weights ? { denominator: weights.denominator, hhi: weights.hhi, effectiveExposures: weights.effectiveExposures } : null,
+      concentration: weights ? { denominator: weights.denominator, hhi: weights.hhi, effectiveExposures: weights.effectiveExposures, topShares: weights.topShares } : null,
     }
   }
   const unmarkedPositions = holdings.filter((row) => row.marketValue === null).length
@@ -79,6 +79,18 @@ export function analyzeExposure(state: Replay, asset: string, accounts: string[]
     .reduce((total, row) => total.plus(row.pending), new D(0))
   const pendingKnown = state.holdings.filter((row) => row.asset === asset)
     .every((row) => row.settlementAvailability === 'selected_entitlements_only')
+  const openValue = instrumentRows.every((row) => row.knownMarketValue !== null
+    && row.quantityStatus === 'reconstructed_from_declaration')
+    ? instrumentRows.reduce((total, row) => total.plus(row.knownMarketValue!), new D(0)) : null
+  const valueBuckets = [
+    ...eventAllocation.map((row) => ({ kind: 'open_positions', id: row.event, value: row.knownValue })),
+    { kind: 'cash', id: 'cash', value: confirmedCash?.toFixed() ?? null },
+    { kind: 'pending_entitlements', id: 'pending', value: pendingKnown ? pending.toFixed() : null },
+  ]
+  const cashWeights = openValue !== null && confirmedCash !== null && confirmedCash.gte(0) && pendingKnown
+    ? concentration(valueBuckets.map((row) => row.value!)) : null
+  const knownBasis = instrumentRows.filter((row) => row.basis !== null)
+  const basisWeights = concentration(knownBasis.map((row) => row.basis!))
   const cashInclusive = result.status === 'exact' && unsupported.length === 0 && confirmedCash !== null && pendingKnown
     ? { scope: 'selected_evidence', openingCash: confirmedCash.toFixed(), pendingEntitlements: pending.toFixed(),
       worst: confirmedCash.plus(pending).plus(result.worst.payout).toFixed(),
@@ -87,17 +99,90 @@ export function analyzeExposure(state: Replay, asset: string, accounts: string[]
     asset, otherObservedAssets: [...new Set(state.cash.filter((row) => row.asset !== asset).map((row) => row.asset))], exposure: { instruments: instrumentRows, byEvent: eventAllocation },
     allocation: { denominatorScope: 'known_marked_open_positions_excluding_cash', unmarkedPositions,
       byInstrument: allocate((row) => row.event === null ? JSON.stringify([row.venue, row.account, row.instrument]) : row.instrument),
-      byMarket: allocate((row) => row.market ?? 'unmapped'),
-      byEvent: allocate((row) => row.event ?? 'unmapped'),
+      byMarket: allocate((row) => row.market ?? JSON.stringify(['unmapped', row.venue, row.account, row.instrument])),
+      byEvent: allocate((row) => row.event ?? JSON.stringify(['unmapped', row.venue, row.account, row.instrument])),
       byVenue: allocate((row) => row.venue), byAccount: allocate((row) => row.account),
+    },
+    allocationBases: {
+      cashInclusive: { scope: 'selected_marked_positions_cash_and_pending', denominator: cashWeights?.denominator ?? null,
+        reason: cashWeights ? null : 'incomplete_nonpositive_or_negative_balance',
+        rows: valueBuckets.map((row, i) => ({ ...row, weight: cashWeights?.weights[i] ?? null })) },
+      acquisitionBasis: { scope: 'known_open_position_basis', denominator: basisWeights?.denominator ?? null,
+        unavailable: instrumentRows.length - knownBasis.length,
+        rows: knownBasis.map(({ account, venue, instrument, basis }, i) => ({
+          account, venue, instrument, basis, weight: basisWeights?.weights[i] ?? null,
+        })) },
     },
     pendingEntitlements: state.holdings.filter((row) => row.asset === asset && row.entitlements.length > 0)
       .map(({ account, venue, instrument, pending, settlementAvailability, entitlements }) =>
         ({ account, venue, instrument, pending, settlementAvailability, entitlements })),
     settlement: { scope: unsupported.length ? 'supported_subset' : 'supported_selected_positions',
       payoutBasis: 'gross_contractual_excluding_cash_fees_and_pending_entitlements',
-      unsupported, rules: eligibleRules, constraints: applied, cashInclusive, result },
+      unsupported, evidenceTier: 'independently_reviewed_rule', rules: eligibleRules, constraints: applied, cashInclusive, result },
     timeline: instrumentRows.filter((row) => row.resolvesAt !== null).sort((a, b) => a.resolvesAt!.localeCompare(b.resolvesAt!)),
     undatedPositions: instrumentRows.filter((row) => row.resolvesAt === null).length,
   }
+}
+
+
+export function connectedMarkets(seeds: string[], edges: SettlementConstraint[]) {
+  const members = new Set(seeds)
+  const neighbors = new Map<string, string[]>()
+  for (const { left, right } of edges) {
+    neighbors.set(left, [...(neighbors.get(left) ?? []), right])
+    neighbors.set(right, [...(neighbors.get(right) ?? []), left])
+  }
+  const queue = [...members]
+  for (let index = 0; index < queue.length; index += 1) {
+    for (const id of neighbors.get(queue[index]!) ?? []) {
+      if (!members.has(id)) { members.add(id); queue.push(id) }
+    }
+  }
+  return members
+}
+
+interface ReportedSnapshot {
+  account: string; venue: string; instrument: string; asset: string | null
+  sourceRecordId: string; syncRunId: string; observedAt: Date; quantity: string; mark: string | null; markAt: Date | null
+}
+interface SnapshotCoverage {
+  account: string; entity: string; status: string; lastSuccessfulRunId: string | null
+  lastAttemptStatus: string | null; lastAttemptAt: Date | null; lastSuccessfulSyncAt: Date | null
+}
+export function analyzeReportedExposure(snapshots: ReportedSnapshot[], coverage: SnapshotCoverage[], asOf: string,
+  asset: string, metadata: MarketIdentity[], rules: ReviewedRule[], edges: SettlementConstraint[], graphLimit: boolean) {
+  const cutoff = Date.parse(asOf)
+  const index = new Map(metadata.map((item) => [item.instrument, item]))
+  const rows = snapshots.filter((row) => row.asset === asset && row.observedAt.getTime() <= cutoff).map((row) => {
+    const scope = coverage.find((entry) => entry.entity === 'positions' && entry.account === row.account)
+    const recent = cutoff - row.observedAt.getTime() <= 86_400_000
+    const member = scope?.lastSuccessfulRunId === row.syncRunId && scope.lastAttemptStatus === 'complete'
+      && scope.lastSuccessfulSyncAt !== null && scope.lastSuccessfulSyncAt.getTime() <= cutoff
+      && scope.lastAttemptAt !== null && scope.lastAttemptAt.getTime() <= cutoff
+    const usableMark = row.mark !== null && row.markAt !== null && row.markAt.getTime() <= cutoff
+      && cutoff - row.markAt.getTime() <= 86_400_000
+    return { ...row, market: index.get(row.instrument)?.market ?? null, freshness: recent ? 'recent' : 'stale',
+      membership: member ? 'seen_in_latest_usable_refresh' : 'uncertain',
+      providerCoverage: scope?.status ?? 'unknown',
+      eligibleQuantity: recent && member && !new D(row.quantity).isNegative(),
+      referenceMark: usableMark ? row.mark : null,
+      observedMarketValue: recent && member && usableMark ? new D(row.quantity).mul(row.mark!).toFixed() : null }
+  })
+  const eligibleRules = rules.filter((rule) => rule.asset === asset && rule.reviewedAt.toISOString() <= asOf
+    && index.get(rule.yes)?.market === rule.market && index.get(rule.no)?.market === rule.market
+    && index.get(rule.yes)?.lifecycle === 'open' && metadata.filter((item) => item.market === rule.market).length === 2)
+  const matched = rows.filter((row) => row.eligibleQuantity && new D(row.quantity).gt(0)
+    && eligibleRules.some((rule) => rule.yes === row.instrument || rule.no === row.instrument))
+  const connected = connectedMarkets(matched.flatMap((row) => row.market ?? []), edges)
+  const groups = eligibleRules.filter((rule) => connected.has(rule.market)).map((rule) => ({
+    id: rule.market, yes: rule.yes, no: rule.no,
+    legs: matched.filter((row) => row.instrument === rule.yes || row.instrument === rule.no)
+      .map((row) => ({ instrument: row.instrument, quantity: row.quantity, account: row.account, mark: row.referenceMark })),
+  }))
+  const result = graphLimit ? { status: 'unavailable' as const, reason: 'reviewed_graph_limit' }
+    : groups.length !== connected.size ? { status: 'unavailable' as const, reason: 'connected_rule_unavailable' }
+      : settlementRisk(groups, edges.filter((edge) => connected.has(edge.left) && connected.has(edge.right)))
+  return { scope: 'provider_reported_known_components', effectivePortfolioReplacement: false,
+    rows, settlement: { scope: 'eligible_observed_positions_only', unsupportedCount: rows.filter((row) => !matched.includes(row)).length,
+      result } }
 }

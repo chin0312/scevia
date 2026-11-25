@@ -42,7 +42,7 @@ export async function loadProviderEvidence(db: Pick<Database, 'select' | 'select
   const positions = await db.selectDistinctOn([positionSnapshots.providerAccountId, positionSnapshots.instrumentId], {
       ...account, sourceRecordId: positionSnapshots.sourceRecordId, instrument: positionSnapshots.instrumentId,
       syncRunId: positionSnapshots.syncRunId, asset: positionSnapshots.settlementAssetCode,
-      observedAt: positionSnapshots.observedAt, quantity: positionSnapshots.quantity, averageCost: positionSnapshots.averageCostPrice,
+      observedAt: positionSnapshots.observedAt, mark: positionSnapshots.markPrice, markAt: positionSnapshots.markAt, quantity: positionSnapshots.quantity, averageCost: positionSnapshots.averageCostPrice,
     }).from(positionSnapshots).innerJoin(providerAccounts, eq(positionSnapshots.providerAccountId, providerAccounts.id))
       .where(and(owned, lte(positionSnapshots.observedAt, asOf), eq(positionSnapshots.origin, 'provider_reported')))
       .orderBy(positionSnapshots.providerAccountId, positionSnapshots.instrumentId, desc(positionSnapshots.observedAt), desc(positionSnapshots.ingestedAt), desc(positionSnapshots.id)).limit(501)
