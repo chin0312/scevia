@@ -111,7 +111,7 @@ export class IngestionService {
     const names = new Set<string>()
     const configuredEntities = new Set<CoverageEntity>()
     for (const stream of adapter.capabilities.streams) {
-      if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(stream.name) || names.has(stream.name) || stream.entities.length === 0) {
+      if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(stream.name) || names.has(stream.name) || (stream.entities.length === 0 && !stream.auxiliaryEntities?.length)) {
         throw new IngestionError('invalid_provider_stream_configuration')
       }
       names.add(stream.name)
@@ -164,7 +164,7 @@ export class IngestionService {
 
     const runId = randomUUID()
     const startedAt = new Date().toISOString()
-    const restartCompleteSnapshot = Object.values(stream.snapshotSemantics).includes('complete') && checkpoint.cursor !== null
+    const restartCompleteSnapshot = stream.strategy === 'full_refresh' && Object.keys(stream.snapshotSemantics).length > 0 && checkpoint.cursor !== null
     const cursorAtStart = restartCompleteSnapshot ? null : checkpoint.cursor
     const checkpointAtStart = stream.strategy === 'provider_checkpoint' ? checkpoint.durableCheckpoint : null
     let cursor = cursorAtStart

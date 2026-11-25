@@ -79,11 +79,13 @@ if (mode === 'market-services') {
     { method: 'POST', headers: { ...authHeaders, 'content-type': 'application/json' }, body: JSON.stringify({ walletAddress }) },
   )
   const firstSync = await sync(registration.id, authHeaders)
-  const secondSync = mode === 'repeat' ? await sync(registration.id, authHeaders) : null
   const sourceQuery = `providerAccountId=${encodeURIComponent(registration.id)}&limit=100&offset=0`
+  const readFills = () => request<{ items: Array<{ id: string; providerAccountId: string; identityKind?: string }> }>(
+    `/v1/portfolios/${encodeURIComponent(portfolioId)}/fills?${sourceQuery}`, { headers: authHeaders },
+  )
   const [positions, fills, cashMovements, activityFacts, coverage] = await Promise.all([
     request<{ items: Array<{ providerAccountId: string }> }>(`/v1/portfolios/${encodeURIComponent(portfolioId)}/positions?${sourceQuery}`, { headers: authHeaders }),
-    request<{ items: Array<{ providerAccountId: string; identityKind?: string }> }>(`/v1/portfolios/${encodeURIComponent(portfolioId)}/fills?${sourceQuery}`, { headers: authHeaders }),
+    readFills(),
     request<{ items: Array<{ providerAccountId: string }> }>(`/v1/portfolios/${encodeURIComponent(portfolioId)}/cash-movements?${sourceQuery}`, { headers: authHeaders }),
     request<{ items: Array<{ providerAccountId: string; classification?: string }> }>(`/v1/portfolios/${encodeURIComponent(portfolioId)}/activity-facts?${sourceQuery}`, { headers: authHeaders }),
     request<{ items: Array<{ providerAccountId: string; entityType: string; status: string; reasonCode: string | null }> }>(
@@ -92,6 +94,8 @@ if (mode === 'market-services') {
     ),
   ])
 
+  const secondSync = mode === 'repeat' ? await sync(registration.id, authHeaders) : null
+  const repeatedFills = secondSync === null ? null : await readFills()
   const sourceRows = [
     ...positions.items,
     ...fills.items,
@@ -110,14 +114,18 @@ if (mode === 'market-services') {
   const allStreamsComplete = firstSync.streams.every((stream) => stream.status === 'complete')
   const incompleteFirstSyncStreams = firstSync.streams.filter((stream) => stream.status !== 'complete').map((stream) => stream.streamName)
   const hasProviderEvidence = firstRunTotals.rowsReceived > 0
-  const hasRetainedFinancialFacts = firstRunTotals.sourceRowsRetained > 0 || firstRunTotals.recordsPersisted > 0
+  const hasRetainedFinancialFacts = !registration.alreadyRegistered
+    && (positions.items.length > 0 || fills.items.length > 0 || cashMovements.items.length > 0)
   const hasApiReadback = retainedApiRows > 0 && allRowsBelongToSelectedSource
   const secondRunTotals = secondSync === null ? null : addStreamCounters(secondSync.streams)
   const repeatedSyncEvidence = secondSync === null ? null : {
     status: secondSync.status,
     exactDuplicates: secondRunTotals?.exactDuplicates ?? 0,
     retainedRows: secondRunTotals?.sourceRowsRetained ?? 0,
-    deduplicationObserved: (secondRunTotals?.exactDuplicates ?? 0) > 0,
+    deduplicationObserved: fills.items.length > 0 && fills.items.length < 100
+      && (secondRunTotals?.exactDuplicates ?? 0) > 0
+      && JSON.stringify(fills.items.map((row) => row.id).sort())
+        === JSON.stringify(repeatedFills?.items.map((row) => row.id).sort()),
   }
 
   const secondSyncComplete = secondSync === null || secondSync.streams.every((stream) => stream.status === 'complete')

@@ -160,6 +160,7 @@ async function upsertMarket(
   const [existingMarket] = await tx.select({
     id: markets.id,
     eventId: markets.eventId,
+    eventExternalId: sql<string>`(select external_id from ${events} where id = ${markets.eventId})`,
     eventIdentityKind: markets.eventIdentityKind,
     sourceUpdatedAt: markets.sourceUpdatedAt,
     lifecycle: markets.lifecycle,
@@ -169,11 +170,11 @@ async function upsertMarket(
     .limit(1).for('update')
   const marketRevisionIsNewer = incomingMarketUpdatedAt !== null
     && (!existingMarket?.sourceUpdatedAt || incomingMarketUpdatedAt > existingMarket.sourceUpdatedAt)
-  if (existingMarket?.sourceUpdatedAt && (!incomingMarketUpdatedAt || incomingMarketUpdatedAt < existingMarket.sourceUpdatedAt)) return false
 
   const keepExistingEventLink = existingMarket !== undefined
-    && identityRank(incomingIdentityKind) < identityRank(existingMarket.eventIdentityKind)
-    && !marketRevisionIsNewer
+    && (identityRank(incomingIdentityKind) < identityRank(existingMarket.eventIdentityKind)
+      || (incomingIdentityKind === 'provider_native' && existingMarket.eventIdentityKind === 'provider_native'
+        && existingMarket.eventExternalId !== record.externalEventId && !marketRevisionIsNewer))
   let eventId: string | undefined
   if (keepExistingEventLink) {
     eventId = existingMarket.eventId
@@ -257,7 +258,8 @@ async function upsertMarket(
       ? isNull(markets.sourceUpdatedAt)
       : sql`${markets.sourceUpdatedAt} IS NULL OR ${markets.sourceUpdatedAt} < ${incomingMarketUpdatedAt}`,
   }).returning({ id: markets.id })
-  if (!market) {
+  const persistedMarket = market ?? existingMarket
+  if (!persistedMarket) {
     const [racedMarket] = await tx.select({ id: markets.id }).from(markets).where(and(
       eq(markets.providerCode, providerCode),
       eq(markets.externalId, record.externalMarketId),
@@ -268,7 +270,7 @@ async function upsertMarket(
 
   for (const outcome of record.outcomes) {
     await tx.insert(instruments).values({
-      marketId: market.id,
+      marketId: persistedMarket.id,
       externalId: outcome.externalId,
       outcomeName: outcome.name,
       outcomeType: outcome.outcomeType,
@@ -279,12 +281,14 @@ async function upsertMarket(
       set: {
         outcomeName: /^Outcome \d+$/.test(outcome.name) ? instruments.outcomeName : outcome.name,
         outcomeType: outcome.outcomeType === 'provider_outcome' ? instruments.outcomeType : outcome.outcomeType,
-        payoutAmount: outcome.payoutAmount === null ? instruments.payoutAmount : outcome.payoutAmount,
-        settlementAssetCode: outcome.settlementAssetCode === null ? instruments.settlementAssetCode : outcome.settlementAssetCode,
+        payoutAmount: outcome.payoutAmount === null ? instruments.payoutAmount : marketRevisionIsNewer
+          ? outcome.payoutAmount : sql`coalesce(${instruments.payoutAmount}, ${outcome.payoutAmount})`,
+        settlementAssetCode: outcome.settlementAssetCode === null ? instruments.settlementAssetCode : marketRevisionIsNewer
+          ? outcome.settlementAssetCode : sql`coalesce(${instruments.settlementAssetCode}, ${outcome.settlementAssetCode})`,
       },
     })
   }
-  return true
+  return market !== undefined
 }
 
 function identityRank(value: string): number {

@@ -428,7 +428,7 @@ function mapFeeMetadata(market: Record<string, unknown>): Record<string, unknown
   const takerOnlyValue = schedule.success ? schedule.data.takerOnly ?? schedule.data.taker_only : undefined
   const takerOnly = typeof takerOnlyValue === 'boolean' ? takerOnlyValue : null
   const rebateRate = schedule.success ? feeFraction(schedule.data.rebateRate ?? schedule.data.rebate_rate) : null
-  const completeSchedule = rate !== null && exponent !== null && takerOnly !== null && rebateRate !== null
+  const completeSchedule = rate !== null && exponent !== null && takerOnly !== null
   const status = feesEnabled === false ? 'fee_free'
     : feesEnabled === true && completeSchedule ? 'known'
       : feesEnabled === true || schedule.success ? 'incomplete' : 'unknown'

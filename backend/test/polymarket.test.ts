@@ -64,7 +64,7 @@ describe('Polymarket provider adapter', () => {
     expect(page.coverage.positions?.status).toBe('partial')
   })
 
-  it('continues from OPEN into CLOSED positions and emits explicit zero tombstones', async () => {
+  it('refreshes OPEN independently and retains CLOSED as historical evidence', async () => {
     const calls: URL[] = []
     const client = new PolymarketHttpClient(async (input) => {
       const url = new URL(String(input))
@@ -75,11 +75,11 @@ describe('Polymarket provider adapter', () => {
     })
     const adapter = new PolymarketAdapter(client)
     const openPage = await adapter.fetchPage(request('positions'))
-    expect(openPage.nextCursor).toContain('CLOSED')
-    const closedPage = await adapter.fetchPage(request('positions', { cursor: openPage.nextCursor }))
-    const position = adapter.normalizePage(closedPage, 'positions').find((record) => record.kind === 'position')
+    expect(openPage.nextCursor).toBeNull()
+    const closedPage = await adapter.fetchPage(request('closed_positions'))
+    const history = adapter.normalizePage(closedPage, 'closed_positions')
     expect(calls.map((url) => url.searchParams.get('status'))).toEqual(['OPEN', 'CLOSED'])
-    expect(position).toMatchObject({ kind: 'position', quantity: '0', providerStatus: 'CLOSED' })
+    expect(history).toMatchObject([{ kind: 'activity_fact', activityType: 'POSITION_CLOSURE' }])
   })
 
   it('retains invalid position and trade values as unresolved facts instead of publishing them as holdings or fills', async () => {
@@ -111,7 +111,7 @@ describe('Polymarket provider adapter', () => {
     const tradePage = {
       payload: {
         stream: 'trades',
-        rows: [{ transaction_hash: '0xinvalid-price', condition_id: 'condition-a', token_id: '101', side: 'BUY', size: '2', price: '1.2', timestamp: 1795564800 }],
+        rows: [{ id: 'invalid-price', transaction_hash: '0xinvalid-price', condition_id: 'condition-a', token_id: '101', side: 'BUY', size: '2', price: '1.2', timestamp: 1795564800 }],
         tokenRows: [
           { token_id: '101', opposite_token_id: '102', condition_id: 'condition-a', title: 'Market A', outcome: 'Yes', outcome_index: 0 },
           { token_id: '102', opposite_token_id: '101', condition_id: 'condition-a', title: 'Market A', outcome: 'No', outcome_index: 1 },
@@ -149,7 +149,7 @@ describe('Polymarket provider adapter', () => {
     expect(page.coverage.positions?.reasonCode).toBe('account_identity_mismatch')
   })
 
-  it('pages initial and resumed trade history and creates stable composite fill identities', async () => {
+  it('pages initial and resumed trade history and creates stable native fill identities', async () => {
     const calls: URL[] = []
     const tokens = [
       { token_id: '101', opposite_token_id: '102', condition_id: 'condition-a', title: 'Market A', outcome: 'Yes', outcome_index: 0, module: 'v1' },
@@ -159,7 +159,7 @@ describe('Polymarket provider adapter', () => {
       const url = new URL(String(input))
       calls.push(url)
       if (url.pathname.endsWith('/v2/trades')) {
-        return textResponse('{"data":[{"proxy_wallet":"' + WALLET + '","transaction_hash":"0xabc","condition_id":"condition-a","token_id":"101","side":"BUY","size":0.123456789012345678,"price":0.4,"timestamp":1795564800,"title":"Market A"}],"pagination":{"next_cursor":null}}')
+        return textResponse('{"data":[{"proxy_wallet":"' + WALLET + '","id":"native-fill","transaction_hash":"0xabc","condition_id":"condition-a","token_id":"101","side":"BUY","size":0.123456789012345678,"price":0.4,"timestamp":1795564800,"title":"Market A"}],"pagination":{"next_cursor":null}}')
       }
       const ids = new Set((url.searchParams.get('token_id') ?? '').split(','))
       return jsonResponse({ data: tokens.filter((token) => ids.has(token.token_id)) })
@@ -189,7 +189,7 @@ describe('Polymarket provider adapter', () => {
     expect(firstPage.coverage.fills?.reasonCode).toBe('provider_trade_id_not_exposed')
   })
 
-  it('retains trade observations when token metadata is missing and keeps same-transaction rows distinct', async () => {
+  it('retains trade observations when token metadata is missing and groups indistinguishable same-transaction observations', async () => {
     const tradeRow = { transaction_hash: '0xabc', condition_id: 'condition-a', token_id: '999', side: 'BUY', size: '2', price: '0.25', timestamp: 1795564800 }
     const client = new PolymarketHttpClient(async (input) => {
       const url = new URL(String(input))
@@ -206,7 +206,7 @@ describe('Polymarket provider adapter', () => {
     expect(facts.map((fact) => fact.kind === 'activity_fact' ? fact.quantity : null)).toEqual(['2', '2'])
     expect(facts[0]?.kind === 'activity_fact' && facts[1]?.kind === 'activity_fact'
       ? facts[0].externalId === facts[1].externalId
-      : true).toBe(false)
+      : false).toBe(true)
   })
 
   it('maps deposits and withdrawals as signed cash flows while keeping other account events unreconciled', async () => {

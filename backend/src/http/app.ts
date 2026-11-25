@@ -1358,7 +1358,10 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       if (!account) return reply.code(404).send(errorBody(request.id, 'not_found', 'The requested resource was not found.'))
       try {
         const result = await ingestion.syncProviderAccount(account.id)
-        return reply.code(result.status === 'failed' ? 502 : 200).send(result)
+        if (result.status === 'failed') {
+          return reply.code(502).send(errorBody(request.id, 'sync_failed', 'All synchronization streams failed.'))
+        }
+        return reply.code(200).send(result)
       } catch (error) {
         if (error instanceof SyncAlreadyRunningError) {
           return reply.code(409).send(errorBody(request.id, error.code, 'A synchronization is already running for this account.'))

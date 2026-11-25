@@ -25,7 +25,7 @@ interface TimeWindow {
 }
 
 interface PagePayload {
-  stream: 'positions' | 'trades' | 'activity'
+  stream: 'positions' | 'closed_positions' | 'trades' | 'activity'
   positionStatus?: 'OPEN' | 'CLOSED'
   rows: Record<string, unknown>[]
   tokenRows: Record<string, unknown>[]
@@ -53,8 +53,16 @@ export class PolymarketAdapter implements ProviderAdapter {
         name: 'positions',
         entities: ['positions', 'prices'],
         referenceEntities: ['markets'],
+        auxiliaryEntities: ['activity'],
         strategy: 'full_refresh',
         snapshotSemantics: { positions: 'incremental' },
+      },
+      {
+        name: 'closed_positions',
+        entities: [],
+        auxiliaryEntities: ['activity'],
+        strategy: 'provider_checkpoint',
+        snapshotSemantics: {},
       },
       {
         name: 'trades',
@@ -81,7 +89,7 @@ export class PolymarketAdapter implements ProviderAdapter {
       throw new ProviderAdapterError('invalid_polymarket_wallet_address', false)
     }
     try {
-      if (request.streamName === 'positions') return await this.fetchPositions(request)
+      if (request.streamName === 'positions' || request.streamName === 'closed_positions') return await this.fetchPositions(request)
       if (request.streamName === 'trades') return await this.fetchTrades(request)
       if (request.streamName === 'activity') return await this.fetchActivity(request)
       throw new ProviderAdapterError('unknown_polymarket_stream', false)
@@ -96,7 +104,7 @@ export class PolymarketAdapter implements ProviderAdapter {
 
   normalizePage(page: ProviderPage, streamName: string): NormalizedRecord[] {
     const parsedPayload = z.object({
-      stream: z.enum(['positions', 'trades', 'activity']),
+      stream: z.enum(['positions', 'closed_positions', 'trades', 'activity']),
       positionStatus: z.enum(['OPEN', 'CLOSED']).optional(),
       rows: z.array(z.record(z.string(), z.unknown())).max(PAGE_SIZE),
       tokenRows: z.array(z.record(z.string(), z.unknown())).max(PAGE_SIZE * 4),
@@ -110,11 +118,14 @@ export class PolymarketAdapter implements ProviderAdapter {
     let sourceRowsRetained = 0
     let invalidRecords = 0
 
-    if (streamName === 'positions') {
-      for (const [rowIndex, row] of rows.entries()) {
-        const market = marketFromPosition(row)
+    if (streamName === 'positions' || streamName === 'closed_positions') {
+      for (const row of rows) {
+        const historical = streamName === 'closed_positions'
+          || parsedPayload.data.positionStatus === 'CLOSED'
+          || nonEmptyString(row.status)?.toUpperCase() === 'CLOSED'
+        const market = historical ? null : marketFromPosition(row)
         if (market) records.push(market)
-        const position = positionFromProviderRow(row, retrievedAt, parsedPayload.data.positionStatus)
+        const position = historical ? null : positionFromProviderRow(row, retrievedAt, parsedPayload.data.positionStatus)
         if (position) {
           sourceRowsRetained += 1
           records.push(position)
@@ -122,7 +133,8 @@ export class PolymarketAdapter implements ProviderAdapter {
           if (price) records.push(price)
         } else {
           const unresolved = hasRetainableSourceEvidence(row)
-            ? activityFactFromRow(row, rowIndex, 'unresolved', 'position_fields_invalid', 'positions', 'POSITION_UNRESOLVED')
+            ? activityFactFromRow(row, 'unresolved', historical ? 'historical_closure_not_current_balance' : 'position_fields_invalid',
+              'positions', historical ? 'POSITION_CLOSURE' : 'POSITION_UNRESOLVED')
             : null
           if (unresolved) {
             records.push({
@@ -139,25 +151,25 @@ export class PolymarketAdapter implements ProviderAdapter {
         return tokenId ? [[tokenId, token] as const] : []
       }))
       const emittedMarkets = new Set<string>()
-      for (const [rowIndex, row] of rows.entries()) {
+      for (const row of rows) {
         const tokenId = nonEmptyString(row.token_id)
         const token = tokenId ? tokensById.get(tokenId) : undefined
         const oppositeId = token ? nonEmptyString(token.opposite_token_id) : null
         const opposite = oppositeId ? tokensById.get(oppositeId) : undefined
         if (!token || !opposite) {
-          const unresolved = unresolvedTradeFact(row, rowIndex, !token ? 'token_metadata_missing' : 'opposite_token_metadata_missing')
+          const unresolved = unresolvedTradeFact(row, !token ? 'token_metadata_missing' : 'opposite_token_metadata_missing')
           if (unresolved) { records.push(unresolved); sourceRowsRetained += 1 } else invalidRecords += 1
           continue
         }
         const market = marketFromTokenPair(token, opposite, row)
         if (!market) {
-          const unresolved = unresolvedTradeFact(row, rowIndex, 'market_metadata_invalid')
+          const unresolved = unresolvedTradeFact(row, 'market_metadata_invalid')
           if (unresolved) { records.push(unresolved); sourceRowsRetained += 1 } else invalidRecords += 1
           continue
         }
         const externalMarketId = nonEmptyString(market.externalMarketId)
         if (!externalMarketId) {
-          const unresolved = unresolvedTradeFact(row, rowIndex, 'market_identity_missing')
+          const unresolved = unresolvedTradeFact(row, 'market_identity_missing')
           if (unresolved) { records.push(unresolved); sourceRowsRetained += 1 } else invalidRecords += 1
           continue
         }
@@ -165,25 +177,25 @@ export class PolymarketAdapter implements ProviderAdapter {
           emittedMarkets.add(externalMarketId)
           records.push(market)
         }
-        const fill = fillFromProviderRow(row, token, rowIndex)
+        const fill = fillFromProviderRow(row, token)
         if (fill) { records.push(fill); sourceRowsRetained += 1 }
         else {
-          const unresolved = unresolvedTradeFact(row, rowIndex, 'trade_fields_invalid')
+          const unresolved = unresolvedTradeFact(row, nativeTradeId(row) ? 'trade_fields_invalid' : 'trade_identity_ambiguous')
           if (unresolved) { records.push(unresolved); sourceRowsRetained += 1 } else invalidRecords += 1
         }
       }
     } else {
-      for (const [rowIndex, row] of rows.entries()) {
+      for (const row of rows) {
         const type = nonEmptyString(row.type)?.toUpperCase().slice(0, 64)
         if (!type) {
           const unresolved = hasRetainableSourceEvidence(row)
-            ? activityFactFromRow(row, rowIndex, 'unresolved', 'activity_type_missing', 'activity', 'UNKNOWN_ACTIVITY')
+            ? activityFactFromRow(row, 'unresolved', 'activity_type_missing', 'activity', 'UNKNOWN_ACTIVITY')
             : null
           if (unresolved) { records.push(unresolved); sourceRowsRetained += 1 } else invalidRecords += 1
           continue
         }
         if (type === 'TRADE') {
-          const overlap = activityFactFromRow(row, rowIndex, 'overlap_candidate', null, 'activity')
+          const overlap = activityFactFromRow(row, 'overlap_candidate', null, 'activity')
           if (overlap) { records.push(overlap); sourceRowsRetained += 1 } else invalidRecords += 1
           continue
         }
@@ -191,12 +203,12 @@ export class PolymarketAdapter implements ProviderAdapter {
           const movement = cashMovementFromActivity(row)
           if (movement) { records.push(movement); sourceRowsRetained += 1 }
           else {
-            const unresolved = activityFactFromRow(row, rowIndex, 'unresolved', 'cash_movement_fields_invalid', 'activity')
+            const unresolved = activityFactFromRow(row, 'unresolved', 'cash_movement_fields_invalid', 'activity')
             if (unresolved) { records.push(unresolved); sourceRowsRetained += 1 } else invalidRecords += 1
           }
           continue
         }
-        const activityFact = activityFactFromRow(row, rowIndex)
+        const activityFact = activityFactFromRow(row)
         if (activityFact) { records.push(activityFact); sourceRowsRetained += 1 } else invalidRecords += 1
       }
     }
@@ -227,7 +239,8 @@ export class PolymarketAdapter implements ProviderAdapter {
   }
 
   private async fetchPositions(request: FetchPageRequest): Promise<ProviderPage> {
-    const positionPage = decodePositionCursor(request.cursor)
+    const status = request.streamName === 'closed_positions' ? 'CLOSED' : 'OPEN'
+    const positionPage = { status, cursor: decodePositionCursor(request.cursor).cursor }
     const query = new URLSearchParams({
       user: request.externalAccountId.toLowerCase(),
       limit: String(PAGE_SIZE),
@@ -244,15 +257,15 @@ export class PolymarketAdapter implements ProviderAdapter {
     const { rows, excludedRecords } = validateAccountRows(returnedRows, request.externalAccountId)
     const nextCursor = envelope.pagination?.next_cursor ?? null
     const cursorAfterPage = nextCursor !== null
-      ? encodePositionCursor(positionPage.status, nextCursor)
-      : positionPage.status === 'OPEN' ? encodePositionCursor('CLOSED', null) : null
+      ? encodePositionCursor(status, nextCursor)
+      : null
     const retrievedAt = new Date().toISOString()
     return {
-      payload: { stream: 'positions', positionStatus: positionPage.status, rows, tokenRows: [], retrievedAt } satisfies PagePayload,
+      payload: { stream: status === 'OPEN' ? 'positions' : 'closed_positions', positionStatus: status, rows, tokenRows: [], retrievedAt } satisfies PagePayload,
       nextCursor: cursorAfterPage,
       checkpoint: null,
       diagnostics: { upstreamRowsReceived: returnedRows.length, excludedRecords },
-      coverage: {
+      coverage: status === 'CLOSED' ? {} : {
         positions: partialCoverage(excludedRecords > 0 ? 'account_identity_mismatch' : 'provider_position_filter_and_snapshot_order'),
         prices: partialCoverage('provider_mark_timestamp_unavailable'),
       },
@@ -513,10 +526,13 @@ function probabilityPrice(value: unknown): string | null {
   return decimal.greaterThanOrEqualTo(0) && decimal.lessThanOrEqualTo(1) ? price : null
 }
 
+function nativeTradeId(row: Record<string, unknown>): string | null {
+  return nonEmptyString(row.id) ?? nonEmptyString(row.trade_id) ?? nonEmptyString(row.tradeId)
+}
+
 function fillFromProviderRow(
   row: Record<string, unknown>,
   token: Record<string, unknown>,
-  rowIndex: number,
 ): Record<string, unknown> | null {
   const externalMarketId = nonEmptyString(row.condition_id)
   const externalInstrumentId = nonEmptyString(row.token_id)
@@ -527,18 +543,12 @@ function fillFromProviderRow(
   const transactionHash = nonEmptyString(row.transaction_hash)?.toLowerCase() ?? null
   if (!externalMarketId || !externalInstrumentId || (side !== 'BUY' && side !== 'SELL') || !occurredAt || quantity === null
     || new Decimal(quantity).lessThanOrEqualTo(0) || price === null || new Decimal(price).lessThan(0) || new Decimal(price).greaterThan(1)) return null
-  const nativeId = nonEmptyString(row.id) ?? nonEmptyString(row.trade_id) ?? nonEmptyString(row.tradeId)
-  // Data API v2 documents no fill ID. This source-observation fingerprint deliberately
-  // excludes mutable quantity and price; row index preserves same-page indistinguishable rows.
-  const id = nativeId
-    ? `provider:${nativeId}`
-    : fingerprint('source-observation', [
-      transactionHash ?? '', externalMarketId, externalInstrumentId, side, occurredAt, rowIndex,
-    ])
+  const nativeId = nativeTradeId(row)
+  if (!nativeId) return null
   return {
     kind: 'fill',
-    externalId: `polymarket-v2:${id}`,
-    identityKind: nativeId ? 'provider_native' : 'source_fingerprint',
+    externalId: `polymarket-v2:provider:${nativeId}`,
+    identityKind: 'provider_native',
     externalMarketId,
     externalInstrumentId,
     direction: side.toLowerCase(),
@@ -573,7 +583,7 @@ function marketFromTokenPair(
   const oppositeId = nonEmptyString(opposite.token_id)
   const title = nonEmptyString(token.title) ?? nonEmptyString(trade.title)
   if (!marketId || !tokenId || !oppositeId || !title) return null
-  if (nonEmptyString(opposite.condition_id) !== marketId) return null
+  if (nonEmptyString(opposite.condition_id) !== marketId || nonEmptyString(trade.condition_id) !== marketId) return null
   const eventSlug = nonEmptyString(token.event_slug) ?? nonEmptyString(trade.event_slug)
   const eventIdentity = providerEventIdentity(token.event_id ?? trade.event_id, eventSlug, marketId)
   const lifecycle = token.resolved === true || opposite.resolved === true
@@ -648,7 +658,6 @@ function cashMovementFromActivity(row: Record<string, unknown>): Record<string, 
 
 function activityFactFromRow(
   row: Record<string, unknown>,
-  rowIndex: number,
   classification: 'unreconciled' | 'unresolved' | 'overlap_candidate' = 'unreconciled',
   resolutionReason: string | null = null,
   sourceEndpoint: 'activity' | 'trades' | 'positions' = 'activity',
@@ -659,7 +668,7 @@ function activityFactFromRow(
   if (!activityType || !hasRetainableSourceEvidence(row)) return null
   const amount = decimalString(row.usdc_size ?? row.current_value)
   const quantity = decimalString(row.size ?? row.current_size)
-  const id = sourceObservationIdentity(row, activityType, occurredAt, rowIndex)
+  const id = sourceObservationIdentity(row, activityType, occurredAt)
   return {
     kind: 'activity_fact',
     externalId: `polymarket-v2:${id.value}`,
@@ -681,8 +690,8 @@ function activityFactFromRow(
   }
 }
 
-function unresolvedTradeFact(row: Record<string, unknown>, rowIndex: number, reasonCode: string): Record<string, unknown> | null {
-  const fact = activityFactFromRow(row, rowIndex, 'unresolved', reasonCode, 'trades', 'TRADE_UNRESOLVED')
+function unresolvedTradeFact(row: Record<string, unknown>, reasonCode: string): Record<string, unknown> | null {
+  const fact = activityFactFromRow(row, 'unresolved', reasonCode, 'trades', 'TRADE_UNRESOLVED')
   if (!fact || fact.kind !== 'activity_fact') return null
   return { ...fact, activityType: 'TRADE_UNRESOLVED' }
 }
@@ -702,7 +711,6 @@ function sourceObservationIdentity(
   row: Record<string, unknown>,
   type: string,
   occurredAt: string | null,
-  rowIndex: number,
 ): { value: string; identityKind: 'provider_native' | 'source_fingerprint' } {
   const nativeId = nonEmptyString(row.id) ?? nonEmptyString(row.activity_id) ?? nonEmptyString(row.trade_id)
   if (nativeId) return { value: `provider:${type}:${nativeId}`, identityKind: 'provider_native' }
@@ -715,7 +723,9 @@ function sourceObservationIdentity(
       nonEmptyString(row.condition_id) ?? '',
       nonEmptyString(row.token_id) ?? '',
       nonEmptyString(row.side)?.toUpperCase() ?? '',
-      rowIndex,
+      decimalString(row.size ?? row.current_size),
+      decimalString(row.usdc_size),
+      decimalString(row.price ?? row.current_price),
     ]),
     identityKind: 'source_fingerprint',
   }

@@ -135,8 +135,10 @@ describe('migrations and canonical persistence', () => {
   it('ingests Polymarket records into PostgreSQL and exposes only authorized normalized facts', async () => {
     const wallet = '0x1234567890abcdef1234567890abcdef12345678'
     let omitPositions = false
+    let failSync = false
     const fetcher: typeof fetch = async (input) => {
       const url = new URL(String(input))
+      if (failSync) return new Response(null, { status: 403 })
       if (url.pathname.endsWith('/v2/positions')) {
         if (omitPositions) {
           return new Response(JSON.stringify({ data: [], pagination: { next_cursor: null } }), { status: 200, headers: { 'content-type': 'application/json' } })
@@ -181,6 +183,7 @@ describe('migrations and canonical persistence', () => {
         return new Response(JSON.stringify({
           data: [{
             proxy_wallet: wallet,
+            id: 'native-fill',
             transaction_hash: '0xabc123',
             condition_id: 'condition-a',
             token_id: '101',
@@ -314,6 +317,11 @@ describe('migrations and canonical persistence', () => {
       observationStatus: 'not_seen_in_latest_successful_refresh',
       positionState: 'not_seen_in_latest_successful_refresh',
     })
+    failSync = true
+    const failure = await app.inject({ method: 'POST', url: `/v1/provider-accounts/${accountId}/sync`, headers: auth })
+    expect(failure.statusCode).toBe(502)
+    expect(failure.body).toContain('sync_failed')
+
   })
 
   it('keeps provider events distinct and stores varying outcome and settlement values', async () => {
