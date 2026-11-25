@@ -50,4 +50,45 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run db:migrate
+      - run: npm run db:seed
+      - name: Smoke test the built HTTP server
+        shell: bash
+        run: |
+          set -euo pipefail
+          node dist/server.js > /tmp/scevia-backend.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
+          ready=false
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3001/readyz >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then
+            cat /tmp/scevia-backend.log
+            exit 1
+          fi
+          node --input-type=module <<'NODE'
+          const baseUrl = 'http://127.0.0.1:3001'
+          const token = process.env.DEV_AUTH_TOKEN
+          const assert = (condition, message) => {
+            if (!condition) throw new Error(message)
+          }
+
+          const health = await fetch(`${baseUrl}/healthz`)
+          assert(health.ok, 'Health endpoint did not return success')
+
+          const providers = await fetch(`${baseUrl}/v1/providers`).then((response) => response.json())
+          assert(providers.items?.length === 2, 'Expected both fixture provider capabilities')
+
+          const headers = { authorization: `Bearer ${token}` }
+          const portfolios = await fetch(`${baseUrl}/v1/portfolios`, { headers }).then((response) => response.json())
+          const portfolio = portfolios.items?.find((item) => item.id === '00000000-0000-4000-8000-000000000101')
+          assert(portfolio?.providerAccountCount === 2, 'Expected the seeded Sample portfolio and both sources')
+
+          const positions = await fetch(`${baseUrl}/v1/portfolios/${portfolio.id}/positions`, { headers }).then((response) => response.json())
+          assert(positions.items?.length > 0, 'Expected stored fixture positions from the API')
+          NODE
       - run: npm audit --audit-level=high
