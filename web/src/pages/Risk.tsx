@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Icon } from '../components/Icon'
+import { useWidth } from '../components/charts'
 import { useDetails } from '../components/details'
 import { Modal, useToast } from '../components/overlays'
 import { RelationshipModal } from '../components/relationships'
@@ -15,7 +16,7 @@ import { useSessionState } from '../lib/useSessionState'
 
 const RAIL: RailSection[] = [
   { id: 'summary', label: 'Exposure summary', icon: 'home' },
-  { id: 'exposure', label: 'Concentration', icon: 'bars', children: [{ id: 'conc', label: 'By event, category, platform' }, { id: 'ladder', label: 'Downside ladder' }] },
+  { id: 'exposure', label: 'Exposure', icon: 'bars', children: [{ id: 'conc', label: 'Concentration' }, { id: 'ladder', label: 'Downside ladder' }] },
   { id: 'payoffs', label: 'Outcome payoffs', icon: 'table' },
   { id: 'context', label: 'Relationships & timing', icon: 'link', children: [{ id: 'rel', label: 'Event relationships' }, { id: 'calendar', label: 'Resolution calendar' }] },
 ]
@@ -73,6 +74,9 @@ export default function Risk() {
   const top3 = exps.slice(0, 3).reduce((a, e) => a + e.cost, 0)
   const rows = exps.filter((e) => filter === 'All events' || (filter === 'Next 30 days' ? e.days <= 30 : shareOf(e.cost) > limit))
   const ladder = exps.reduce<number[]>((a, e) => [...a, (a.at(-1) ?? 0) + e.cost], [])
+  const ladderMax = Math.max(10000, Math.ceil((ladder.at(-1) ?? 0) / 10000) * 10000)
+  const ladderTicks = Array.from({ length: ladderMax / 10000 + 1 }, (_, i) => i * 10000)
+  const [ladderRef, LW] = useWidth<HTMLDivElement>(480)
   const macroCost = exps.filter((e) => MACRO.includes(e.event.id)).reduce((a, e) => a + e.cost, 0)
   const soon = exps.filter((e) => e.days <= 30)
   const week = busiestWeek(exps)
@@ -91,7 +95,7 @@ export default function Risk() {
   return (
     <div className="shell">
       <SectionRail title="Risk" sections={RAIL}>
-        <div><h6 className="caps" style={{ paddingLeft: 'var(--space-3)', marginBottom: 'var(--space-2)' }}>Guardrails</h6>
+        <div className="rail-extra"><h6 className="caps" style={{ paddingLeft: 'var(--space-3)', marginBottom: 'var(--space-2)' }}>Guardrails</h6>
           <ol>
             <li><a href="#conc" onClick={(e) => { e.preventDefault(); setEditLimit(limit) }}><Icon name="shield" />Event ≤ {limit}%<span className="count">edit</span></a></li>
           </ol>
@@ -138,11 +142,11 @@ export default function Risk() {
           <Card id="ladder">
             <CardHeader title="Downside ladder" sub="Loss if your N largest events all go against you · hover a step, select it for the event" />
             <div className="card-b">
-              <svg viewBox="0 0 480 220" width="100%" style={{ overflow: 'visible' }} className="chart" role="group" aria-label={`Downside ladder: largest event ${sfmt(-exps[0].cost)}, top three ${sfmt(-top3)}, all events ${sfmt(-committed)}`} onPointerLeave={() => setHotStep(null)}>
-                <g className="axis">{[0, 10000, 20000, 30000].map((t) => <g key={t}><line className="grid-l" x1={48} x2={470} y1={10 + (t / 30000) * 182} y2={10 + (t / 30000) * 182} strokeDasharray="2 4" /><text x={40} y={14 + (t / 30000) * 182} textAnchor="end">{t ? `−${kfmt(t)}` : '$0'}</text></g>)}
-                  {exps.map((_, i) => <text key={i} x={48 + i * (422 / exps.length) + 211 / exps.length} y={212} textAnchor="middle">{i + 1}</text>)}</g>
+              <div ref={ladderRef}><svg viewBox={`0 0 ${LW} 220`} width="100%" style={{ overflow: 'visible' }} className="chart" role="group" aria-label={`Downside ladder: largest event ${sfmt(-exps[0].cost)}, top three ${sfmt(-top3)}, all events ${sfmt(-committed)}`} onPointerLeave={() => setHotStep(null)}>
+                <g className="axis">{ladderTicks.map((t) => <g key={t}><line className="grid-l" x1={48} x2={LW - 10} y1={10 + (t / ladderMax) * 182} y2={10 + (t / ladderMax) * 182} strokeDasharray="2 4" /><text x={40} y={14 + (t / ladderMax) * 182} textAnchor="end">{t ? `−${kfmt(t)}` : '$0'}</text></g>)}
+                  {exps.map((_, i) => <text key={i} x={48 + (i + 0.5) * ((LW - 58) / exps.length)} y={212} textAnchor="middle">{i + 1}</text>)}</g>
                 {exps.map((e, i) => {
-                  const bw = 422 / exps.length, x0 = 48 + i * bw, y = (v: number) => 10 + (v / 30000) * 182, prev = i ? ladder[i - 1] : 0
+                  const bw = (LW - 58) / exps.length, x0 = 48 + i * bw, y = (v: number) => 10 + (v / ladderMax) * 182, prev = i ? ladder[i - 1] : 0
                   const on = hotStep == null ? i < 3 : i <= hotStep
                   return (
                     <g key={e.event.id} onPointerEnter={() => setHotStep(i)} onFocus={() => setHotStep(i)} onBlur={() => setHotStep(null)} className="hoverable step" role="button" tabIndex={0}
@@ -153,7 +157,7 @@ export default function Risk() {
                     </g>
                   )
                 })}
-              </svg>
+              </svg></div>
               <div className="ministat">
                 {hotStep == null ? <>
                   <div><div className="l">Largest event</div><div className="v loss">{sfmt(-exps[0].cost)}</div></div>
@@ -236,13 +240,15 @@ export default function Risk() {
 }
 
 function Calendar({ exps, range, hot, setHot, onPick }: { exps: EventExposure[]; range: '90 days' | '12 months'; hot: string | null; setHot: (k: string | null) => void; onPick: (id: string) => void }) {
-  const W = 560, base = 150, L = 16, R = 16, days = range === '90 days' ? 90 : 420
+  const [wrap, W] = useWidth<HTMLDivElement>(560)
+  const base = 150, L = 16, R = 16, days = range === '90 days' ? 90 : 420
   const x = (d: number) => L + (d / days) * (W - L - R)
-  const ticks = range === '90 days' ? [0, 7, 21, 38, 52, 69, 83] : [0, 38, 97, 158, 219, 281, 341, 403]
+  const allTicks = range === '90 days' ? [0, 7, 21, 38, 52, 69, 83] : [0, 38, 97, 158, 219, 281, 341, 403]
+  const ticks = (W - L - R) / allTicks.length < 56 ? allTicks.filter((_, i) => i % 2 === 0) : allTicks
   const evs = exps.filter((e) => e.days <= days).sort((a, b) => a.days - b.days)
   const h = evs.find((e) => e.event.id === hot)
   return (
-    <div className="chart">
+    <div className="chart" ref={wrap}>
       <svg viewBox={`0 0 ${W} 200`} width="100%" style={{ overflow: 'visible' }} role="group" aria-label={`Resolution calendar, next ${range}: ${evs.map((e) => `${e.event.short} ${fmtDate(e.resolves)} ${kfmt(e.cost)}`).join('; ')}`}>
         <g className="axis">{ticks.map((d) => <g key={d}><line className="grid-l" x1={x(d)} x2={x(d)} y1={24} y2={base} strokeDasharray="2 4" /><text x={x(d)} y={base + 20} textAnchor="middle">{fmtDate(addDays(TODAY, d), range === '90 days' ? { month: 'short', day: 'numeric' } : { month: 'short' })}</text></g>)}</g>
         <line x1={L} x2={W - R} y1={base} y2={base} style={{ stroke: 'var(--color-border-strong)' }} />

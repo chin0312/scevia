@@ -89,3 +89,7 @@ Read [`AGENTS.md`](AGENTS.md) before changing the UI. It is short and lists the 
 - Visual intent: [`DESIGN.md`](DESIGN.md)
 - How figures are calculated: [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md)
 - Current state, limitations and integration plan: [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)
+
+---
+
+Polymarket and Kalshi names and logos are trademarks of their respective owners. They are used only to identify the platforms; Scevia is not affiliated with either.

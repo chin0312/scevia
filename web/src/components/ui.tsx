@@ -1,7 +1,6 @@
 /* Small presentational primitives. Each maps 1:1 to an entry in design-system/components.md. */
 import type { ReactNode } from 'react'
-import type { Platform, Side } from '../data/types'
-import { PLATFORM_NAME } from '../data/labels'
+import type { Side } from '../data/types'
 import { splitMoney } from '../lib/format'
 import { Icon, type IconName } from './Icon'
 import { InfoTip } from './overlays'
@@ -68,7 +67,7 @@ export function Chip({ tone, children }: { tone?: 'yes' | 'no' | 'warn' | 'info'
   return <span className={cx('chip', tone)}>{children}</span>
 }
 export const SideChip = ({ side }: { side: Side }) => <Chip tone={side === 'YES' ? 'yes' : 'no'}>{side}</Chip>
-export const PlatformBadge = ({ p }: { p: Platform }) => <span className={cx('plat', p)} title={PLATFORM_NAME[p]}>{p === 'pm' ? 'P' : 'K'}</span>
+export { PlatformBadge } from './PlatformLogo'
 
 export function Delta({ value, children, tone }: { value?: number; children: ReactNode; tone?: 'gain' | 'loss' | 'flat' }) {
   const t = tone ?? (value == null || Math.abs(value) < 0.5 ? 'flat' : value > 0 ? 'gain' : 'loss')

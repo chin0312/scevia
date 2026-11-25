@@ -1,13 +1,30 @@
 /* Hand-rolled SVG charts (no chart library): line/area with crosshair tooltip, donut with hover. */
-import { useId, useRef, useState, type ReactNode } from 'react'
+import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { cx } from './ui'
+
+/** Measures an element's width so SVG charts can draw 1:1 (axis text stays readable at any size). */
+export function useWidth<T extends HTMLElement>(fallback: number) {
+  const ref = useRef<T>(null)
+  const [w, setW] = useState(fallback)
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const measure = () => { const v = Math.round(el.getBoundingClientRect().width); if (v > 0) setW(v) }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  return [ref, w] as const
+}
 
 export interface Series { data: number[]; color: string; area?: number; dash?: string; step?: boolean; width?: number }
 
-export function LineChart({ label = 'Line chart', series, w = 820, h = 250, min, max, yTicks, yFmt, xTicks, events, tooltip, hoverSeries = series.length - 1, pad }: {
+export function LineChart({ label = 'Line chart', series, w: wFallback = 820, h = 250, min, max, yTicks, yFmt, xTicks, events, tooltip, hoverSeries = series.length - 1, pad }: {
   label?: string; series: Series[]; w?: number; h?: number; min: number; max: number; yTicks: number[]; yFmt: (v: number) => string
   xTicks: [number, string][]; events?: number[]; tooltip?: (i: number) => ReactNode; hoverSeries?: number; pad?: Partial<{ l: number; r: number; t: number; b: number }>
 }) {
+  const [wrap, w] = useWidth<HTMLDivElement>(wFallback)
   const P = { l: 48, r: 12, t: 12, b: 26, ...pad }
   const n = series[0].data.length
   const x = (i: number) => P.l + (i / (n - 1)) * (w - P.l - P.r)
@@ -30,7 +47,7 @@ export function LineChart({ label = 'Line chart', series, w = 820, h = 250, min,
   const tipLeft = hover != null ? (x(hover) / w) * 100 : 0
 
   return (
-    <div className="chart">
+    <div className="chart" ref={wrap}>
       <svg ref={ref} role="img" aria-label={label} viewBox={`0 0 ${w} ${h}`} width="100%" style={{ overflow: 'visible' }} onPointerMove={onMove} onPointerLeave={() => setHover(null)}>
         <g className="axis">
           {yTicks.map((t) => (

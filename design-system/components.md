@@ -10,6 +10,29 @@ Required states for every interactive component: **default, hover, focus-visible
 - **TopNav** `.topbar`: brand wordmark (`/brand/scevia-logo.png`, 28px tall), the 4 areas (Overview, Analytics, Risk, Scenario Lab), utilities on the right (search ⌘K, sync status, data-mode chip, help, alerts, settings, avatar). Don't add more top-level areas. New things become sections.
 - **SectionRail** `SectionRail` (`.rail`, `.rail-sub`): this page's sections as jump links. Cards that share a row are **one group** (the row container has the group id) with one child entry per card, so side-by-side cards never compete for the active state. Scroll-spy tracks groups only. A click (or a `#hash` link) scrolls to the target, focuses it (`tabindex=-1`) and flashes it (`.section-flash`), and keeps that entry active until the user scrolls themselves (wheel, touch, PageUp/Down, arrows, Home/End, Space); reaching the bottom of the page never overrides it. Exactly one entry has `aria-current="location"`. Also holds saved scenarios and one context card. One level of children at most.
 
+## Responsive behaviour (`web/src/styles/responsive.css`)
+Designed for 1280–1600px; smaller screens reflow instead of shrinking.
+- **≤1400px:** three-card rows weight the first card (1.3fr).
+- **≤1100px:**
+  - one column;
+  - the SectionRail becomes a sticky horizontal section bar (children, context cards and counts hidden; Scenario Lab keeps its scenario switcher via `.rail-keep`; page-only extras use `.rail-extra`);
+  - the search button becomes icon-only;
+  - 3-card rows become 2 + full-width first card.
+- **≤900px:** primary nav moves to its own row; the data chip drops the date.
+- **≤640px:**
+  - the top bar scrolls away;
+  - tiles go two per row;
+  - drawers go full width;
+  - Settings is hidden (its items stay reachable from the data chip, Help and Risk).
+- **Card internals use container queries** (`.card` is an inline-size container), so the same card adapts in a narrow column or full width:
+  - allocation stacks;
+  - concentration names wrap above their bars;
+  - payoff rows restack;
+  - comparison grids collapse.
+- **Charts** draw at their measured width (`useWidth`), so axis text stays at its real size; dense axes thin their labels.
+- **Figures** (`.tile .v`, `.hl-tile .v`, `.cell .v`, `.ministat .v`, `.hero-fig`) never wrap; they get smaller instead.
+- **Touch:** charts use `touch-action: pan-y` so the page still scrolls over them.
+
 ## Layout and text
 - **PageHeader** `.page-head`: caption (scope + period), H1 answering the page's question, actions on the right (max one primary). Don't put KPIs in it.
 - **Card** `.card` + `.card-h` + `.card-b`: the only container. Use for any chart, table, or grouped content. Don't nest cards. Use `.divider` inside.
@@ -33,7 +56,8 @@ Required states for every interactive component: **default, hover, focus-visible
 ## Data display
 - **Inspectable rows** (`.conc-btn`, `.po-btn`, `.attr-btn`, `.bucket-btn`, `.tl-btn`, `.list-btn`, chart steps `.step`, calendar `.cal-dot`): rows and chart marks that open a detail panel are real buttons (or `role="button"` with Enter/Space), with hover, focus-visible and, when empty, disabled states.
 - **Chip** `.chip` (+ `.yes .no .warn .info .accent`): status, side, or relationship labels. Text is required. Don't make chips clickable unless they're filters.
-- **PlatformBadge** `.plat.pm|.ks`: Polymarket/Kalshi marker with a letter and a title tooltip.
+- **PlatformBadge** `PlatformBadge` (`PlatformLogo.tsx`, `.plat.pm|.ks`): the official platform marks (Polymarket icon on its blue; Kalshi “K” in its green on canvas), `role="img"` with the platform name. Colours come from `--color-platform-*`; paths use `currentColor`. Never redraw or recolour the marks.
+- **PlatformWordmark** `PlatformWordmark`: full official wordmark, only where there is room (Data sources).
 - **DataTable** `table.dt`: dense rows, sticky header, right-aligned numbers, row hover reveals a row action (e.g. Simulate). Empty → EmptyState in the table body. Partial → a footnote row.
 - **PayoffBar** `.payoff`: if-for / if-against two-sided bar for one position or event. Always labelled with the signed amount.
 - **ChartFrame** `.chart`: SVG chart with axis labels, direct labels or a legend, and a tooltip. Must have a text alternative (table toggle or summary).

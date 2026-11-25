@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Icon } from '../components/Icon'
 import { Menu, Modal, useToast } from '../components/overlays'
+import { useWidth } from '../components/charts'
 import { RelationshipModal } from '../components/relationships'
 import { SectionRail, useHashScroll, type RailSection } from '../components/shell'
 import { Button, Callout, Card, CardHeader, Chip, PlatformBadge, SideChip, Tabs, cx } from '../components/ui'
@@ -168,7 +169,7 @@ export default function ScenarioLab() {
   return (
     <div className="shell">
       <SectionRail sections={RAIL}>
-        <div>
+        <div className="rail-keep">
           <h6 className="caps" style={{ paddingLeft: 'var(--space-3)', marginBottom: 'var(--space-2)' }}>Scenarios</h6>
           <div className="scn" role="listbox" aria-label="Scenarios">
             <a href="#adjust" role="option" aria-selected={isBase} className={cx(isBase && 'on')} onClick={(e) => { e.preventDefault(); setActiveKey('base'); setRenaming(false) }}><i style={{ background: 'var(--color-text-tertiary)' }} />Current portfolio<small>base</small></a>
@@ -424,16 +425,20 @@ function Dumbbell({ events, base, S }: { events: RiskEvent[]; base: Simulation; 
   const val = (sim: Simulation, e: RiskEvent, forYou: boolean) => { const s = sideOf(e); return groupPnl(sim, [e.id], { [e.id]: forYou ? s : s === 'YES' ? 'NO' : 'YES' }) }
   const vals = events.flatMap((e) => [true, false].flatMap((w) => [val(base, e, w), val(S, e, w)]))
   const lim = Math.ceil(Math.max(3000, ...vals.map(Math.abs)) / 1000) * 1000
-  const W = 600, rowH = 76, H = events.length * rowH + 30, X = (v: number) => 220 + ((v + lim) / (2 * lim)) * (W - 240)
+  const [wrap, W] = useWidth<HTMLDivElement>(600)
+  // Narrow: event names sit above their rows instead of in a left column.
+  const compact = W < 480, left = compact ? 84 : 220, top = compact ? 24 : 0
+  const rowH = 76 + top, H = events.length * rowH + 30, X = (v: number) => left + ((v + lim) / (2 * lim)) * (W - left - 20)
+  const maxName = compact ? Math.floor(W / 8) : 26
   return (
-    <div className="chart">
+    <div className="chart" ref={wrap}>
       <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ overflow: 'visible' }} role="img" aria-label={events.map((e) => `${e.short}: if for you ${sfmt(val(base, e, true))} → ${sfmt(val(S, e, true))}; if against ${sfmt(val(base, e, false))} → ${sfmt(val(S, e, false))}`).join('. ')}>
         <g className="axis">{[-lim, -lim / 2, 0, lim / 2, lim].map((t) => <g key={t}><line className={t ? 'grid-l' : 'zero'} x1={X(t)} x2={X(t)} y1={4} y2={H - 26} strokeDasharray={t ? '2 4' : undefined} /><text x={X(t)} y={H - 8} textAnchor="middle">{t ? `${t > 0 ? '+' : ''}${kfmt(t)}` : '$0'}</text></g>)}</g>
         {events.map((e, i) => {
-          const y0 = 20 + i * rowH
+          const y0 = 20 + i * rowH + top
           return (
             <g key={e.id}>
-              <text className="name" x={0} y={y0 + 18}>{e.name.length > 26 ? `${e.name.slice(0, 25)}…` : e.name}</text>
+              <text className="name" x={0} y={compact ? y0 - 14 : y0 + 18}>{e.name.length > maxName ? `${e.name.slice(0, maxName - 1)}…` : e.name}</text>
               {([[true, 'if for you', y0], [false, 'if against', y0 + 28]] as const).map(([w, lab, yy]) => {
                 const b = val(base, e, w), a = val(S, e, w)
                 return (
@@ -442,7 +447,7 @@ function Dumbbell({ events, base, S }: { events: RiskEvent[]; base: Simulation; 
                     <line x1={X(b)} x2={X(a)} y1={yy} y2={yy} style={{ stroke: 'var(--color-accent-solid)' }} strokeWidth={3} opacity={0.55} />
                     <circle cx={X(b)} cy={yy} r={5} style={{ fill: 'var(--color-bg-surface)', stroke: 'var(--color-text-secondary)' }} strokeWidth={1.6} />
                     <circle cx={X(a)} cy={yy} r={6} style={{ fill: 'var(--color-accent-fg)' }} />
-                    <text className="lbl" x={Math.max(X(a), X(b)) + 11} y={yy + 4} style={{ fill: a >= 0 ? 'var(--color-gain-fg)' : 'var(--color-loss-fg)' }}>{sfmt(a)}</text>
+                    {(() => { const r = Math.max(X(a), X(b)) + 11, flip = r > W - 56; return <text className="lbl" x={flip ? Math.min(X(a), X(b)) - 11 : r} textAnchor={flip ? 'end' : 'start'} y={yy + 4} style={{ fill: a >= 0 ? 'var(--color-gain-fg)' : 'var(--color-loss-fg)' }}>{sfmt(a)}</text> })()}
                   </g>
                 )
               })}

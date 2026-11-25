@@ -18,7 +18,7 @@
 
 **Accessibility:** WCAG 2.1 AA. Colour never carries meaning alone (YES/NO and gain/loss always have a sign, label, or icon). Fully keyboard operable. Respect reduced motion.
 
-**Platform:** Desktop web first (1280–1600). Mobile later, with Overview and single-event What-if first.
+**Platform:** Desktop web first (1280–1600). Tablet and phone widths must stay fully usable (no clipped content or sideways scrolling); a dedicated mobile design comes later, with Overview and single-event What-if first.
 
 ## Scope
 

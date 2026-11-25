@@ -209,7 +209,7 @@ test('section rail: one active entry; an explicit choice survives reaching the b
 
   await rail.getByRole('link', { name: 'Downside ladder' }).click()
   await expect(rail.getByRole('link', { name: 'Downside ladder' })).toHaveAttribute('aria-current', 'location')
-  await expect(rail.getByRole('link', { name: 'By event, category, platform' })).not.toHaveAttribute('aria-current', 'location')
+  await expect(rail.getByRole('link', { name: 'Concentration', exact: true })).not.toHaveAttribute('aria-current', 'location')
   await expect(rail.locator('[aria-current]')).toHaveCount(1)
 })
 
@@ -251,4 +251,25 @@ test('relationship edited in Scenario Lab is the same one Risk uses', async ({ p
   await page.getByRole('link', { name: 'Risk' }).click()
   await expect(page.locator('#rel')).toContainText('Mutually exclusive outcomes')
   await expect(page.locator('#payoffs .foot')).toContainText('combinations excluded')
+})
+
+for (const vp of [{ name: 'phone', width: 375, height: 812 }, { name: 'tablet', width: 768, height: 1024 }]) {
+  test(`${vp.name} layout: no page reaches past the viewport; sections stay reachable`, async ({ page }) => {
+    await page.setViewportSize({ width: vp.width, height: vp.height })
+    for (const path of ['/overview', '/analytics', '/risk', '/scenario-lab']) {
+      await page.goto(path)
+      await expect(page.locator('main h1')).toBeVisible()
+      const over = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
+      expect(over, `${path} overflows by ${over}px`).toBeLessThanOrEqual(1)
+      await expect(page.getByRole('complementary', { name: 'Sections on this page' }).getByRole('link').first()).toBeVisible()
+    }
+  })
+}
+
+test('platform badges use the official marks and keep their names for assistive tech', async ({ page }) => {
+  await page.goto('/overview')
+  const badge = page.locator('#holdings .plat').first()
+  await expect(badge).toHaveAttribute('role', 'img')
+  await expect(badge.locator('svg path')).toHaveCount(1)
+  expect(await badge.getAttribute('aria-label')).toMatch(/^(Polymarket|Kalshi)$/)
 })

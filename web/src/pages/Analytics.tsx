@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState } from 'react'
+import { useWidth } from '../components/charts'
 import { useDetails } from '../components/details'
 import { SectionRail, useHashScroll, type RailSection } from '../components/shell'
 import { Button, Callout, Card, CardHeader, Chip, Delta, Legend, PageHead, Pills, Seg, Tabs, cx } from '../components/ui'
@@ -20,7 +21,8 @@ const toFilter = (l: PlatformLabel): PlatformFilter => (l === 'Polymarket' ? 'pm
 const monthLabel = (m: string) => fmtDate(`${m}-01`, { month: 'short' })
 
 function PnlChart({ f, start, end, prior, stats, tab, onMonth }: { f: PlatformFilter; start: string; end: string; prior: { start: string; end: string } | null; stats: PeriodStats; tab: 'Net' | 'Realized' | 'By platform'; onMonth: (m: string) => void }) {
-  const W = 760, H = 330, P = { l: 52, r: 12, t: 16, b: 26 }
+  const [wrap, W] = useWidth<HTMLDivElement>(760)
+  const H = 330, P = { l: 52, r: 12, t: 16, b: 26 }
   const base = (pts: { netPnl: number }[]) => pts.map((p) => p.netPnl - pts[0].netPnl)
   const cur = useMemo(() => base(series(f, start, end)), [f, start, end])
   const pri = useMemo(() => (prior ? base(series(f, prior.start, prior.end)) : null), [f, prior])
@@ -40,11 +42,11 @@ function PnlChart({ f, start, end, prior, stats, tab, onMonth }: { f: PlatformFi
   for (let t = min; t <= max; t += step) ticks.push(t)
   const end1 = cur.at(-1) ?? 0
   return (
-    <div className="chart">
+    <div className="chart" ref={wrap}>
       <svg ref={ref} role="group" aria-label={`Cumulative ${tab === 'Realized' ? 'realized' : 'net'} P&L ${fmtDate(start)} to ${fmtDate(end)}: ${sfmt(tab === 'Realized' ? realizedCum.at(-1) ?? 0 : end1)}`} viewBox={`0 0 ${W} ${H}`} width="100%" style={{ overflow: 'visible' }} onPointerLeave={() => setHover(null)}>
         <g className="axis">
           {ticks.map((t) => <g key={t}><line className={t ? 'grid-l' : 'zero'} x1={P.l} x2={W - P.r} y1={y(t)} y2={y(t)} strokeDasharray={t ? '2 4' : undefined} /><text x={P.l - 10} y={y(t) + 4} textAnchor="end">{t ? kfmt(t) : '$0'}</text></g>)}
-          {months.map((m, i) => <text key={m.month} x={P.l + i * bw + bw / 2} y={H - 6} textAnchor="middle">{monthLabel(m.month)}</text>)}
+          {months.map((m, i) => (bw >= 34 || i % Math.ceil(34 / bw) === 0) && <text key={m.month} x={P.l + i * bw + bw / 2} y={H - 6} textAnchor="middle">{monthLabel(m.month)}</text>)}
         </g>
         {tab !== 'By platform' && months.map((m, i) => {
           const bx = P.l + i * bw + bw * 0.25, w = bw * 0.5, col = m.realized >= 0 ? 'var(--color-gain-fg)' : 'var(--color-loss-fg)'
@@ -54,7 +56,7 @@ function PnlChart({ f, start, end, prior, stats, tab, onMonth }: { f: PlatformFi
               onClick={() => onMonth(m.month)} onKeyDown={(ev) => (ev.key === 'Enter' || ev.key === ' ') && (ev.preventDefault(), onMonth(m.month))}>
               <rect x={P.l + i * bw} y={P.t} width={bw} height={H - P.t - P.b} className="hit" />
               <rect x={bx} y={Math.min(y(m.realized), y(0))} width={w} height={Math.max(1, Math.abs(y(m.realized) - y(0)))} rx={4} style={{ fill: col }} opacity={hover === i ? 0.5 : 0.28} />
-              {months.length <= 12 && <text className="lbl" x={bx + w / 2} y={m.realized >= 0 ? y(m.realized) - 6 : y(m.realized) + 14} textAnchor="middle" style={{ fill: col }}>{sfmt(m.realized)}</text>}
+              {months.length <= 12 && bw >= 44 && <text className="lbl" x={bx + w / 2} y={m.realized >= 0 ? y(m.realized) - 6 : y(m.realized) + 14} textAnchor="middle" style={{ fill: col }}>{sfmt(m.realized)}</text>}
             </g>
           )
         })}

@@ -100,7 +100,7 @@ button.itip:hover { color: var(--color-text-primary); border-color: var(--color-
 .empty { display: flex; flex-direction: column; align-items: center; gap: var(--space-2); padding: var(--space-8); color: var(--color-text-tertiary); font-size: var(--font-size-sm); text-align: center; }
 
 /* Charts: interactive layer */
-.chart svg { touch-action: none; }
+.chart svg { touch-action: pan-y; }
 .chart .hit { fill: transparent; cursor: crosshair; }
 .hoverable { cursor: pointer; transition: opacity var(--motion-duration-fast); }
 .dim .hoverable { opacity: .35; }
@@ -258,3 +258,4 @@ button.choice > svg:last-child { margin-left: auto; color: var(--color-text-tert
 .pos-li-m small { display: flex; gap: var(--space-1); align-items: center; flex-wrap: wrap; font-size: var(--font-size-xs); }
 .pos-li-r { text-align: right; white-space: nowrap; font-size: var(--font-size-sm); }
 .pos-li-r small { font-size: var(--font-size-xs); }
+.source-row .wordmark { margin-bottom: var(--space-1); }

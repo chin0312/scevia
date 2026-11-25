@@ -28,7 +28,7 @@ _Last updated: 2026-11-25_
   - the assumed fill price is applied to the whole size.
 - **Relationships:** only the BTC × ETH relationship is user-classifiable; others are fixed in the data or unclassified. Equivalent contracts are modelled by sharing an `eventId`.
 - **Persistence:** none beyond the session. The guardrail is a single per-event limit.
-- **Layout:** desktop only (≥ 1280 px). Mobile is not designed yet.
+- **Layout:** designed for desktop (1280–1600 px). Tablet and phone widths reflow and are covered by e2e overflow checks, but have no dedicated mobile design yet.
 - **Lint:** remaining oxlint warnings are React Compiler advisories (fast-refresh boundaries; setState in effects for URL/input sync).
 
 ## Technical debt

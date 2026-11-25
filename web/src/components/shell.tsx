@@ -63,8 +63,8 @@ function TopNav({ onSearch, onInfo }: { onSearch: () => void; onInfo: (k: 'calc'
         ))}
       </nav>
       <div className="utils">
-        <button type="button" className="search" onClick={onSearch} aria-keyshortcuts="Meta+K"><Icon name="search" size={15} /><span>Search pages, positions, events…</span><kbd>⌘K</kbd></button>
-        <button type="button" className="chip accent chip-btn" title="You’re viewing a fictional sample portfolio. No account is connected." onClick={() => connect()}>Sample portfolio · {fmtDate(TODAY)}</button>
+        <button type="button" className="search" onClick={onSearch} aria-keyshortcuts="Meta+K" aria-label="Search pages, positions, events"><Icon name="search" size={15} /><span>Search pages, positions, events…</span><kbd>⌘K</kbd></button>
+        <button type="button" className="chip accent chip-btn" title="You’re viewing a fictional sample portfolio. No account is connected." onClick={() => connect()}>Sample portfolio<span className="chip-date"> · {fmtDate(TODAY)}</span></button>
         <Menu label="Help" width={300} trigger={(t) => <button type="button" className="icon-btn" aria-label="Help" {...t}><Icon name="help" size={18} /></button>}>
           {(close) => (<>
             <div className="menu-h">Help</div>
