@@ -57,7 +57,6 @@ Designed for 1280–1600px; smaller screens reflow instead of shrinking.
 - **Inspectable rows** (`.conc-btn`, `.po-btn`, `.attr-btn`, `.bucket-btn`, `.tl-btn`, `.list-btn`, chart steps `.step`, calendar `.cal-dot`): rows and chart marks that open a detail panel are real buttons (or `role="button"` with Enter/Space), with hover, focus-visible and, when empty, disabled states.
 - **Chip** `.chip` (+ `.yes .no .warn .info .accent`): status, side, or relationship labels. Text is required. Don't make chips clickable unless they're filters.
 - **PlatformBadge** `PlatformBadge` (`PlatformLogo.tsx`, `.plat.pm|.ks`): the official platform marks (Polymarket icon on its blue; Kalshi “K” in its green on canvas), `role="img"` with the platform name. Colours come from `--color-platform-*`; paths use `currentColor`. Never redraw or recolour the marks.
-- **PlatformWordmark** `PlatformWordmark`: full official wordmark, only where there is room (Data sources).
 - **DataTable** `table.dt`: dense rows, sticky header, right-aligned numbers, row hover reveals a row action (e.g. Simulate). Empty → EmptyState in the table body. Partial → a footnote row.
 - **PayoffBar** `.payoff`: if-for / if-against two-sided bar for one position or event. Always labelled with the signed amount.
 - **ChartFrame** `.chart`: SVG chart with axis labels, direct labels or a legend, and a tooltip. Must have a text alternative (table toggle or summary).

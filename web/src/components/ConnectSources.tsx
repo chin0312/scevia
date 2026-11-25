@@ -8,7 +8,6 @@ import type { Platform } from '../data/types'
 import { coverage, fmtDate, sourceOf } from '../lib/finance'
 import { Icon } from './Icon'
 import { Modal } from './overlays'
-import { PlatformWordmark } from './PlatformLogo'
 import { Button, Callout, Chip, PlatformBadge, cx } from './ui'
 
 const Ctx = createContext<() => void>(() => {})
@@ -44,7 +43,7 @@ function DataSources({ onClose }: { onClose: () => void }) {
       {(['pm', 'ks'] as Platform[]).map((p) => (
         <div className="source-row" key={p}>
           <PlatformBadge p={p} />
-          <div><b className="sr-only">{PLATFORM_NAME[p]}</b><PlatformWordmark p={p} height={p === 'pm' ? 16 : 18} /><small>{METHOD[p]}</small></div>
+          <div><b>{PLATFORM_NAME[p]}</b><small>{METHOD[p]}</small></div>
           <span className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>Not connected</span>
           <Button size="sm" disabled title="Not available in this version">Connect</Button>
         </div>

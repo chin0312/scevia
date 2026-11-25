@@ -129,9 +129,6 @@ main { padding: var(--space-6) var(--space-8) var(--space-16) var(--space-4); mi
 .plat { width: 22px; height: 22px; border-radius: var(--radius-sm); display: inline-grid; place-items: center; font-size: var(--font-size-caption); font-weight: var(--font-weight-semibold); color: var(--color-action-primary-bg); flex: none; }
 .plat.pm { background: var(--color-platform-polymarket); color: var(--color-action-primary-bg); }
 .plat.ks { background: var(--color-bg-canvas); color: var(--color-platform-kalshi); box-shadow: inset 0 0 0 1px var(--color-border-default); }
-.wordmark { display: block; width: auto; }
-.wordmark.pm { color: var(--color-text-primary); }
-.wordmark.ks { color: var(--color-platform-kalshi); }
 
 /* ── Table ───────────────────────────────── */
 table.dt { width: 100%; border-collapse: collapse; }
