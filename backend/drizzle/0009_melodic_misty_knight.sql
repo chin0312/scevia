@@ -1,0 +1,3 @@
+ALTER TABLE "scevia"."financial_import_batches" ADD COLUMN "associated_account_id" uuid;--> statement-breakpoint
+ALTER TABLE "scevia"."financial_import_batches" ADD COLUMN "source_links" jsonb DEFAULT '{}'::jsonb NOT NULL;--> statement-breakpoint
+ALTER TABLE "scevia"."financial_import_batches" ADD CONSTRAINT "financial_import_batches_associated_account_id_provider_accounts_id_fk" FOREIGN KEY ("associated_account_id") REFERENCES "scevia"."provider_accounts"("id") ON DELETE cascade ON UPDATE no action;

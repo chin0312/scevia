@@ -157,6 +157,43 @@ describe('migrations and canonical persistence', () => {
     expect(unauthorized.statusCode).toBe(404)
   })
 
+  it('replays synchronized provider evidence and coalesces an explicitly linked CSV observation', async () => {
+    await new IngestionService(database, providerRegistry).syncProviderAccount(MULTI_ACCOUNT_ROW_ID)
+    const app = await createTestApp()
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const prefix = `/v1/portfolios/${PORTFOLIO_ID}`
+    const read = () => app.inject({ method: 'GET', url: prefix + '/accounting?asOf=2026-11-25T02:00:00Z', headers })
+    const initial = await read()
+    expect(initial.statusCode).toBe(200)
+    const before = initial.json()
+    expect(before.status).toBe('partial')
+    const fill = before.events.find((event: { id: string }) => event.id === 'fill:fill-multi-001')
+    expect(fill).toMatchObject({ quantity: '12.000000000000000001', account: MULTI_ACCOUNT_ROW_ID, fee: null })
+    expect(before.ledger.filter((entry: { eventId: string }) => entry.eventId === fill.economicId)).toHaveLength(1)
+    expect(before.snapshots.positions).toContainEqual(expect.objectContaining({
+      account: MULTI_ACCOUNT_ROW_ID, quantity: '12.000000000000000001', knownQuantity: '12.000000000000000001',
+      status: 'observed_components_match',
+    }))
+    expect(before.snapshots.cash).toContainEqual(expect.objectContaining({ status: 'not_comparable' }))
+    const header = 'venue,account,id,timestamp,sequence,type,instrument,asset,quantity,price,amount,fee,fee_asset'
+    const csv = [header, `fixture-multisided,local,csv-trade,2026-11-20T12:30:00Z,,buy,${fill.instrument},USD,12.000000000000000001,0.234567890123456789,,,`].join('\n')
+    const create = (providerAccountId: string, sourceLinks?: Record<string, string>) => app.inject({
+      method: 'POST', url: prefix + '/imports/preview', headers, payload: { csv, providerAccountId, sourceLinks },
+    })
+    expect((await create('00000000-0000-4000-8000-000000000999')).statusCode).toBe(404)
+    const preview = await create(MULTI_ACCOUNT_ROW_ID, { 'csv-trade': fill.sources[0].sourceRecordId })
+    expect(preview.statusCode).toBe(200)
+    const confirm = (batchId: string) => app.inject({ method: 'POST', url: prefix + '/imports/' + batchId + '/confirm', headers })
+    expect((await confirm(preview.json().batchId)).statusCode).toBe(200)
+    const overlap = await create(MULTI_ACCOUNT_ROW_ID)
+    expect(overlap.statusCode).toBe(200)
+    expect((await confirm(overlap.json().batchId)).statusCode).toBe(200)
+    const after = (await read()).json()
+    expect(after.events.find((event: { economicId: string }) => event.economicId === fill.economicId).sources).toHaveLength(2)
+    expect(after.ledger).toEqual(before.ledger)
+    expect(after.discrepancies).toContainEqual(expect.objectContaining({ reason: 'cross_source_overlap_unresolved' }))
+  })
+
   it('applies a clean migration set and rejects inconsistent fee values', async () => {
     const ingestion = new IngestionService(database, providerRegistry)
     const result = await ingestion.syncProviderAccount({

@@ -1,37 +1,47 @@
 import { Decimal } from 'decimal.js'
 import { z } from 'zod'
 
-const types = ['opening_cash', 'opening_position', 'buy', 'sell', 'deposit', 'withdrawal', 'fee', 'rebate', 'reward', 'settlement', 'redemption', 'mark', 'split', 'merge'] as const
+import { financialEventTypes as types, type FinancialObservation } from './model.js'
 const columns = ['venue', 'account', 'id', 'timestamp', 'sequence', 'type', 'instrument', 'asset', 'quantity', 'price', 'amount', 'fee', 'fee_asset'] as const
 const identifier = /^[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,159}$/
 const decimal = /^-?\d{1,20}(?:\.\d{1,18})?$/
 const time = z.iso.datetime({ offset: true })
 
-export interface FinancialObservation {
-  venue: string
-  account: string
-  id: string | null
-  timestamp: string
-  sequence: number | null
-  type: typeof types[number]
-  instrument: string | null
-  asset: string
-  quantity: string | null
-  price: string | null
-  amount: string | null
-  fee: string | null
-  feeAsset: string | null
-}
 
 export function parseFinancialCsv(input: string) {
   const table = csvRows(input.replace(/^\uFEFF/, ''))
   const header = table.shift()
-  if (!header || header.join(',') !== columns.join(',')) throw new Error('invalid_csv_header')
+  const allowed: readonly string[] = [...columns, 'entitlement_id', 'counter_instrument', 'primary_basis_fraction', 'related_event_id']
+  if (!header || new Set(header).size !== header.length || header.some((name) => !allowed.includes(name))
+    || columns.some((name) => !header.includes(name))) throw new Error('invalid_csv_header')
   if (table.length === 0) throw new Error('empty_csv')
   const rows: FinancialObservation[] = []
   const issues: Array<{ row: number; code: string }> = []
   for (const [index, cells] of table.entries()) {
-    try { rows.push(normalize(cells)) }
+    try {
+      if (cells.length !== header.length) throw new Error('invalid_column_count')
+      const row = normalize(columns.map((name) => cells[header.indexOf(name)]!))
+      const entitlement = cells[header.indexOf('entitlement_id')]?.trim()
+      if (entitlement) {
+        if (row.type !== 'redemption' || !identifier.test(entitlement)) throw new Error('invalid_entitlement_reference')
+        row.entitlementId = entitlement
+      }
+      const related = cells[header.indexOf('related_event_id')]?.trim()
+      if (related) {
+        if (!['fee', 'rebate'].includes(row.type) || !identifier.test(related)) throw new Error('invalid_fee_event_reference')
+        row.relatedEventId = related
+      }
+      const counter = cells[header.indexOf('counter_instrument')]?.trim()
+      const fraction = cells[header.indexOf('primary_basis_fraction')]?.trim()
+      if (counter || fraction) {
+        if (!['split', 'merge'].includes(row.type) || !counter || !identifier.test(counter)
+          || !row.instrument || counter === row.instrument || !row.quantity || row.quantity === '0'
+          || row.amount !== row.quantity || !fraction || !decimal.test(fraction)
+          || new Decimal(fraction).lt(0) || new Decimal(fraction).gt(1)) throw new Error('invalid_complete_set')
+        row.completeSet = { counterInstrument: counter, primaryBasisFraction: new Decimal(fraction).toFixed() }
+      }
+      rows.push(row)
+    }
     catch (error) { issues.push({ row: index + 2, code: (error as Error).message }) }
   }
   return { rows, issues, totalRows: table.length }
@@ -59,7 +69,7 @@ function csvRows(input: string): string[][] {
     } else if (char === '"' && !closed && cell.length === 0) quoted = true
     else if (closed || char === '"') throw new Error('invalid_csv_quote')
     else cell += char
-    if (cell.length > 200 || row.length > columns.length || rows.length > 2001) throw new Error('csv_limit_exceeded')
+    if (cell.length > 200 || row.length > columns.length + 4 || rows.length > 2001) throw new Error('csv_limit_exceeded')
   }
   if (quoted) throw new Error('invalid_csv_quote')
   if (row.length || cell.length || closed) rows.push([...row, cell])
@@ -84,11 +94,13 @@ function normalize(cells: string[]): FinancialObservation {
   const trade = kind === 'buy' || kind === 'sell'
   const inventory = trade || kind === 'opening_position' || kind === 'settlement' || kind === 'redemption'
   if ((inventory || kind === 'mark') && !instrument) throw new Error('instrument_required')
-  if (inventory && (q === null || q === '0')) throw new Error('positive_quantity_required')
-  if ((trade || kind === 'mark' || kind === 'settlement') && (p === null || new Decimal(p).gt(1))) throw new Error('invalid_outcome_price')
-  if (!inventory && kind !== 'mark' && kind !== 'split' && kind !== 'merge' && a === null) throw new Error('amount_required')
+  if (inventory && (q === null || (q === '0' && kind !== 'opening_position'))) throw new Error('positive_quantity_required')
+  if ((trade || kind === 'mark' || kind === 'settlement') && (p === null || (kind !== 'settlement' && new Decimal(p).gt(1)))) throw new Error('invalid_outcome_price')
+  if (!inventory && kind !== 'mark' && kind !== 'split' && kind !== 'merge' && kind !== 'opening_inventory' && a === null) throw new Error('amount_required')
+  if (kind === 'opening_inventory' && a !== null) throw new Error('unexpected_amount')
+  if (kind === 'opening_position' && q === '0' && a !== null && a !== '0') throw new Error('invalid_zero_opening_basis')
   if (kind === 'redemption' && a === null) throw new Error('amount_required')
-  if (!inventory && q !== null) throw new Error('unexpected_quantity')
+  if (!inventory && kind !== 'split' && kind !== 'merge' && q !== null) throw new Error('unexpected_quantity')
   if (!(trade || kind === 'mark' || kind === 'settlement') && p !== null) throw new Error('unexpected_price')
   if ((trade || kind === 'settlement' || kind === 'mark') && a !== null) throw new Error('unexpected_amount')
   if (!(inventory || kind === 'mark' || kind === 'split' || kind === 'merge') && instrument) throw new Error('unexpected_instrument')

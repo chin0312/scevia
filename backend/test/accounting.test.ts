@@ -20,6 +20,7 @@ describe('weighted-average replay', () => {
   it('matches the independent example and excludes future marks', () => {
     const rows = evidence([
       row('opening', 0, 'opening_cash', { amount: '0' }),
+      row('inventory', 0, 'opening_inventory'),
       row('funding', 1, 'deposit', { amount: '1000' }),
       row('buy-1', 2, 'buy', { instrument: 'A', quantity: '100', price: '0.40', fee: '0' }),
       row('buy-2', 3, 'buy', { instrument: 'A', quantity: '100', price: '0.60', fee: '0' }),
@@ -36,15 +37,18 @@ describe('weighted-average replay', () => {
   it('releases weighted basis at settlement and realizes no second gain at redemption', () => {
     const rows = evidence([
       row('cash', 0, 'opening_cash', { amount: '100' }),
+      row('inventory', 0, 'opening_inventory'),
       row('buy', 1, 'buy', { instrument: 'A', quantity: '10', price: '0.4', fee: '0.10' }),
       row('resolve', 2, 'settlement', { instrument: 'A', quantity: '10', price: '0.8' }),
-      row('redeem', 3, 'redemption', { instrument: 'A', quantity: '10', amount: '8' }),
-      row('reopen', 4, 'buy', { instrument: 'A', quantity: '5', price: '0.1', fee: '0' }),
+      row('redeem-1', 3, 'redemption', { instrument: 'A', quantity: '4', amount: '3.2' }),
+      row('redeem-2', 4, 'redemption', { instrument: 'A', quantity: '6', amount: '4.8' }),
+      row('reopen', 5, 'buy', { instrument: 'A', quantity: '5', price: '0.1', fee: '0' }),
     ])
     const pending = replayAccounting(rows, time(2))
     expect(pending.holdings).toMatchObject([{ quantity: '0', pending: '8' }])
     expect(pending.cash).toMatchObject([{ balance: '95.9', realized: '3.9', portfolioValue: '103.9' }])
-    const after = replayAccounting(rows, time(4))
+    expect(replayAccounting(rows, time(3)).holdings).toMatchObject([{ pending: '4.8', pendingQuantity: '6' }])
+    const after = replayAccounting(rows, time(5))
     expect(after.holdings).toMatchObject([{ quantity: '5', basis: '0.5', pending: '0' }])
     expect(after.cash).toMatchObject([{ balance: '103.4', realized: '3.9', knownFees: '0.1' }])
   })
@@ -85,8 +89,52 @@ describe('weighted-average replay', () => {
     const result = replayAccounting(rows, time(7), true)
     expect(result.status).toBe('partial')
     expect(result.holdings).toMatchObject([{ quantity: '2', basis: '1.1' }])
-    expect(result.cash).toMatchObject([{ balance: null, knownDelta: '-3.05', netContributions: '-3', knownFees: '0.05' }])
+    expect(result.cash).toMatchObject([{ balance: null, knownDelta: '-3.05', knownDeclaredContributions: '-3', knownFees: '0.05' }])
     expect(result.discrepancies.map((issue) => issue.reason)).toEqual(['insufficient_inventory', 'complete_conversion_legs_required'])
+  })
+
+  it('allocates a declared binary conversion without creating split profit', () => {
+    const rows = evidence([
+      row('cash', 0, 'opening_cash', { amount: '100' }),
+      row('inventory', 0, 'opening_inventory'),
+      row('split', 1, 'split', { instrument: 'A', quantity: '100', amount: '100' }),
+      row('merge', 2, 'merge', { instrument: 'A', quantity: '25', amount: '25' }),
+    ])
+    for (const item of rows.slice(2)) item.observation.completeSet = { counterInstrument: 'B', primaryBasisFraction: '0.4' }
+    const split = replayAccounting(rows, time(1))
+    expect(split.cash).toMatchObject([{ balance: '0', realized: '0' }])
+    expect(split.holdings).toMatchObject([{ quantity: '100', basis: '40' }, { quantity: '100', basis: '60' }])
+    const merge = replayAccounting(rows, time(2))
+    expect(merge.cash).toMatchObject([{ balance: '25', realized: '0' }])
+    expect(merge.holdings).toMatchObject([{ quantity: '75', basis: '30' }, { quantity: '75', basis: '45' }])
+  })
+
+  it('does not repost an explicitly linked fee already attached to a fill', () => {
+    const rows = evidence([
+      row('cash', 0, 'opening_cash', { amount: '100' }),
+      row('inventory', 0, 'opening_inventory'),
+      row('buy', 1, 'buy', { instrument: 'A', quantity: '10', price: '0.4', fee: '0.2' }),
+      row('charge', 2, 'fee', { amount: '0.2' }),
+    ])
+    rows[3]!.observation.relatedEventId = 'buy'
+    const result = replayAccounting(rows, time(3))
+    expect(result.cash).toMatchObject([{ balance: '95.8', knownFees: '0.2' }])
+    expect(result.holdings).toMatchObject([{ basis: '4.2' }])
+  })
+
+  it('preserves an independently usable account when another has unresolved activity', () => {
+    const rows = evidence([
+      row('cash', 0, 'opening_cash', { amount: '100' }),
+      row('inventory', 0, 'opening_inventory'),
+      row('buy', 1, 'buy', { instrument: 'A', quantity: '10', price: '0.4', fee: '0.2' }),
+      row('sale', 2, 'sell', { instrument: 'A', quantity: '5', price: '0.7', fee: '0.1' }),
+      row('mark', 3, 'mark', { instrument: 'A', price: '0.5' }),
+      row('', 2, 'withdrawal', { amount: '3' }).replace(',wallet,', ',separate,'),
+    ])
+    const result = replayAccounting(rows, time(4))
+    expect(result.status).toBe('partial')
+    expect(result.cash).toContainEqual(expect.objectContaining({ account: 'wallet', balance: '99.2', realized: '1.3', knownFees: '0.3' }))
+    expect(result.holdings).toMatchObject([{ quantity: '5', basis: '2.1', unrealized: '0.4' }])
   })
 
   it('rejects malformed and out-of-bounds CSV', () => {
