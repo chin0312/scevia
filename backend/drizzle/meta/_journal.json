@@ -29,6 +29,27 @@
       "when": 1795588893055,
       "tag": "0003_phase1_snapshot_watermark",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1795592272953,
+      "tag": "0004_phase2_polymarket_source_facts",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1795596412953,
+      "tag": "0005_misty_sphinx",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1795600940861,
+      "tag": "0006_remarkable_magma",
+      "breakpoints": true
     }
   ]
 }

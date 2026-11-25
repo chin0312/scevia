@@ -83,7 +83,8 @@ jobs:
           assert(health.ok, 'Health endpoint did not return success')
 
           const providers = await fetch(`${baseUrl}/v1/providers`).then((response) => response.json())
-          assert(providers.items?.length === 2, 'Expected both fixture provider capabilities')
+          assert(providers.items?.length === 3, 'Expected the Polymarket adapter and both fixture provider capabilities')
+          assert(providers.items?.some((item) => item.providerCode === 'polymarket' && item.adapterKind === 'production'), 'Expected the read-only Polymarket adapter')
 
           const headers = { authorization: `Bearer ${token}` }
           const portfolios = await fetch(`${baseUrl}/v1/portfolios`, { headers }).then((response) => response.json())

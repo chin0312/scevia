@@ -7,6 +7,7 @@ const databaseEnvironmentSchema = z.object({
 })
 
 const serverEnvironmentSchema = z.object({
+  POLYMARKET_LIVE_DATA_AUTHORIZED: z.enum(['YES', 'NO']).default('NO'),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   HOST: z.string().default('127.0.0.1'),
   PORT: z.coerce.number().int().min(1).max(65_535).default(3001),
@@ -22,6 +23,7 @@ export interface DatabaseConfig {
 }
 
 export interface ServerConfig extends DatabaseConfig {
+  polymarketLiveEnabled?: boolean
   nodeEnv: 'development' | 'test' | 'production'
   host: string
   port: number
@@ -65,6 +67,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   return {
     ...database,
     nodeEnv: parsed.NODE_ENV,
+    polymarketLiveEnabled: parsed.NODE_ENV === 'development' && ['127.0.0.1', '::1', 'localhost'].includes(parsed.HOST)
+      && parsed.POLYMARKET_LIVE_DATA_AUTHORIZED === 'YES',
     host: parsed.HOST,
     port: parsed.PORT,
     authMode: 'development',

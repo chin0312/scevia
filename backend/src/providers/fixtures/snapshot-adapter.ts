@@ -80,6 +80,7 @@ export class SnapshotFixtureAdapter implements ProviderAdapter {
     operations: {
       markets: 'supported',
       fills: 'supported',
+      activity: 'unsupported',
       cash_movements: 'supported',
       settlements: 'unsupported',
       positions: 'supported',
