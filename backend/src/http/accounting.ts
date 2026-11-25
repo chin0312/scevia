@@ -796,7 +796,6 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
         originalInstrument: row.instrument, mark: candidateMark, markAt: row.markAt }
     })
     if (!buckets.length || buckets.length > 100 || holdings.length > 250) throw new ScenarioError('baseline_scope_limit')
-    if (model.effective.graphLimit) throw new ScenarioError('baseline_settlement_graph_limit')
     const rules = model.rules.filter((rule) => model.effective.graph.has(rule.market) && rule.asset === asset && rule.reviewedAt.toISOString() <= asOf
       && [rule.yes, rule.no].every((id) => listings.get(id)?.market === rule.market)
       && ['open', 'closed'].includes(listings.get(rule.yes)?.lifecycle ?? '')
@@ -808,6 +807,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       instruments: [...baselineInstruments.values()].sort((a, b) => a.id.localeCompare(b.id)),
       rules: rules.sort((a, b) => a.id.localeCompare(b.id)),
       constraints: constraints.sort((a, b) => a.left.localeCompare(b.left) || a.right.localeCompare(b.right)),
+      settlementGraphLimited: model.effective.graphLimit,
       missingRules: [...model.effective.graph].filter((id) => !rules.some((rule) => rule.id === id)).sort(),
       revisions: actual ? { public: digest(publicInstruments), financial: actual.response.context.evidenceRevision, coverage: actual.response.context.coverageRevision,
         catalog: actual.response.catalogRevision, snapshots: actual.response.snapshotRevision, settlement: actual.response.settlementEvidenceRevision }

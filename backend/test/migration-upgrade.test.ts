@@ -97,14 +97,15 @@ describe('sync integrity migration upgrade', () => {
     try {
       const { readdir } = await import('node:fs/promises')
       const directory = new URL('../drizzle/', import.meta.url)
-      const migrations = (await readdir(directory)).filter((file) => file.endsWith('.sql')).sort()
-      for (const file of migrations.slice(0, -1)) await upgraded.exec(await readFile(new URL(file, directory), 'utf8'))
+      const scenarioMigration = '0013_robust_hedge_knight.sql'
+      const migrations = (await readdir(directory)).filter((file) => file.endsWith('.sql') && file < scenarioMigration).sort()
+      for (const file of migrations) await upgraded.exec(await readFile(new URL(file, directory), 'utf8'))
       await upgraded.exec(`
         INSERT INTO scevia.users (id, auth_subject) VALUES ('00000000-0000-4000-8000-000000000001', 'existing');
         INSERT INTO scevia.portfolios (id, owner_id, name)
         VALUES ('00000000-0000-4000-8000-000000000101', '00000000-0000-4000-8000-000000000001', 'Existing portfolio');
       `)
-      await upgraded.exec(await readFile(new URL(migrations.at(-1)!, directory), 'utf8'))
+      await upgraded.exec(await readFile(new URL(scenarioMigration, directory), 'utf8'))
       expect((await upgraded.query('SELECT name FROM scevia.portfolios')).rows).toEqual([{ name: 'Existing portfolio' }])
       expect((await upgraded.query('SELECT id FROM scevia.portfolio_scenarios')).rows).toEqual([])
       await upgraded.exec(`

@@ -47,6 +47,12 @@ describe('scenario financial references', () => {
       funding: [{ endingCash: null, purchases: '50', fees: null }] })
   })
 
+  it('reports added and withdrawn capital separately from investment effects', () => {
+    const result = evaluate(starting(), { ...empty, funding: [{ bucket: 'a', added: '20', withdrawn: '30' }] })
+    expect(result).toMatchObject({ funding: [{ endingCash: '90' }], bridge: { startingValue: '100', endingValue: '90',
+      addedCapital: '20', withdrawnCapital: '30', unexplained: '0', normalizedChange: '0' } })
+  })
+
   it('freezes the explicit provider outcome and rounds supported taker fees', () => {
     const asOf = '2026-01-04T00:00:00.000Z'
     const quoted = selectPublicOutcome({ item: { eventId: 'event', markets: [{

@@ -244,6 +244,38 @@ describe('migrations and canonical persistence', () => {
     expect(wrongAccount.statusCode).toBe(422)
   })
 
+  it('freezes an explicitly selected outcome from a supported public link', async () => {
+    const requests: string[] = []
+    const marketData = new PolymarketMarketDataService(new PolymarketHttpClient(async (url) => {
+      requests.push(String(url))
+      const info = { id: 'm', slug: 'market-fixture', conditionId: 'condition', question: 'Fixture question?',
+        version: 'v1', outcomes: ['Yes', 'No'], clobTokenIds: ['101', '102'], active: true,
+        feesEnabled: true, feeSchedule: { rate: '0.05', exponent: 1, takerOnly: true } }
+      return new Response(JSON.stringify(String(url).includes('markets/slug') ? info : { '101': '0.6', '102': '0.4' }),
+        { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+    const app = await buildApp({ config: testConfig(), database, marketData })
+    openApps.push(app)
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const url = `/v1/portfolios/${PORTFOLIO_ID}/scenarios`
+    const response = await app.inject({ method: 'POST', url, headers, payload: {
+      name: 'Public outcome', source: { mode: 'scratch', asOf: '2026-11-01T00:00:00Z', asset: 'USDC',
+        buckets: [{ id: 'a', venue: 'polymarket', account: 'a', cash: '100' }],
+        publicOutcomes: [{ url: 'https://polymarket.com/market/market-fixture', assetIdType: 'clob_token_id', assetId: '102' }] },
+      input: { marks: [{ instrument: 'polymarket:clob_token_id:102', price: '0.4' }],
+        operations: [{ bucket: 'a', instrument: 'polymarket:clob_token_id:102', kind: 'buy', amount: '10', price: '0.4', fee: { mode: 'provider', role: 'taker' } }] },
+    } })
+    expect(response.statusCode, response.body).toBe(201)
+    expect(response.json().baseline.instruments).toMatchObject([{ id: 'polymarket:clob_token_id:102', outcome: 'No',
+      mark: null, settlementAsset: 'USDC', feeSchedule: { rate: '0.05' } }])
+    const roundTrips = requests.length
+    const evaluated = await app.inject({ method: 'POST', url: url + '/evaluate', headers, payload: { scenarioId: response.json().id } })
+    expect(evaluated.statusCode, evaluated.body).toBe(200)
+    expect(evaluated.json()).toMatchObject({ bridge: { endingValue: '99.88', unexplained: '0' },
+      operations: [{ feeAmount: '0.12' }], settlement: { verified: { unsupported: [expect.any(String)] } } })
+    expect(requests.length).toBe(roundTrips)
+  })
+
   it('persists isolated scratch scenarios with explicit revisions and unsaved evaluation', async () => {
     const app = await createTestApp()
     const headers = { authorization: `Bearer ${TOKEN}` }

@@ -21,6 +21,7 @@ export interface ScenarioBaseline {
   buckets: FundingBucket[]; instruments: ScenarioInstrument[]; holdings: ScenarioHolding[]
   rules: Omit<BinaryGroup, 'legs'>[]; constraints: SettlementConstraint[]
   missingRules?: string[]
+  settlementGraphLimited?: boolean
   revisions: Record<string, string>
 }
 export type Fee =
@@ -33,7 +34,7 @@ export interface Operation {
 }
 export interface ScenarioInput {
   operations: Operation[]
-  funding: Array<{ bucket: string; added: string; assumedCash?: string | undefined }>
+  funding: Array<{ bucket: string; added: string; withdrawn?: string | undefined; assumedCash?: string | undefined }>
   marks: Array<{ instrument: string; price: string }>
   rules: Array<Omit<BinaryGroup, 'legs' | 'fixed' | 'asset' | 'unitPayout'> & { unitPayout?: string | undefined }>
   constraints: SettlementConstraint[]
@@ -48,7 +49,7 @@ export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
   if (baseline.methodology !== methodology) throw new ScenarioError('unsupported_methodology')
   const instruments = new Map(baseline.instruments.map((row) => [row.id, row]))
   const buckets = new Map(baseline.buckets.map((row) => [row.id, {
-    ...row, cash: amount(row.cash), pending: amount(row.pending), added: zero(), assumed: null as Decimal | null,
+    ...row, cash: amount(row.cash), pending: amount(row.pending), added: zero(), withdrawn: zero(), assumed: null as Decimal | null,
     buys: zero(), sales: zero(), fees: zero() as Decimal | null,
   }]))
   const holdings = new Map(baseline.holdings.map((row) => [key(row.bucket, row.instrument), {
@@ -67,6 +68,7 @@ export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
     if (funding.assumedCash !== undefined && bucket.cash !== null) throw new ScenarioError('known_cash_cannot_be_assumed')
     bucket.assumed = amount(funding.assumedCash ?? null)
     bucket.added = new D(funding.added)
+    bucket.withdrawn = new D(funding.withdrawn ?? 0)
   }
   const marked = (rows: Iterable<{ instrument: string; quantity: Decimal; quantityKnown?: boolean; mark?: string | null }>, proposed: boolean) => {
     let total: Decimal | null = zero()
@@ -82,9 +84,11 @@ export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
   const actualOpeningCash = [...buckets.values()].reduce((total, bucket) => add(total, bucket.cash), zero() as Decimal | null)
   const openingCash = [...buckets.values()].reduce((total, bucket) => add(total, bucket.cash ?? bucket.assumed), zero() as Decimal | null)
   const capital = sum([...buckets.values()].map((bucket) => bucket.added))
+  const withdrawn = sum([...buckets.values()].map((bucket) => bucket.withdrawn))
+  const netCapital = capital.minus(withdrawn)
   const startingValue = add(add(initialMarked, openingCash), pending)
   // Targets share one pre-execution cash-inclusive budget, adjusted for explicit capital.
-  const weightBudget = startingValue?.plus(capital) ?? null
+  const weightBudget = startingValue?.plus(netCapital) ?? null
   const weightTotal = sum(input.operations.filter((op) => op.kind === 'target_weight').map((op) => new D(op.amount!)))
   if (weightTotal.gt(1)) throw new ScenarioError('target_weights_exceed_one')
   let executionEffect: Decimal | null = zero()
@@ -143,7 +147,7 @@ export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
     }
     holdings.set(id, { ...prior, quantity: nextQuantity, basis })
     return { ...op, initialQuantity: prior.quantity.toFixed(), proposedQuantity: nextQuantity.toFixed(),
-      delta: delta.toFixed(), notional: notional.toFixed(), feeAmount: fixed(fee), feeStatus: fee === null ? 'unavailable' : op.fee.mode, realized: fixed(pnl),
+      delta: delta.toFixed(), notional: notional.toFixed(), feeAmount: fixed(fee), feeStatus: delta.isZero() ? 'no_trade' : fee === null ? 'unavailable' : op.fee.mode, realized: fixed(pnl),
       remainingBasis: fixed(basis), netProceeds: delta.lt(0) ? fixed(fee === null ? null : notional.minus(fee)) : null }
   })
   const proposed = [...holdings.values()]
@@ -155,19 +159,20 @@ export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
   }
   const funding = [...buckets.values()].map((bucket) => {
     const available = bucket.cash ?? bucket.assumed
-    const ending = add(available?.plus(bucket.added).plus(bucket.sales).minus(bucket.buys) ?? null, bucket.fees?.neg() ?? null)
+    const ending = add(available?.plus(bucket.added).minus(bucket.withdrawn).plus(bucket.sales).minus(bucket.buys) ?? null, bucket.fees?.neg() ?? null)
     return { bucket: bucket.id, venue: bucket.venue, account: bucket.account, asset: baseline.asset,
-      actualOrScratchStartingCash: fixed(bucket.cash), assumedStartingCash: fixed(bucket.assumed), addedCapital: fixed(bucket.added),
+      actualOrScratchStartingCash: fixed(bucket.cash), assumedStartingCash: fixed(bucket.assumed), addedCapital: fixed(bucket.added), withdrawnCapital: fixed(bucket.withdrawn),
       grossSales: fixed(bucket.sales), purchases: fixed(bucket.buys), fees: fixed(bucket.fees), endingCash: fixed(ending),
       shortfall: ending === null ? null : D.max(0, ending.neg()).toFixed() }
   })
   const total = (field: 'endingCash' | 'shortfall' | 'fees') => funding.reduce((value, row) => add(value, amount(row[field])), zero() as Decimal | null)
+  const openingCashNonnegative = [...buckets.values()].every((bucket) => (bucket.cash ?? bucket.assumed)?.gte(0) === true)
   const endingCash = total('endingCash')
   const fees = total('fees')
   const shortfall = total('shortfall')
   const endingMarked = marked(proposed, true)
   const endingValue = add(add(endingMarked, endingCash), pending)
-  const explained = add(add(add(startingValue, capital), executionEffect), add(remarkEffect, fees?.neg() ?? null))
+  const explained = add(add(add(startingValue, netCapital), executionEffect), add(remarkEffect, fees?.neg() ?? null))
   const allocation = (rows: typeof proposed, after: boolean) => {
     const values = rows.flatMap((row) => {
       if (row.quantityKnown === false || row.quantity.isZero()) return []
@@ -177,19 +182,27 @@ export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
     const dimension = (identity: (row: (typeof values)[number]) => string | undefined) => {
       const grouped = new Map<string, Decimal>()
       let unmapped = zero()
+      let identifiedHoldings = 0
+      let unmappedHoldings = 0
       for (const row of values) {
         const id = identity(row)
-        if (id === undefined) unmapped = unmapped.plus(row.value)
-        else grouped.set(id, (grouped.get(id) ?? zero()).plus(row.value))
+        if (id === undefined) {
+          unmapped = unmapped.plus(row.value)
+          unmappedHoldings += 1
+        } else {
+          grouped.set(id, (grouped.get(id) ?? zero()).plus(row.value))
+          identifiedHoldings += 1
+        }
       }
       const metrics = concentration([...grouped.values()].map((value) => value.toFixed()))
-      return { metrics, unmapped: unmapped.toFixed(), rows: [...grouped].map(([id, value], index) =>
+      return { metrics, availability: !metrics ? 'unavailable' : unmappedHoldings || (after ? endingMarked : initialMarked) === null
+        ? 'known_subset' : 'known_marked_scope', identifiedHoldings, unmappedHoldings, unmapped: unmapped.toFixed(), rows: [...grouped].map(([id, value], index) =>
         ({ id, value: value.toFixed(), weight: metrics?.weights[index] ?? null })) }
     }
     const cash = after ? endingCash : openingCash
     const open = after ? endingMarked : initialMarked
     const cashInclusive = cash === null || open === null || pending === null
-      || (after && funding.some((row) => row.endingCash === null || new D(row.endingCash).lt(0)))
+      || (after ? funding.some((row) => row.endingCash === null || new D(row.endingCash).lt(0)) : !openingCashNonnegative)
       ? null : concentration([open.toFixed(), cash.toFixed(), pending.toFixed()])
     return { instrument: dimension((row) => instruments.get(row.instrument)?.market ? row.instrument : key(row.bucket, row.instrument)),
       market: dimension((row) => instruments.get(row.instrument)?.market), event: dimension((row) => instruments.get(row.instrument)?.event),
@@ -230,7 +243,8 @@ export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
     }
     const included = connectedMarkets(allGroups.filter((group) => group.legs.length || (hypothetical && outcomes.has(group.id)))
       .map((group) => group.id), constraints)
-    const result = settlementRisk(allGroups.filter((group) => included.has(group.id)),
+    const result = baseline.settlementGraphLimited ? { status: 'unavailable' as const, reason: 'reviewed_graph_limit' }
+      : settlementRisk(allGroups.filter((group) => included.has(group.id)),
       constraints.filter((edge) => included.has(edge.left) && included.has(edge.right)),
       baseline.missingRules?.filter((id) => included.has(id)))
     const unsupported = rows.filter((row) => !row.quantity.isZero() && (row.quantityKnown === false
@@ -239,7 +253,7 @@ export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
     const allBasis = rows.reduce((known, row) => add(known, row.basis), zero() as Decimal | null)
     return { authority: hypothetical ? 'scenario_assumptions' : 'reviewed_rules', unsupported, result,
       cashInclusive: result.status === 'exact' && !unsupported.length && cash !== null && pending !== null && !cash.lt(0)
-        && (!after || shortfall?.isZero()) ? { best: cash.plus(pending).plus(result.best.payout).toFixed(),
+        && (after ? shortfall?.isZero() : openingCashNonnegative) ? { best: cash.plus(pending).plus(result.best.payout).toFixed(),
           worst: cash.plus(pending).plus(result.worst.payout).toFixed() } : null,
       basisRelative: result.status === 'exact' && !unsupported.length && allBasis !== null
         ? { best: new D(result.best.payout).minus(allBasis).toFixed(), worst: new D(result.worst.payout).minus(allBasis).toFixed() } : null }
@@ -258,7 +272,7 @@ export function evaluate(baseline: ScenarioBaseline, input: ScenarioInput) {
         initialQuantity: baselinePositions.get(key(row.bucket, row.instrument))?.quantity ?? '0',
         value: fixed(value), unrealized: fixed(add(value, row.basis?.neg() ?? null)), resolvesAt: instruments.get(row.instrument)?.resolvesAt ?? null }
     }),
-    bridge: { evidenceStartingValue: fixed(add(add(initialMarked, actualOpeningCash), pending)), startingValue: fixed(startingValue), addedCapital: fixed(capital), executionEffect: fixed(executionEffect),
+    bridge: { evidenceStartingValue: fixed(add(add(initialMarked, actualOpeningCash), pending)), startingValue: fixed(startingValue), addedCapital: fixed(capital), withdrawnCapital: fixed(withdrawn), executionEffect: fixed(executionEffect),
       fees: fixed(fees?.neg() ?? null), remarkEffect: fixed(remarkEffect), endingValue: fixed(endingValue),
       normalizedChange: explained === null || endingValue === null || !weightBudget?.gt(0)
         ? null : endingValue.minus(weightBudget).div(weightBudget).toFixed(),

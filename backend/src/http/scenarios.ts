@@ -9,6 +9,7 @@ import { portfolioScenarios as scenarios, portfolios } from '../db/schema.js'
 import { evaluate, ScenarioError, type ScenarioBaseline, type ScenarioInput, type ScenarioInstrument } from '../scenarios/engine.js'
 
 const id = z.string().trim().min(1).max(200)
+const bucketId = z.string().min(1).max(450)
 const cashAmount = z.string().regex(/^\d{1,20}(?:\.\d{1,18})?$/)
 const fraction = cashAmount.refine((value) => /^(?:0+(?:\.\d+)?|0*1(?:\.0+)?)$/.test(value))
 const time = z.iso.datetime({ offset: true })
@@ -34,7 +35,7 @@ const fee = z.union([
   z.object({ mode: z.literal('provider'), role: z.enum(['maker', 'taker']) }).strict(),
 ])
 const input = z.object({
-  operations: z.array(z.object({ bucket: id, instrument: id,
+  operations: z.array(z.object({ bucket: bucketId, instrument: id,
     kind: z.enum(['buy', 'sell', 'exit', 'target_quantity', 'buy_notional', 'target_weight']),
     amount: cashAmount.optional(), price: cashAmount, fee,
   }).strict().superRefine((op, ctx) => {
@@ -43,7 +44,7 @@ const input = z.object({
       ctx.addIssue({ code: 'custom', message: 'invalid_target_weight' })
     }
   })).max(250).default([]),
-  funding: z.array(z.object({ bucket: id, added: cashAmount, assumedCash: cashAmount.optional() }).strict()).max(100).default([]),
+  funding: z.array(z.object({ bucket: bucketId, added: cashAmount, withdrawn: cashAmount.optional(), assumedCash: cashAmount.optional() }).strict()).max(100).default([]),
   marks: z.array(z.object({ instrument: id, price: cashAmount }).strict()).max(250).default([]),
   rules: z.array(z.object({ id: id.refine((value) => value.startsWith('local:')), yes: id, no: id,
     unitPayout: cashAmount.optional() }).strict()).max(100).default([]),
@@ -67,6 +68,10 @@ function fingerprint(frozen: ScenarioBaseline) {
     ...row, feeSchedule: feeSchedule && { ...feeSchedule, retrievedAt: null },
   })), revisions: { ...frozen.revisions, public: null } })
 }
+const assumptionDigest = ({ operations, ...assumptions }: ScenarioInput) => digest({
+  ...assumptions, execution: operations.map(({ bucket, instrument, price, fee }) => ({ bucket, instrument, price, fee }))
+    .sort((left, right) => left.bucket.localeCompare(right.bucket) || left.instrument.localeCompare(right.instrument)),
+})
 const unique = (values: string[]) => new Set(values).size === values.length
 function validateSource(value: BaselineSource) {
   if (!unique(value.catalog) || !unique(value.local.map((entry) => entry.id)) || value.catalog.length + value.local.length + value.publicOutcomes.length > 250
@@ -113,6 +118,12 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
   function route<S extends z.ZodType>(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', suffix: string, schema: S,
     handler: (scope: Scope, body: z.infer<S>, reply: FastifyReply) => Promise<unknown>, response?: object) {
     app.route<{ Params: Scope; Body: unknown }>({ method, url: path + suffix, bodyLimit: 196_608,
+      // Zod validates the original body in the handler so AJV cannot strip fields from alternate union branches.
+      validatorCompiler: ({ httpPart }) => (value) => {
+        if (httpPart !== 'params') return { value }
+        const params = z.object({ portfolioId: z.uuid(), scenarioId: z.uuid().optional() }).safeParse(value)
+        return params.success ? { value: params.data } : { error: new Error('invalid_scenario_scope') }
+      },
       schema: { tags: ['scenarios'], security: [{ bearerAuth: [] }], params: { type: 'object',
         properties: { portfolioId: { type: 'string', format: 'uuid' }, scenarioId: { type: 'string', format: 'uuid' } } },
       ...(response ? { response: { 200: response } } : {}),
@@ -209,7 +220,7 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
     const ordered = value.scenarioIds.map((scenarioId) => rows.find((row) => row.id === scenarioId)!)
     return { compatibility: { sameAsset: rows.every((row) => row.baseline.asset === rows[0]!.baseline.asset),
       sameBaseline: rows.every((row) => digest(row.baseline) === digest(rows[0]!.baseline)),
-      sameAssumptions: rows.every((row) => digest(row.input) === digest(rows[0]!.input)), conversion: 'none' },
+      sameAssumptions: rows.every((row) => assumptionDigest(row.input) === assumptionDigest(rows[0]!.input)), conversion: 'none' },
     items: ordered.map((row) => ({ id: row.id, name: row.name, revision: row.revision, result: run(row.baseline, row.input) })) }
   }, comparisonResponse)
 }
