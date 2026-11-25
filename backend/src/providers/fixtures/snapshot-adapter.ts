@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { normalizedRecordSchema, type NormalizedRecord, type ProviderCapabilities } from '../../domain/model.js'
+import { normalizedRecordSchema, type EntityCoverageReport, type NormalizedRecord, type ProviderCapabilities } from '../../domain/model.js'
 import { ProviderAdapterError, type ProviderAdapter, type ProviderPage } from '../adapter.js'
 import { SNAPSHOT_ACCOUNT_ID, snapshotPage } from './data.js'
 
@@ -63,6 +63,14 @@ const snapshotSchema = z.object({
   accountBalance: z.null(),
 }).strict()
 
+const completeReport = (coverageStart: string | null = null, coverageEnd: string | null = null): EntityCoverageReport => ({
+  status: 'complete', coverageStart, coverageEnd, sourceAsOf: '2026-11-24T04:00:00Z', reasonCode: null,
+})
+
+const emptySnapshotPayload = () => ({
+  contracts: [], executions: [], accountChanges: [], holdings: [], accountBalance: null,
+})
+
 export class SnapshotFixtureAdapter implements ProviderAdapter {
   readonly capabilities: ProviderCapabilities = {
     providerCode: 'fixture-account-snapshot',
@@ -78,34 +86,62 @@ export class SnapshotFixtureAdapter implements ProviderAdapter {
       cash_balances: 'unsupported',
       prices: 'unsupported',
     },
+    streams: [
+      {
+        name: 'activity',
+        entities: ['markets', 'fills', 'cash_movements'],
+        strategy: 'full_refresh',
+        snapshotSemantics: {},
+      },
+      {
+        name: 'positions',
+        entities: ['positions'],
+        strategy: 'full_refresh',
+        snapshotSemantics: { positions: 'complete' },
+      },
+    ],
     pagination: 'unsupported',
     incrementalSync: 'unsupported',
   }
 
-  async fetchPage({ externalAccountId, cursor, signal }: Parameters<ProviderAdapter['fetchPage']>[0]): Promise<ProviderPage> {
+  async fetchPage({ externalAccountId, streamName, cursor, checkpoint, signal }: Parameters<ProviderAdapter['fetchPage']>[0]): Promise<ProviderPage> {
     if (signal.aborted) throw new ProviderAdapterError('request_aborted', true)
     if (externalAccountId !== SNAPSHOT_ACCOUNT_ID) throw new ProviderAdapterError('fixture_account_not_found', false)
-    if (cursor !== null) throw new ProviderAdapterError('fixture_pagination_unsupported', false)
+    if (cursor !== null || checkpoint !== null) throw new ProviderAdapterError('fixture_pagination_unsupported', false)
+    if (streamName !== 'activity' && streamName !== 'positions') throw new ProviderAdapterError('unknown_fixture_stream', false)
+    const full = snapshotPage as Record<string, unknown[]>
+    const activityPayload = {
+      ...emptySnapshotPayload(),
+      contracts: full.contracts,
+      executions: full.executions,
+      accountChanges: full.accountChanges,
+    }
+    const positionPayload = { ...emptySnapshotPayload(), holdings: full.holdings }
+    const activity = streamName === 'activity'
     return {
-      payload: snapshotPage,
+      payload: activity ? activityPayload : positionPayload,
       nextCursor: null,
-      sourceAsOf: '2026-11-24T04:00:00Z',
-      coverage: {
-        markets: 'complete',
-        fills: 'complete',
-        cash_movements: 'complete',
-        settlements: 'unavailable',
-        positions: 'complete',
-        cash_balances: 'unavailable',
-        prices: 'unavailable',
-      },
+      checkpoint: null,
+      coverage: activity
+        ? {
+          markets: completeReport(),
+          fills: completeReport('2026-11-19T06:00:00Z', '2026-11-19T06:00:00Z'),
+          cash_movements: completeReport('2026-11-17T02:00:00Z', '2026-11-17T02:00:00Z'),
+        }
+        : { positions: completeReport('2026-11-24T04:00:00Z', '2026-11-24T04:00:00Z') },
     }
   }
 
-  normalizePage(page: ProviderPage): NormalizedRecord[] {
+  normalizePage(page: ProviderPage, streamName: string): NormalizedRecord[] {
     const parsedPage = snapshotSchema.safeParse(page.payload)
     if (!parsedPage.success) throw new ProviderAdapterError('invalid_provider_payload', false)
-    const { contracts, executions, accountChanges, holdings } = parsedPage.data
+    const isActivity = streamName === 'activity'
+    const isPositions = streamName === 'positions'
+    if (!isActivity && !isPositions) throw new ProviderAdapterError('unknown_fixture_stream', false)
+    const contracts = isActivity ? parsedPage.data.contracts : []
+    const executions = isActivity ? parsedPage.data.executions : []
+    const accountChanges = isActivity ? parsedPage.data.accountChanges : []
+    const holdings = isPositions ? parsedPage.data.holdings : []
     const records: unknown[] = [
       ...contracts.map((contract) => ({
         kind: 'market',

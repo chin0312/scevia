@@ -5,12 +5,15 @@ import { portfolios, providerAccounts, users } from '../src/db/schema.js'
 import { IngestionService } from '../src/ingestion/sync.js'
 import { providerRegistry } from '../src/providers/registry.js'
 import { MULTI_OUTCOME_ACCOUNT_ID, SNAPSHOT_ACCOUNT_ID } from '../src/providers/fixtures/data.js'
+import { assertSafeSeedDatabase } from './safety.js'
 
 const ownerId = '00000000-0000-4000-8000-000000000001'
 const portfolioId = '00000000-0000-4000-8000-000000000101'
 const multiAccountId = '00000000-0000-4000-8000-000000000201'
 const snapshotAccountId = '00000000-0000-4000-8000-000000000202'
-const { database, pool } = createDatabase(loadDatabaseConfig())
+const databaseConfig = loadDatabaseConfig()
+assertSafeSeedDatabase(databaseConfig.url)
+const { database, pool } = createDatabase(databaseConfig)
 
 try {
   await runMigrations(database)
@@ -48,7 +51,7 @@ try {
       externalAccountId: SNAPSHOT_ACCOUNT_ID,
     }),
   ])
-  if (results.some((result) => result.status === 'failed')) {
+  if (results.some((result) => result.status !== 'complete')) {
     throw new Error('Fixture synchronization failed')
   }
   process.stdout.write(`Ingested ${results.length} deterministic fixture sources into the Sample portfolio.\n`)

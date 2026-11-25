@@ -29,7 +29,7 @@ curl -H 'Authorization: Bearer replace-this-with-a-random-value-of-at-least-32-c
   'http://127.0.0.1:3001/v1/portfolios/00000000-0000-4000-8000-000000000101/positions?limit=50&offset=0'
 ```
 
-The portfolio endpoints expose stored positions, fills, signed cash movements, settlements, cash balances, source metadata, coverage, and synchronization history. Financial values are returned as decimal strings. Unavailable fees and marks remain `null` with an explicit status or coverage record.
+The portfolio endpoints expose current authoritative positions and cash balances, historical fills, signed cash movements, settlements, source metadata, entity-specific coverage, and per-stream synchronization history. Financial values are returned as decimal strings. Unavailable fees and marks remain `null` with an explicit status or coverage record. A complete empty snapshot can close current holdings; partial snapshots do not.
 
 ## Tests and migrations
 
@@ -39,9 +39,11 @@ npm run db:generate -- --name=change-name
 npm run db:migrate
 ```
 
-`npm test` starts an in-memory PostgreSQL-compatible PGlite server when `TEST_DATABASE_URL` is unset. The CI workflow sets `TEST_DATABASE_URL` to a clean PostgreSQL 17 service, so the same integration suite also runs against PostgreSQL. No external provider credentials are needed.
+`npm test` starts an in-memory PostgreSQL-compatible PGlite server when `TEST_DATABASE_URL` is unset. The harness marks the ephemeral connection explicitly before any schema reset. For an external database, destructive tests require `ALLOW_DESTRUCTIVE_TEST_DATABASE=true`, a local PostgreSQL host, and a database name ending in `_test`; `NODE_ENV=production` always rejects the test runner. The CI workflow opts into its disposable PostgreSQL 17 service explicitly. No external provider credentials are needed.
 
-The migration runner applies the versioned SQL files under `drizzle/`. Schema changes are generated from `src/db/schema.ts` and committed as SQL. Tests drop and recreate the application schema before applying the migrations.
+The migration runner applies the versioned SQL files under `drizzle/`. Schema changes are generated from `src/db/schema.ts` and committed as SQL; migrations that add required snapshot ownership backfill existing observations before adding constraints. Tests drop and recreate the application schema only after the target database passes the safety checks. The fixture seed is restricted to a local `scevia` or `scevia_test` database (or an explicitly allowed `_dev` database) and is disabled in production.
+
+The checked-in `.env.example` contains local-only placeholders. Keep real credentials in `.env`, which is ignored by Git. Database dumps, including `scevia-backup*.sql`, are ignored as well.
 
 ## API outline
 
@@ -52,16 +54,18 @@ The migration runner applies the versioned SQL files under `drizzle/`. Schema ch
 | `GET /v1/providers` | Public | Provider capabilities |
 | `GET /v1/portfolios` | Authenticated | Portfolios for the configured principal |
 | `GET /v1/portfolios/{id}/sources` | Authenticated | Provider source labels and types |
-| `GET /v1/portfolios/{id}/positions` | Authenticated | Latest position snapshots |
+| `GET /v1/portfolios/{id}/positions` | Authenticated | Current positions from finalized provider snapshots |
 | `GET /v1/portfolios/{id}/fills` | Authenticated | Fill history and fee coverage |
 | `GET /v1/portfolios/{id}/cash-movements` | Authenticated | Signed deposits, withdrawals, transfers, and adjustments |
 | `GET /v1/portfolios/{id}/settlements` | Authenticated | Settlement facts and payouts |
-| `GET /v1/portfolios/{id}/cash-balances` | Authenticated | Latest reported cash balances |
-| `GET /v1/portfolios/{id}/coverage` | Authenticated | Data availability and freshness |
-| `GET /v1/portfolios/{id}/sync-runs` | Authenticated | Recent synchronization state |
-| `POST /v1/provider-accounts/{id}/sync` | Authenticated | Bounded read-only fixture synchronization |
+| `GET /v1/portfolios/{id}/cash-balances` | Authenticated | Current reported balances from finalized snapshots |
+| `GET /v1/portfolios/{id}/coverage` | Authenticated | Observed ranges, provider-confirmed coverage, attempt state, and latest successful sync per entity |
+| `GET /v1/portfolios/{id}/sync-runs` | Authenticated | Recent stream runs with cursor and snapshot-completion state |
+| `POST /v1/provider-accounts/{id}/sync` | Authenticated | Bounded read-only synchronization across configured streams |
 
 List endpoints accept `limit` from 1 to 100 and `offset` from 0 to 100000. Errors use a stable code and request ID. Raw source payloads and provider account identifiers are not returned by the API.
+
+The sync response is an account-level summary with a result for each stream. Pagination cursors resume a partially read run; provider checkpoints are stored independently and passed to later incremental runs. Sync is synchronous in this phase, limited to 500 records per page, 10,000 records per stream, 100 pages, and 25 seconds per account request. A production provider that cannot fit these bounds will need a background job interface before launch.
 
 ## Runtime and security boundary
 

@@ -15,6 +15,13 @@
       "when": 1795573374782,
       "tag": "0001_source-revisions",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1795585723824,
+      "tag": "0002_sync_integrity_hardening",
+      "breakpoints": true
     }
   ]
 }

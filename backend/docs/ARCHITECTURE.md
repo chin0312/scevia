@@ -34,14 +34,14 @@ The configured registry contains `fixture-multisided` and `fixture-account-snaps
 - A portfolio belongs to a user principal. Provider accounts are attached to portfolios and keep their provider-native account identifier separate from the principal.
 - Provider events, markets, and outcome instruments keep provider-scoped external IDs. Markets can contain more than two outcomes. Cross-provider event relationships are stored separately with a review state that defaults to `unverified`.
 - Fills, signed cash movements, settlements, positions, cash balances, and price observations are distinct records. Position snapshots identify whether the source reported them or they were reconstructed. Reconciliation state is retained.
-- Source records keep a validated, minimized payload, a SHA-256 digest, retrieval time, and normalization version. When a source record changes, its prior payload version is retained in `source_record_revisions`.
-- Coverage records describe supported, partial, unavailable, and unknown data by provider account and entity type. Unsupported capabilities are marked unavailable with `unsupported_by_provider`.
+- Source records keep an adapter-selected, validated payload, a SHA-256 digest, retrieval time, normalization version, and source revision time when available. Superseded financial versions and stale market observations are retained in `source_record_revisions` with a revision type.
+- Coverage records are independent by provider account and entity. Observed record ranges do not imply that every record in the interval exists. Provider-confirmed coverage intervals and source freshness remain separate from observed record times and from the latest attempt/success timestamps.
 
 The schema does not assume binary markets, a fixed settlement amount, a universal asset, or a complete provider transaction history. Instrument payout values and collateral codes remain provider data. Event relationships are not inferred from title similarity.
 
 ## Financial integrity
 
-Monetary amounts, fees, quantities, prices, payouts, and balances use PostgreSQL `NUMERIC(38,18)`. Adapters pass decimal strings. The runtime validator rejects floating-point input in the normalized model. API serialization returns decimal strings so callers do not silently round values through JavaScript `number`.
+Monetary amounts, fees, quantities, prices, payouts, and balances use PostgreSQL `NUMERIC(38,18)`. Adapters pass decimal strings. The runtime validator accepts at most 20 significant integer digits and 18 nonzero fractional digits; excess trailing zeroes are allowed because they do not change the value. No financial value passes through JavaScript `number` during normalization. API serialization returns decimal strings so callers do not silently round values.
 
 Fees have both a nullable amount and a status. `unavailable` requires a null amount. `reported` and `estimated` require an amount. Negative fee values can represent rebates. A missing mark remains null. Cash movements use signed amounts, with deposits positive and withdrawals negative. All persisted timestamps use `timestamp with time zone` and normalized UTC ISO values. Original timestamps remain in the sanitized source payload for audit and replay.
 
@@ -55,22 +55,28 @@ sequenceDiagram
   participant Sync as Sync service
   participant Adapter
   participant DB as PostgreSQL
-  API->>Sync: sync owned provider account
-  Sync->>DB: claim expiring account lease
-  Sync->>Adapter: fetch page with durable cursor
-  Adapter-->>Sync: provider page
-  Sync->>Sync: validate and normalize
-  Sync->>DB: transactionally upsert records and advance cursor
-  Sync->>Adapter: fetch next page
-  Sync->>DB: finish run, checkpoint, and coverage
-  Sync-->>API: complete, partial, or failed status
+  API->>Sync: sync owned provider account id
+  Sync->>DB: load trusted provider identity and claim account lease
+  loop configured streams
+    Sync->>DB: load stream cursor and durable checkpoint
+    Sync->>Adapter: fetch page for stream
+    Adapter-->>Sync: payload, next cursor, checkpoint, coverage
+    Sync->>Sync: validate page, stream scope, normalized records
+    Sync->>DB: atomically persist records and progress
+  end
+  Sync->>DB: finalize stream snapshots and coverage
+  Sync-->>API: account summary with independent stream results
 ```
 
-Each provider account has a database-backed lease. A second sync receives a conflict while the lease is active. The lease expires after two minutes and is renewed before each page. Requests time out after ten seconds, retryable provider errors retry once with bounded backoff, and a run stops after 100 pages.
+The service reloads provider code and external account ID from the owned database row; caller-supplied identity fields are not trusted. One account-wide database lease prevents overlapping syncs, while each configured stream has its own checkpoint and run history. The lease expires after two minutes and is renewed before each page and transaction. Requests time out after at most ten seconds, retryable provider errors retry once with bounded backoff, and each account request stops after 25 seconds.
 
-A page's normalized data and its next cursor commit in one transaction. A later page failure leaves the cursor at the last committed page and marks the run partial. The next sync resumes there. A lease acquired after expiry marks any abandoned running job as interrupted. Stable account-scoped external IDs and unique indexes make repeated syncs idempotent. Source corrections update the canonical record and preserve the previous sanitized source version.
+Pagination cursor and durable provider checkpoint are different values. A committed page atomically stores its records, next pagination cursor, and any new durable checkpoint. An incomplete run resumes at the last committed cursor. Once a stream completes, its page cursor is cleared while its provider checkpoint is passed to the next incremental run. Repeated cursor transitions, pages beyond 100, pages beyond 500 records, and streams beyond 10,000 records are rejected or stopped with safe error codes.
 
-Coverage is written in the same transaction that finalizes the run. A successful empty page can still report complete coverage. Failed initial syncs leave supported entity coverage unknown. Failed syncs after committed pages report partial coverage. Unsupported operations remain unavailable.
+Stable account-scoped external IDs and unique indexes make financial activity ingestion idempotent. A legitimate fill correction updates the canonical financial row and preserves its previous source version. Market records use provider `sourceUpdatedAt` when supplied: an older revision cannot replace newer event or market metadata, and its payload is kept as a stale observation. If the provider supplies no revision timestamp, retrieval order is the available fallback; that limitation remains provider-specific.
+
+Coverage stores observed record range, provider-confirmed interval, provider source-as-of time, and attempt/success timestamps separately. Observed record ranges are updated in the same transaction as the page and never use an event's future resolution date. A range containing records does not imply continuous history. An empty result can be complete only when the provider reports complete coverage. Interrupted attempts update last-attempt fields but preserve established coverage; an incomplete first import is partial only when it committed pages. Unsupported operations remain unavailable with `unsupported_by_provider`; a provider can separately report temporary unavailability.
+
+Position and cash snapshot observations are retained per sync run. Rows from a full authoritative snapshot are not published as current until every page succeeds and the provider reports complete coverage for that entity. Finalization replaces the prior current set, including clearing it for a complete empty snapshot. Partial snapshots leave the prior current set intact. Providers that expose incremental updates declare that contract and update only received instruments/assets; explicit zero positions close a holding, and older observations cannot replace newer current observations. Cash balances preserve explicit zero values. The API reads only rows marked current.
 
 ## API and ownership
 
@@ -84,10 +90,10 @@ The current development principal is selected by server configuration after a be
 |---|---|---|
 | Portfolio and account data | Principal-scoped database queries, UUID ownership links, private routes require bearer authentication | Integrate a maintained OIDC or equivalent principal resolver, user sessions, and security review |
 | Development token | Constant-time digest comparison, token redaction, fixed principal from environment | Replace with production identity and managed secrets |
-| Provider requests | Static adapter registry, runtime validation, bounded timeouts, no user-supplied fetch URL | Add provider-specific endpoint allowlists, rate handling, response-size enforcement, and upstream security review |
+| Provider requests | Static adapter registry, central stream/record validation, bounded timeouts, no user-supplied fetch URL | Add provider-specific endpoint allowlists, rate handling, response-size enforcement, and upstream security review |
 | Database records | Parameterized queries, foreign keys, unique external IDs, numeric checks, transactions | Separate migration and application roles, validate backup restoration, and configure managed encryption and rotation |
 | HTTP service | 256 KB request body limit, 30 second request timeout, allowlisted CORS, 100 requests per minute globally, five sync requests per minute | Configure trusted proxy hops and production edge limits with the deployment platform |
-| Logs and source payloads | Authorization header redaction, safe API errors, validated payload allowlists, 64 KB raw-record cap | Set production retention, access, audit, and data deletion procedures |
+| Logs and source payloads | Authorization header redaction, safe API errors, adapter-selected payload fields, sensitive-key rejection as defense in depth, 64 KB raw-record cap | Set production retention, access, audit, and data deletion procedures |
 
 The local Compose service binds PostgreSQL to loopback. The app does not store provider credentials or expose trading operations. The repository does not yet have a production authentication provider, secret manager, deployed service, backup automation, or an end-user deletion endpoint. Deleting a user row cascades through that user's portfolio, provider accounts, source records, and financial data. Shared provider market metadata can remain after portfolio deletion.
 
@@ -97,10 +103,14 @@ The Compose volume persists PostgreSQL data across container restarts. A local b
 
 Keep `.env` files and database backups out of Git. A production deployment must set an explicit retention period, restrict backup access, test restoration, and define deletion behavior before storing user-linked real provider data.
 
-## Phase 2 Polymarket work
+The test runner starts an isolated PGlite instance by default. An external destructive-test database requires an explicit opt-in, a loopback PostgreSQL host, and a database name ending in `_test`. Fixture seeding is blocked in production and limited to a local `scevia` or `scevia_test` database unless a developer explicitly allows a `_dev` target.
 
-The first production adapter should read public wallet data or use an explicitly read-only permission scope. It should use configured upstream URLs and provider-native IDs. It should preserve on-chain transaction references, settlement details, confirmation state, and enough ordering data to replay corrections or chain reorganizations.
+## Phase 2 Polymarket handoff
 
-Before exposing real positions, compare provider-reported snapshots with fills and settlements without silently reconciling differences. Define the source for marks and their timestamps. Record source coverage for deposits, withdrawals, fills, fees, positions, settlements, and historical prices independently. Keep any unsupported or partial stream visible to the frontend.
+Reuse the provider registry, stream capability declarations, central page and normalized-record validation, `IngestionService`, transactional persistence, source revisions, entity coverage, snapshot lifecycle, and read-only API. Keep each Polymarket endpoint as a separate stream when it has different pagination, freshness, history, or snapshot guarantees. Provider-specific code should explicitly map only required payload fields before central validation.
 
-The real adapter can normalize into the existing tables and call the same page persistence service. It needs provider contract tests against captured, sanitized fixtures before production wallet data is enabled.
+Before implementation, verify against current official Polymarket documentation and sanitized real responses: endpoint authentication and rate limits; account identity and supported wallet types; pagination token lifetime and ordering; whether a durable cursor exists; fills/trades and fee fields; deposits, withdrawals, and transfers; settlement and redemption records; positions completeness and as-of time; market/outcome identifiers; and price source/timestamp semantics. Do not assume `sourceUpdatedAt`, event lifecycle, fee meaning, or history boundaries until confirmed from responses.
+
+Likely model additions should be driven by evidence: transaction hash and log index, chain/network, provider confirmation/finality or reorg state, distinct deposit versus internal transfer identities, resolution payout versus redemption cash movement, source-specific fees, and provider ordering tokens. These fields are not yet verified as necessary for every Polymarket stream.
+
+Require sanitized adapter contract fixtures for first/middle/final pages, repeated requests, empty complete responses, stale revisions, missing optional fields, provider corrections, and rate/timeout errors. Integration evidence should reconcile a known wallet's fills, positions, deposits/withdrawals, settlements, and current marks by source ID and exact decimal totals, with unexplained differences reported instead of forced away. Keep Phase 1 in progress until PR #3 is reviewed and merged; this handoff does not authorize production credentials or live deployment.

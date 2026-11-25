@@ -2,7 +2,7 @@ import { Decimal } from 'decimal.js'
 import { z } from 'zod'
 
 export type CapabilityState = 'supported' | 'unsupported'
-export type CoverageState = 'complete' | 'partial' | 'unavailable'
+export type CoverageState = 'complete' | 'partial' | 'unavailable' | 'unknown'
 export type CoverageEntity =
   | 'markets'
   | 'fills'
@@ -12,22 +12,60 @@ export type CoverageEntity =
   | 'cash_balances'
   | 'prices'
 
+export type ProviderSyncStream = {
+  name: string
+  entities: CoverageEntity[]
+  strategy: 'full_refresh' | 'provider_checkpoint'
+  snapshotSemantics: Partial<Record<'positions' | 'cash_balances', 'complete' | 'incremental'>>
+}
+
+export interface EntityCoverageReport {
+  status: CoverageState
+  coverageStart?: string | null
+  coverageEnd?: string | null
+  sourceAsOf?: string | null
+  reasonCode?: string | null
+}
+
 export interface ProviderCapabilities {
   providerCode: string
   displayName: string
   adapterKind: 'fixture' | 'production'
   accountKinds: Array<'public_wallet' | 'authenticated_account' | 'file_import' | 'fixture'>
   operations: Record<CoverageEntity, CapabilityState>
+  streams: ProviderSyncStream[]
   pagination: CapabilityState
   incrementalSync: CapabilityState
 }
 
 const decimalPattern = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/
+const POSTGRES_NUMERIC_INTEGER_DIGITS = 20
+const POSTGRES_NUMERIC_SCALE = 18
+
+function fitsPostgresNumeric38_18(value: string): boolean {
+  const unsigned = value.startsWith('-') ? value.slice(1) : value
+  const [integer = '', fractional = ''] = unsigned.split('.')
+  const significantIntegerDigits = integer.replace(/^0+/, '').length
+  if (significantIntegerDigits > POSTGRES_NUMERIC_INTEGER_DIGITS) return false
+  return fractional.length <= POSTGRES_NUMERIC_SCALE || !/[1-9]/.test(fractional.slice(POSTGRES_NUMERIC_SCALE))
+}
+
+const sensitivePayloadKey = /(?:authorization|auth[_-]?header|access[_-]?token|refresh[_-]?token|api[_-]?key|secret|private[_-]?key|seed[_-]?phrase|mnemonic|password|session[_-]?(?:id|key|token|cookie))/i
+
+function containsSensitivePayloadKey(value: unknown, seen = new WeakSet<object>()): boolean {
+  if (value === null || typeof value !== 'object') return false
+  if (seen.has(value)) return true
+  seen.add(value)
+  if (Array.isArray(value)) return value.some((child) => containsSensitivePayloadKey(child, seen))
+  return Object.entries(value).some(([key, child]) => sensitivePayloadKey.test(key) || containsSensitivePayloadKey(child, seen))
+}
+
 export const decimalTextSchema = z
   .string()
   .max(80)
   .regex(decimalPattern)
   .refine((value) => new Decimal(value).isFinite(), 'Expected a finite decimal string')
+  .refine(fitsPostgresNumeric38_18, 'Value exceeds PostgreSQL NUMERIC(38,18) precision')
 
 const utcTimestampSchema = z
   .string()
@@ -40,9 +78,16 @@ const feeFieldsSchema = z.object({
 })
 
 const rawPayloadSchema = z.record(z.string(), z.unknown()).refine((value) => {
-  const bytes = Buffer.byteLength(JSON.stringify(value), 'utf8')
-  return bytes <= 64_000
-}, 'Source record is larger than 64 KB')
+  try {
+    const serialized = JSON.stringify(value)
+    return typeof serialized === 'string' && Buffer.byteLength(serialized, 'utf8') <= 64_000
+  } catch {
+    return false
+  }
+}, 'Source record is invalid or larger than 64 KB').refine(
+  (value) => !containsSensitivePayloadKey(value),
+  'Source payload contains a disallowed sensitive field',
+)
 
 const normalizedMarketSchema = z.object({
   kind: z.literal('market'),
@@ -62,7 +107,7 @@ const normalizedMarketSchema = z.object({
     externalId: z.string().min(1).max(256),
     name: z.string().min(1).max(256),
     outcomeType: z.string().min(1).max(64),
-    payoutAmount: decimalTextSchema.nullable(),
+    payoutAmount: decimalTextSchema.nullable().refine((value) => value === null || new Decimal(value).greaterThanOrEqualTo(0)),
     settlementAssetCode: z.string().min(1).max(32).nullable(),
   }).strict()).min(2).max(128),
   rawPayload: rawPayloadSchema,
@@ -89,12 +134,20 @@ const normalizedCashMovementSchema = z.object({
   externalId: z.string().min(1).max(256),
   movementKind: z.enum(['deposit', 'withdrawal', 'transfer', 'adjustment']),
   occurredAt: utcTimestampSchema,
-  signedAmount: decimalTextSchema.refine((value) => !new Decimal(value).isZero()),
+  signedAmount: decimalTextSchema,
   assetCode: z.string().min(1).max(32),
   feeAmount: feeFieldsSchema.shape.feeAmount,
   feeStatus: feeFieldsSchema.shape.feeStatus,
   rawPayload: rawPayloadSchema,
-}).strict()
+}).strict().superRefine((record, context) => {
+  const amount = new Decimal(record.signedAmount)
+  if (record.movementKind === 'deposit' && !amount.greaterThan(0)) {
+    context.addIssue({ code: 'custom', path: ['signedAmount'], message: 'Deposits must be positive' })
+  }
+  if (record.movementKind === 'withdrawal' && !amount.lessThan(0)) {
+    context.addIssue({ code: 'custom', path: ['signedAmount'], message: 'Withdrawals must be negative' })
+  }
+})
 
 const normalizedSettlementSchema = z.object({
   kind: z.literal('settlement'),
@@ -147,7 +200,7 @@ const normalizedPriceSchema = z.object({
   rawPayload: rawPayloadSchema,
 }).strict()
 
-export const normalizedRecordSchema = z.discriminatedUnion('kind', [
+const normalizedRecordUnion = z.discriminatedUnion('kind', [
   normalizedMarketSchema,
   normalizedFillSchema,
   normalizedCashMovementSchema,
@@ -156,6 +209,16 @@ export const normalizedRecordSchema = z.discriminatedUnion('kind', [
   normalizedCashBalanceSchema,
   normalizedPriceSchema,
 ])
+
+export const normalizedRecordSchema = normalizedRecordUnion.superRefine((record, context) => {
+  if ('feeAmount' in record) {
+    const hasAmount = record.feeAmount !== null
+    const amountExpected = record.feeStatus !== 'unavailable'
+    if (hasAmount !== amountExpected) {
+      context.addIssue({ code: 'custom', path: ['feeAmount'], message: 'Fee amount and availability status do not agree' })
+    }
+  }
+})
 
 export type NormalizedRecord = z.infer<typeof normalizedRecordSchema>
 export type NormalizedMarket = Extract<NormalizedRecord, { kind: 'market' }>

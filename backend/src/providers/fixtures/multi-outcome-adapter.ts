@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { normalizedRecordSchema, type CoverageEntity, type NormalizedRecord, type ProviderCapabilities } from '../../domain/model.js'
+import { normalizedRecordSchema, type EntityCoverageReport, type NormalizedRecord, type ProviderCapabilities } from '../../domain/model.js'
 import { ProviderAdapterError, type ProviderAdapter, type ProviderPage } from '../adapter.js'
 import { MULTI_OUTCOME_ACCOUNT_ID, multiOutcomePages } from './data.js'
 
@@ -101,10 +101,11 @@ const pageSchema = z.object({
   settlements: z.array(settlementSchema),
 }).strict()
 
-const completeCoverage = Object.fromEntries(
-  (['markets', 'fills', 'cash_movements', 'settlements', 'positions', 'cash_balances', 'prices'] as CoverageEntity[])
-    .map((entity) => [entity, 'complete']),
-) as Record<CoverageEntity, 'complete'>
+const completeReport = (coverageStart: string | null = null, coverageEnd: string | null = null): EntityCoverageReport => ({
+  status: 'complete', coverageStart, coverageEnd, sourceAsOf: '2026-11-24T10:00:00Z', reasonCode: null,
+})
+
+const emptyActivityPayload = () => ({ markets: [], trades: [], transfers: [], positions: [], cash: [], prices: [], settlements: [] })
 
 export class MultiOutcomeFixtureAdapter implements ProviderAdapter {
   readonly capabilities: ProviderCapabilities = {
@@ -121,28 +122,98 @@ export class MultiOutcomeFixtureAdapter implements ProviderAdapter {
       cash_balances: 'supported',
       prices: 'supported',
     },
+    streams: [
+      {
+        name: 'activity',
+        entities: ['markets', 'fills', 'cash_movements', 'settlements'],
+        strategy: 'provider_checkpoint',
+        snapshotSemantics: {},
+      },
+      {
+        name: 'account-state',
+        entities: ['positions', 'cash_balances', 'prices'],
+        strategy: 'full_refresh',
+        snapshotSemantics: { positions: 'complete', cash_balances: 'complete' },
+      },
+    ],
     pagination: 'supported',
     incrementalSync: 'supported',
   }
 
-  async fetchPage({ externalAccountId, cursor, signal }: Parameters<ProviderAdapter['fetchPage']>[0]): Promise<ProviderPage> {
+  async fetchPage({ externalAccountId, streamName, cursor, checkpoint, signal }: Parameters<ProviderAdapter['fetchPage']>[0]): Promise<ProviderPage> {
     if (signal.aborted) throw new ProviderAdapterError('request_aborted', true)
     if (externalAccountId !== MULTI_OUTCOME_ACCOUNT_ID) {
       throw new ProviderAdapterError('fixture_account_not_found', false)
     }
-    if (cursor === null) {
-      return { payload: multiOutcomePages.first, nextCursor: 'page-2', sourceAsOf: '2026-11-24T10:00:00Z', coverage: completeCoverage }
+    if (streamName === 'activity' && checkpoint === 'activity-through-page-2' && cursor === null) {
+      return {
+        payload: emptyActivityPayload(),
+        nextCursor: null,
+        checkpoint,
+        coverage: {
+          markets: completeReport('2026-11-24T09:00:00Z', '2026-11-24T09:00:00Z'),
+          fills: completeReport('2026-11-20T12:30:00Z', '2026-11-21T13:15:00Z'),
+          cash_movements: completeReport('2026-11-18T08:00:00Z', '2026-11-22T07:30:00Z'),
+          settlements: completeReport('2026-11-23T12:00:00Z', '2026-11-23T12:00:00Z'),
+        },
+      }
     }
-    if (cursor === 'page-2') {
-      return { payload: multiOutcomePages.second, nextCursor: null, sourceAsOf: '2026-11-24T10:00:00Z', coverage: completeCoverage }
+    if (streamName === 'activity' && cursor === null && checkpoint === null) {
+      return {
+        payload: multiOutcomePages.first,
+        nextCursor: 'page-2',
+        checkpoint: null,
+        coverage: {
+          markets: completeReport('2026-11-24T09:00:00Z', '2026-11-24T09:00:00Z'),
+          fills: completeReport('2026-11-20T12:30:00Z', '2026-11-21T13:15:00Z'),
+          cash_movements: completeReport('2026-11-18T08:00:00Z', '2026-11-22T07:30:00Z'),
+          settlements: completeReport('2026-11-23T12:00:00Z', '2026-11-23T12:00:00Z'),
+        },
+      }
+    }
+    if (streamName === 'activity' && cursor === 'page-2') {
+      return {
+        payload: multiOutcomePages.second,
+        nextCursor: null,
+        checkpoint: 'activity-through-page-2',
+        coverage: {
+          markets: completeReport('2026-11-24T09:00:00Z', '2026-11-24T09:00:00Z'),
+          fills: completeReport('2026-11-20T12:30:00Z', '2026-11-21T13:15:00Z'),
+          cash_movements: completeReport('2026-11-18T08:00:00Z', '2026-11-22T07:30:00Z'),
+          settlements: completeReport('2026-11-23T12:00:00Z', '2026-11-23T12:00:00Z'),
+        },
+      }
+    }
+    if (streamName === 'account-state' && cursor === null && checkpoint === null) {
+      const first = multiOutcomePages.first as Record<string, unknown[]>
+      return {
+        payload: { ...emptyActivityPayload(), positions: first.positions, cash: first.cash, prices: first.prices },
+        nextCursor: null,
+        checkpoint: null,
+        coverage: {
+          positions: completeReport('2026-11-24T10:00:00Z', '2026-11-24T10:00:00Z'),
+          cash_balances: completeReport('2026-11-24T10:00:00Z', '2026-11-24T10:00:00Z'),
+          prices: completeReport('2026-11-24T09:59:00Z', '2026-11-24T09:59:00Z'),
+        },
+      }
     }
     throw new ProviderAdapterError('invalid_fixture_cursor', false)
   }
 
-  normalizePage(page: ProviderPage): NormalizedRecord[] {
+  normalizePage(page: ProviderPage, streamName: string): NormalizedRecord[] {
     const parsedPage = pageSchema.safeParse(page.payload)
     if (!parsedPage.success) throw new ProviderAdapterError('invalid_provider_payload', false)
-    const { markets, trades, transfers, positions, cash, prices, settlements } = parsedPage.data
+    const parsed = parsedPage.data
+    const isActivity = streamName === 'activity'
+    const isAccountState = streamName === 'account-state'
+    if (!isActivity && !isAccountState) throw new ProviderAdapterError('unknown_fixture_stream', false)
+    const markets = isActivity ? parsed.markets : []
+    const trades = isActivity ? parsed.trades : []
+    const transfers = isActivity ? parsed.transfers : []
+    const positions = isAccountState ? parsed.positions : []
+    const cash = isAccountState ? parsed.cash : []
+    const prices = isAccountState ? parsed.prices : []
+    const settlements = isActivity ? parsed.settlements : []
     const records: unknown[] = [
       ...markets.map((market) => ({
         kind: 'market',

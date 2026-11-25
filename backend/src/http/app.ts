@@ -24,7 +24,7 @@ import {
 import { ProviderAdapterError } from '../providers/adapter.js'
 import { ProviderRegistry, providerRegistry } from '../providers/registry.js'
 import { IngestionError, SyncAlreadyRunningError } from '../ingestion/errors.js'
-import { getSyncAccount, IngestionService } from '../ingestion/sync.js'
+import { IngestionService } from '../ingestion/sync.js'
 import { matchesDevelopmentBearer } from './auth.js'
 
 export interface AppOptions {
@@ -219,6 +219,17 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
                   adapterKind: { type: 'string' },
                   accountKinds: { type: 'array', items: { type: 'string' } },
                   operations: { type: 'object', additionalProperties: { type: 'string' } },
+                  streams: {
+                    type: 'array', items: {
+                      type: 'object', required: ['name', 'entities', 'strategy', 'snapshotSemantics'],
+                      properties: {
+                        name: { type: 'string' },
+                        entities: { type: 'array', items: { type: 'string' } },
+                        strategy: { type: 'string', enum: ['full_refresh', 'provider_checkpoint'] },
+                        snapshotSemantics: { type: 'object', additionalProperties: { type: 'string', enum: ['complete', 'incremental'] } },
+                      },
+                    },
+                  },
                   pagination: { type: 'string' },
                   incrementalSync: { type: 'string' },
                 },
@@ -333,7 +344,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
           reconciliationStatus: positionSnapshots.reconciliationStatus,
           origin: positionSnapshots.origin,
           observedAt: positionSnapshots.observedAt,
-          retrievedAt: sourceRecords.retrievedAt,
+          retrievedAt: positionSnapshots.ingestedAt,
         },
       ).from(positionSnapshots)
         .innerJoin(providerAccounts, eq(positionSnapshots.providerAccountId, providerAccounts.id))
@@ -342,8 +353,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         .innerJoin(markets, eq(instruments.marketId, markets.id))
         .innerJoin(events, eq(markets.eventId, events.id))
         .innerJoin(sourceRecords, eq(positionSnapshots.sourceRecordId, sourceRecords.id))
-        .where(and(eq(portfolios.id, portfolio.id), eq(portfolios.ownerId, request.principalId!)))
-        .orderBy(positionSnapshots.providerAccountId, positionSnapshots.instrumentId, desc(positionSnapshots.observedAt), desc(positionSnapshots.ingestedAt), desc(positionSnapshots.id))
+        .where(and(eq(portfolios.id, portfolio.id), eq(portfolios.ownerId, request.principalId!), eq(positionSnapshots.isCurrent, true)))
+        .orderBy(positionSnapshots.providerAccountId, positionSnapshots.instrumentId)
         .limit(limit)
         .offset(offset)
       return { items, pagination: pagination(limit, offset, items.length) }
@@ -551,14 +562,14 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
           balance: cashBalanceSnapshots.balance,
           assetCode: cashBalanceSnapshots.assetCode,
           observedAt: cashBalanceSnapshots.observedAt,
-          retrievedAt: sourceRecords.retrievedAt,
+          retrievedAt: cashBalanceSnapshots.ingestedAt,
         },
       ).from(cashBalanceSnapshots)
         .innerJoin(providerAccounts, eq(cashBalanceSnapshots.providerAccountId, providerAccounts.id))
         .innerJoin(portfolios, eq(providerAccounts.portfolioId, portfolios.id))
         .innerJoin(sourceRecords, eq(cashBalanceSnapshots.sourceRecordId, sourceRecords.id))
-        .where(and(eq(portfolios.id, portfolio.id), eq(portfolios.ownerId, request.principalId!)))
-        .orderBy(cashBalanceSnapshots.providerAccountId, cashBalanceSnapshots.assetCode, desc(cashBalanceSnapshots.observedAt), desc(cashBalanceSnapshots.id))
+        .where(and(eq(portfolios.id, portfolio.id), eq(portfolios.ownerId, request.principalId!), eq(cashBalanceSnapshots.isCurrent, true)))
+        .orderBy(cashBalanceSnapshots.providerAccountId, cashBalanceSnapshots.assetCode)
         .limit(limit)
         .offset(offset)
       return { items, pagination: pagination(limit, offset, items.length) }
@@ -617,10 +628,17 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
             entityType: { type: 'string' },
             status: { type: 'string' },
             reasonCode: { type: ['string', 'null'] },
-            historyStart: { type: ['string', 'null'], format: 'date-time' },
-            historyEnd: { type: ['string', 'null'], format: 'date-time' },
+            observedRecordStart: { type: ['string', 'null'], format: 'date-time' },
+            observedRecordEnd: { type: ['string', 'null'], format: 'date-time' },
+            coverageStart: { type: ['string', 'null'], format: 'date-time' },
+            coverageEnd: { type: ['string', 'null'], format: 'date-time' },
             sourceAsOf: { type: ['string', 'null'], format: 'date-time' },
-            retrievedAt: { type: 'string', format: 'date-time' },
+            lastAttemptAt: { type: ['string', 'null'], format: 'date-time' },
+            lastAttemptStatus: { type: ['string', 'null'] },
+            lastAttemptCoverageStatus: { type: ['string', 'null'] },
+            lastAttemptReasonCode: { type: ['string', 'null'] },
+            lastSuccessfulSyncAt: { type: ['string', 'null'], format: 'date-time' },
+            updatedAt: { type: 'string', format: 'date-time' },
           }),
           404: errorResponseSchema,
         },
@@ -636,10 +654,17 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         entityType: dataCoverage.entityType,
         status: dataCoverage.status,
         reasonCode: dataCoverage.reasonCode,
-        historyStart: dataCoverage.historyStart,
-        historyEnd: dataCoverage.historyEnd,
+        observedRecordStart: dataCoverage.observedRecordStart,
+        observedRecordEnd: dataCoverage.observedRecordEnd,
+        coverageStart: dataCoverage.coverageStart,
+        coverageEnd: dataCoverage.coverageEnd,
         sourceAsOf: dataCoverage.sourceAsOf,
-        retrievedAt: dataCoverage.retrievedAt,
+        lastAttemptAt: dataCoverage.lastAttemptAt,
+        lastAttemptStatus: dataCoverage.lastAttemptStatus,
+        lastAttemptCoverageStatus: dataCoverage.lastAttemptCoverageStatus,
+        lastAttemptReasonCode: dataCoverage.lastAttemptReasonCode,
+        lastSuccessfulSyncAt: dataCoverage.lastSuccessfulSyncAt,
+        updatedAt: dataCoverage.updatedAt,
       }).from(dataCoverage)
         .innerJoin(providerAccounts, eq(dataCoverage.providerAccountId, providerAccounts.id))
         .innerJoin(portfolios, eq(providerAccounts.portfolioId, portfolios.id))
@@ -669,6 +694,12 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
             pagesRead: { type: 'integer' },
             recordsSeen: { type: 'integer' },
             recordsRejected: { type: 'integer' },
+            cursorAtStart: { type: ['string', 'null'] },
+            cursorAtEnd: { type: ['string', 'null'] },
+            checkpointAtStart: { type: ['string', 'null'] },
+            checkpointAtEnd: { type: ['string', 'null'] },
+            positionSnapshotComplete: { type: 'boolean' },
+            cashBalanceSnapshotComplete: { type: 'boolean' },
             errorCode: { type: ['string', 'null'] },
           }),
           404: errorResponseSchema,
@@ -689,6 +720,12 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         pagesRead: syncRuns.pagesRead,
         recordsSeen: syncRuns.recordsSeen,
         recordsRejected: syncRuns.recordsRejected,
+        cursorAtStart: syncRuns.cursorAtStart,
+        cursorAtEnd: syncRuns.cursorAtEnd,
+        checkpointAtStart: syncRuns.checkpointAtStart,
+        checkpointAtEnd: syncRuns.checkpointAtEnd,
+        positionSnapshotComplete: syncRuns.positionSnapshotComplete,
+        cashBalanceSnapshotComplete: syncRuns.cashBalanceSnapshotComplete,
         errorCode: syncRuns.errorCode,
       }).from(syncRuns)
         .innerJoin(providerAccounts, eq(syncRuns.providerAccountId, providerAccounts.id))
@@ -710,14 +747,24 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         response: {
           200: {
             type: 'object',
-            required: ['runId', 'providerAccountId', 'status', 'pagesRead', 'recordsSeen', 'errorCode', 'startedAt', 'finishedAt'],
+            required: ['providerAccountId', 'status', 'streams', 'startedAt', 'finishedAt'],
             properties: {
-              runId: uuidSchema,
               providerAccountId: uuidSchema,
               status: { type: 'string', enum: ['complete', 'partial', 'failed'] },
-              pagesRead: { type: 'integer' },
-              recordsSeen: { type: 'integer' },
-              errorCode: { type: ['string', 'null'] },
+              streams: {
+                type: 'array', items: {
+                  type: 'object',
+                  required: ['streamName', 'status', 'pagesRead', 'recordsSeen', 'errorCode', 'runId'],
+                  properties: {
+                    streamName: { type: 'string' },
+                    status: { type: 'string', enum: ['complete', 'partial', 'failed'] },
+                    pagesRead: { type: 'integer' },
+                    recordsSeen: { type: 'integer' },
+                    errorCode: { type: ['string', 'null'] },
+                    runId: uuidSchema,
+                  },
+                },
+              },
               startedAt: { type: 'string', format: 'date-time' },
               finishedAt: { type: 'string', format: 'date-time' },
             },
@@ -729,10 +776,10 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         },
       },
     }, async (request, reply) => {
-      const account = await getSyncAccount(options.database, request.params.accountId, request.principalId!)
+      const account = await getOwnedProviderAccount(options.database, request.params.accountId, request.principalId!)
       if (!account) return reply.code(404).send(errorBody(request.id, 'not_found', 'The requested resource was not found.'))
       try {
-        const result = await ingestion.syncProviderAccount(account)
+        const result = await ingestion.syncProviderAccount(account.id)
         return reply.code(result.status === 'failed' ? 502 : 200).send(result)
       } catch (error) {
         if (error instanceof SyncAlreadyRunningError) {
@@ -742,6 +789,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
           return reply.code(422).send(errorBody(request.id, error.code, 'This provider account cannot be synchronized by an available adapter.'))
         }
         if (error instanceof IngestionError) {
+          if (error.code === 'provider_account_disabled') {
+            return reply.code(409).send(errorBody(request.id, error.code, 'The provider account is disabled.'))
+          }
           return reply.code(409).send(errorBody(request.id, error.code, 'The synchronization could not be started.'))
         }
         throw error
@@ -758,4 +808,16 @@ async function getOwnedPortfolio(database: Database, portfolioId: string, ownerI
     .where(and(eq(portfolios.id, portfolioId), eq(portfolios.ownerId, ownerId)))
     .limit(1)
   return portfolio
+}
+
+async function getOwnedProviderAccount(database: Database, accountId: string, ownerId: string) {
+  const [account] = await database.select({ id: providerAccounts.id })
+    .from(providerAccounts)
+    .innerJoin(portfolios, eq(providerAccounts.portfolioId, portfolios.id))
+    .where(and(
+      eq(providerAccounts.id, accountId),
+      eq(portfolios.ownerId, ownerId),
+    ))
+    .limit(1)
+  return account
 }
