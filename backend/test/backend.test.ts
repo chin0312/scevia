@@ -239,8 +239,23 @@ describe('migrations and canonical persistence', () => {
     expect(correctedState.cash).toContainEqual(expect.objectContaining({
       account, balance: '955', realized: '18', portfolioValue: '1021',
     }))
+    const timestamp = '2026-11-25T02:15:00.000Z'
+    const quantityPatch = { key: first.key, action: 'correct', correction: { quantity: '120', timestamp } }
+    expect((await choose({ changes: [quantityPatch] })).statusCode).toBe(200)
+    expect((await choose({ changes: [{ key: first.key, action: 'exclude' }] })).statusCode).toBe(200)
+    const filters = { account, inclusion: 'excluded', from: timestamp, through: timestamp }
+    const filtered = (await get('/accounting/records?' + new URLSearchParams(filters))).json()
+    expect(filtered.items).toEqual([expect.objectContaining({ key: first.key, effective: null,
+      original: expect.objectContaining({ price: '0.4', quantity: '100' }),
+      adjusted: expect.objectContaining({ price: '0.45', quantity: '120', timestamp }),
+    })])
+    expect((await choose({ selection: { ...filters, action: 'restore' } })).statusCode).toBe(200)
+    expect((await get('/accounting/records?key=' + encodeURIComponent(first.key))).json().items[0])
+      .toMatchObject({ effective: { observation: { price: '0.45', quantity: '120', timestamp } } })
     const reset = await choose({ changes: [{ key: first.key, action: 'reset_correction' }] })
     expect(reset.statusCode).toBe(200)
+    expect((await get('/accounting/records?key=' + encodeURIComponent(first.key))).json().items[0])
+      .toMatchObject({ adjusted: { price: '0.4', quantity: '100', timestamp: '2026-11-25T02:00:00.000Z' } })
     expect((await beforeRewards()).cash).toContainEqual(expect.objectContaining({ account, portfolioValue: '1026' }))
     expect((await choose(adjustment)).statusCode).toBe(200)
     expect((await choose({ changes: [{ key: preferred.key, action: 'exclude' }] })).statusCode).toBe(200)

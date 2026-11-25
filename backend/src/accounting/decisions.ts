@@ -39,19 +39,20 @@ export function applyDecisions(evidence: Evidence[], decisions: Map<string, Port
       || !!((decision.membershipRevision && decision.membershipRevision !== revision) || (decision.financial && decision.financial.revision !== revision)
       || (decision.identity && decision.identity.revision !== revision)
       || (decision.duplicate?.sourceRevision && decision.duplicate.sourceRevision !== revision))
+    const adjusted = decision.financial?.revision === revision ? decision.financial.values : item.observation
     let effective: Evidence | null = item
     if (excluded) effective = null
     else if ((decision.financial && decision.financial.revision !== revision) || (decision.identity && decision.identity.revision !== revision)) {
       effective = { ...item, unresolvedReason: 'user_decision_evidence_changed' }
     } else if (decision.identity || decision.financial) {
-      const observation = decision.financial?.values ?? item.observation
+      const observation = adjusted
       effective = { ...item, observation: { ...observation,
         id: decision.identity?.mode === 'distinct' || item.unresolvedReason || !observation.id ? 'local:' + key : observation.id,
       }, authority: 'user_accepted' }
       delete effective.unresolvedReason
     }
     return { key, revision, acquisition: item.acquisition ?? ('batchId' in item ? 'import' : 'provider'),
-      decision: saved, dimensions: decision, linkedSourceRecordId: item.linkedSourceRecordId ?? null, revisionChanged, original: item.originalObservation ?? item.observation,
+      decision: saved, dimensions: decision, linkedSourceRecordId: item.linkedSourceRecordId ?? null, revisionChanged, adjusted, original: item.originalObservation ?? item.observation,
       providerActivity: item.providerActivity ?? null, instrumentMetadata: item.instrumentMetadata ?? null, originalReason: item.unresolvedReason ?? null, effective, effectiveRevision: effective ? evidenceRevision(effective) : null,
       inclusion: excluded ? 'excluded' : effective?.unresolvedReason || !effective?.observation.id ? 'unresolved' : 'included',
       duplicateLinkStatus: null as string | null, duplicateTarget: decision.duplicate?.target ?? null, item,

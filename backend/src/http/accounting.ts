@@ -335,23 +335,27 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
   })
 
   function filterRecords(input: Awaited<ReturnType<typeof loadEvidence>>, q: z.infer<typeof recordFilter>) {
-    const candidates = potentialOverlaps(input.rawEvidence)
+    const adjusted = new Map(input.records.map((record) => [record.key, record.adjusted]))
+    const candidates = potentialOverlaps(input.rawEvidence.map((item) => ({
+      ...item, observation: adjusted.get(recordKey(item)) ?? item.observation,
+    })))
     return input.records.filter((record) => {
-      const row = record.effective?.observation ?? record.original
+      const row = record.adjusted
       const activity = record.providerActivity
+      const metadata = row.instrument === record.original.instrument ? record.instrumentMetadata : null
       const requiresReview = record.inclusion === 'unresolved' || record.revisionChanged
         || (record.duplicateLinkStatus !== null && record.duplicateLinkStatus !== 'selected')
       return (!q.account || row.account === q.account) && (!q.venue || row.venue === q.venue)
-        && (!q.instrument || row.instrument === q.instrument || activity?.instrument === q.instrument || record.instrumentMetadata?.instrument === q.instrument)
-        && (!q.market || activity?.market === q.market || record.instrumentMetadata?.market === q.market)
-        && (!q.event || record.instrumentMetadata?.event === q.event) && (!q.type || (activity?.type ?? row.type).toLowerCase() === q.type.toLowerCase())
+        && (!q.instrument || row.instrument === q.instrument || activity?.instrument === q.instrument || metadata?.instrument === q.instrument)
+        && (!q.market || activity?.market === q.market || metadata?.market === q.market)
+        && (!q.event || metadata?.event === q.event) && (!q.type || (activity?.type ?? row.type).toLowerCase() === q.type.toLowerCase())
         && (!q.batchId || (record.source.kind === 'import' && record.source.batchId === q.batchId))
         && (!q.source || record.acquisition === q.source) && (!q.inclusion || record.inclusion === q.inclusion)
         && (!q.key || record.key === q.key) && (!q.from || Date.parse(row.timestamp) >= Date.parse(q.from))
         && (!q.through || Date.parse(row.timestamp) <= Date.parse(q.through))
         && (!q.duplicates || candidates.has(record.key) === (q.duplicates === 'yes'))
         && (!q.review || requiresReview === (q.review === 'required'))
-        && (!q.search || [record.key, row.id, row.instrument, activity?.externalId, activity?.market, activity?.transactionHash, record.instrumentMetadata?.title]
+        && (!q.search || [record.key, row.id, record.original.id, record.effective?.observation.id, row.instrument, activity?.externalId, activity?.market, activity?.transactionHash, metadata?.title]
           .some((value) => value?.toLowerCase().includes(q.search!.toLowerCase())))
     }).map((record) => ({ ...record, potentialOverlap: candidates.get(record.key) ?? null }))
   }
@@ -368,7 +372,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const input = await loadEvidence(portfolioId, operationalCutoff)
     if (input.truncated) return reply.code(422).send({ error: { code: 'provider_evidence_limit' } })
     const records = filterRecords(input, request.query)
-      .sort((a, b) => b.original.timestamp.localeCompare(a.original.timestamp) || a.key.localeCompare(b.key))
+      .sort((a, b) => b.adjusted.timestamp.localeCompare(a.adjusted.timestamp) || a.key.localeCompare(b.key))
     const { offset = 0, limit = 50 } = request.query
     return { offset, limit, total: records.length, items: records.slice(offset, offset + limit) }
   })
@@ -412,7 +416,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
 
       if (change.action === 'correct') {
         if (record.source.kind !== 'import' || !change.correction || (record.linkedSourceRecordId && record.dimensions.identity?.mode !== 'distinct')) throw new Error('import_correction_required')
-        const { coveredThrough, entitlementId, relatedEventId, feeTiming, completeSet, ...base } = original
+        const { coveredThrough, entitlementId, relatedEventId, feeTiming, completeSet, ...base } = record.adjusted
         if (coveredThrough || entitlementId || relatedEventId || feeTiming || completeSet) throw new Error('replace_complex_event_via_import')
         next.financial = { revision: record.revision, values: normalizeManualEvent({ ...base, ...change.correction, venue: base.venue, account: base.account,
           id: base.id }) }

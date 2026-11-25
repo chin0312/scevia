@@ -97,3 +97,9 @@ Use the snapshot comparison's scope and timestamp. A comparison against a user-s
 The reference portfolio yields value 1,026. After an owner resolves an accidental duplicate and deliberately excludes the first purchase, the selected replay yields 20 shares, basis 12, cash 1,000, realized 12, unrealized -1 and value 1,011. Restoring that purchase returns the replay to 1,026.
 
 Correcting the first buy to 0.45, excluding it, then restoring membership leaves the corrected replay at 120 shares, average cost 0.525, basis 63, cash 955, realized 18, unrealized 3 and value 1,021. Resetting the correction returns value to 1,026.
+
+Record inspection exposes `original` source values, revision-applicable `adjusted` values regardless of membership, and `effective` evidence for replay. Filters and bulk selection use the adjusted values. Partial corrections build on the applicable adjustment. Reset the correction to restore source financial values.
+
+### Phase 4 and integration follow-up
+
+Large portfolios can hit the current provider evidence and replay work limits. Phase 4 should evaluate scoped evidence loading and pagination while keeping truncation explicit. Coverage describes the selected evidence, opening declarations, and provider observations separately. Integration should preserve those distinctions and leave full-account metrics unavailable where coverage is unverified. Historical daily valuations currently replay the bounded evidence at each cutoff. Evaluate incremental replay or checkpoints in Phase 4 while preserving cutoff accuracy and correction semantics.
