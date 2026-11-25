@@ -30,6 +30,12 @@ const providerPageSchema = z.object({
   nextCursor: z.string().min(1).max(4096).nullable(),
   checkpoint: z.string().min(1).max(4096).nullable(),
   coverage: z.partialRecord(coverageEntitySchema, coverageReportSchema),
+  diagnostics: z.object({
+    upstreamRowsReceived: z.number().int().min(0).max(100_000).optional(),
+    sourceRowsRetained: z.number().int().min(0).max(100_000).optional(),
+    invalidRecords: z.number().int().min(0).max(100_000).optional(),
+    excludedRecords: z.number().int().min(0).max(100_000).optional(),
+  }).strict().optional(),
 }).strict()
 
 const entityForKind: Record<NormalizedRecord['kind'], CoverageEntity> = {
@@ -77,7 +83,14 @@ export function validateProviderPage(value: unknown, stream: ProviderSyncStream)
       reasonCode: report.reasonCode ?? null,
     },
   ])) as Partial<Record<CoverageEntity, EntityCoverageReport>>
-  return { ...parsed.data, coverage }
+  const { diagnostics, ...page } = parsed.data
+  const validatedDiagnostics = diagnostics === undefined ? undefined : {
+    ...(diagnostics.upstreamRowsReceived === undefined ? {} : { upstreamRowsReceived: diagnostics.upstreamRowsReceived }),
+    ...(diagnostics.sourceRowsRetained === undefined ? {} : { sourceRowsRetained: diagnostics.sourceRowsRetained }),
+    ...(diagnostics.invalidRecords === undefined ? {} : { invalidRecords: diagnostics.invalidRecords }),
+    ...(diagnostics.excludedRecords === undefined ? {} : { excludedRecords: diagnostics.excludedRecords }),
+  }
+  return { ...page, coverage, ...(validatedDiagnostics ? { diagnostics: validatedDiagnostics } : {}) }
 }
 
 export function validateNormalizedRecords(value: unknown, stream: ProviderSyncStream): NormalizedRecord[] {
@@ -95,7 +108,8 @@ export function validateNormalizedRecords(value: unknown, stream: ProviderSyncSt
     if (!parsed.success) throw new IngestionError('invalid_normalized_provider_record')
     const entity = entityForKind[parsed.data.kind]
     const isSharedMarketReference = parsed.data.kind === 'market' && stream.referenceEntities?.includes('markets') === true
-    if (!stream.entities.includes(entity) && !isSharedMarketReference) {
+    const isRetainedAuxiliaryFact = stream.auxiliaryEntities?.includes(entity) === true
+    if (!stream.entities.includes(entity) && !isSharedMarketReference && !isRetainedAuxiliaryFact) {
       throw new IngestionError('provider_record_outside_stream')
     }
     records.push(parsed.data)

@@ -1,5 +1,3 @@
-import { Decimal } from 'decimal.js'
-
 const DATA_API = 'https://data-api.polymarket.com'
 const GAMMA_API = 'https://gamma-api.polymarket.com'
 const CLOB_API = 'https://clob.polymarket.com'
@@ -11,6 +9,7 @@ const financialNumberKeys = new Set([
   'current_value', 'entry_cost_usdc', 'entry_fees_usdc', 'total_cost_usdc',
   'total_size', 'realized_pnl', 'unrealized_pnl', 'total_pnl', 'percent_pnl',
   'percent_realized_pnl', 'final_price', 'payout', 'volume', 'liquidity',
+  'rate', 'rebateRate', 'rebate_rate', 'takerBaseFee', 'taker_base_fee', 'makerBaseFee', 'maker_base_fee',
 ])
 
 interface JsonSourceContext {
@@ -97,6 +96,7 @@ export class PolymarketHttpClient {
     if (!response.ok) {
       const status = response.status
       const retryable = status === 408 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504
+      await response.body?.cancel().catch(() => undefined)
       throw new PolymarketRequestError(
         status === 429 ? 'polymarket_rate_limited' : status === 404 ? 'polymarket_not_found' : 'polymarket_upstream_error',
         retryable,
@@ -131,8 +131,11 @@ async function readBoundedText(response: Response, maxBytes: number): Promise<st
       chunks.push(value)
     }
   } catch (error) {
+    await reader.cancel().catch(() => undefined)
     if (error instanceof PolymarketRequestError) throw error
     throw new PolymarketRequestError('polymarket_upstream_read_failed', true, null, response.status)
+  } finally {
+    reader.releaseLock()
   }
   const merged = new Uint8Array(total)
   let offset = 0
@@ -154,11 +157,32 @@ function parseRetryAfter(value: string | null): number | null {
 export function decimalString(value: unknown): string | null {
   if (typeof value !== 'string' && typeof value !== 'number') return null
   const text = String(value)
-  if (!/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:e[+-]?\d+)?$/i.test(text)) return null
-  try {
-    const result = new Decimal(text)
-    return result.isFinite() ? result.toFixed() : null
-  } catch {
-    return null
+  if (text.length > 128) return null
+  const match = /^(-?)(0|[1-9]\d*)(?:\.(\d+))?(?:e([+-]?\d+))?$/i.exec(text)
+  if (!match) return null
+  const exponent = match[4] === undefined ? 0 : Number(match[4])
+  if (!Number.isSafeInteger(exponent) || Math.abs(exponent) > 100) return null
+  const integer = match[2]!
+  const fractional = match[3] ?? ''
+  const digits = integer + fractional
+  const decimalPoint = integer.length + exponent
+
+  let whole: string
+  let fraction: string
+  if (decimalPoint <= 0) {
+    whole = '0'
+    fraction = `${'0'.repeat(-decimalPoint)}${digits}`
+  } else if (decimalPoint >= digits.length) {
+    whole = `${digits}${'0'.repeat(decimalPoint - digits.length)}`
+    fraction = ''
+  } else {
+    whole = digits.slice(0, decimalPoint)
+    fraction = digits.slice(decimalPoint)
   }
+
+  whole = whole.replace(/^0+/, '') || '0'
+  fraction = fraction.replace(/0+$/, '')
+  if (whole.length > 20 || fraction.length > 18) return null
+  if (whole === '0' && fraction.length === 0) return '0'
+  return `${match[1]}${whole}${fraction.length > 0 ? `.${fraction}` : ''}`
 }

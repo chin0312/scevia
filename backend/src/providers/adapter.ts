@@ -5,6 +5,12 @@ export interface ProviderPage {
   nextCursor: string | null
   checkpoint: string | null
   coverage: Partial<Record<CoverageEntity, EntityCoverageReport>>
+  diagnostics?: {
+    upstreamRowsReceived?: number
+    sourceRowsRetained?: number
+    invalidRecords?: number
+    excludedRecords?: number
+  }
 }
 
 export interface FetchPageRequest {

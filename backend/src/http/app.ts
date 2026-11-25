@@ -3,7 +3,8 @@ import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
 import swagger from '@fastify/swagger'
 import swaggerUi from '@fastify/swagger-ui'
-import { and, desc, eq, ne, sql } from 'drizzle-orm'
+import { and, desc, eq, sql } from 'drizzle-orm'
+import { Decimal } from 'decimal.js'
 import type { ServerConfig } from '../config.js'
 import type { Database } from '../db/client.js'
 import {
@@ -42,6 +43,10 @@ interface PageQuery {
   offset: number
 }
 
+interface SourcePageQuery extends PageQuery {
+  providerAccountId?: string
+}
+
 interface PortfolioParams {
   portfolioId: string
 }
@@ -72,6 +77,10 @@ const paginationQuerySchema = {
     offset: { type: 'integer', minimum: 0, maximum: 100_000, default: 0 },
   },
 }
+const sourcePaginationQuerySchema = {
+  ...paginationQuerySchema,
+  properties: { ...paginationQuerySchema.properties, providerAccountId: uuidSchema },
+}
 const portfolioParamsSchema = {
   type: 'object',
   required: ['portfolioId'],
@@ -101,21 +110,33 @@ const errorResponseSchema = {
 }
 const marketCandidateSchema = {
   type: 'object',
-  required: ['providerCode', 'eventId', 'eventSlug', 'eventTitle', 'eventDescription', 'eventLifecycle', 'markets'],
+  required: ['providerCode', 'eventId', 'eventIdentity', 'eventSlug', 'eventTitle', 'eventDescription', 'eventLifecycle', 'enrichmentStatus', 'enrichmentErrors', 'marketsTruncated', 'markets'],
   properties: {
     providerCode: { type: 'string', const: 'polymarket' },
-    eventId: { type: 'string' },
+    eventId: { type: ['string', 'null'] },
+    eventIdentity: {
+      type: 'object',
+      required: ['kind', 'value'],
+      properties: {
+        kind: { type: 'string', enum: ['provider_event_id', 'slug_only', 'unavailable'] },
+        value: { type: ['string', 'null'] },
+      },
+    },
     eventSlug: { type: ['string', 'null'] },
     eventTitle: { type: ['string', 'null'] },
     eventDescription: { type: ['string', 'null'] },
     eventLifecycle: { type: 'string' },
+    enrichmentStatus: { type: 'string', enum: ['complete', 'partial', 'unavailable'] },
+    enrichmentErrors: { type: 'array', items: { type: 'string' } },
+    marketsTruncated: { type: 'boolean' },
     markets: {
       type: 'array',
       items: {
         type: 'object',
-        required: ['providerMarketId', 'conditionId', 'slug', 'url', 'title', 'version', 'lifecycle', 'description', 'resolutionSource', 'resolutionRules', 'endDate', 'updatedAt', 'negativeRisk', 'feeRateBps', 'outcomes'],
+        required: ['providerMarketId', 'providerMarketSlug', 'conditionId', 'slug', 'url', 'title', 'version', 'lifecycle', 'description', 'resolutionSource', 'resolutionRules', 'endDate', 'updatedAt', 'negativeRisk', 'feeMetadata', 'outcomes'],
         properties: {
           providerMarketId: { type: 'string' },
+          providerMarketSlug: { type: 'string' },
           conditionId: { type: 'string' },
           slug: { type: 'string' },
           url: { type: 'string', format: 'uri' },
@@ -128,14 +149,34 @@ const marketCandidateSchema = {
           endDate: { type: ['string', 'null'], format: 'date-time' },
           updatedAt: { type: ['string', 'null'], format: 'date-time' },
           negativeRisk: { type: ['boolean', 'null'] },
-          feeRateBps: { type: ['string', 'null'] },
+          feeMetadata: {
+            type: 'object',
+            required: ['status', 'source', 'retrievedAt', 'enabled', 'rate', 'exponent', 'takerOnly', 'makerFeesCharged', 'rebateRate', 'rebateRateSemantics', 'amountUnit', 'historicalFeesAvailable'],
+            properties: {
+              status: { type: 'string', enum: ['fee_free', 'known', 'incomplete', 'unknown'] },
+              source: { type: 'string', const: 'gamma_market' },
+              retrievedAt: { type: 'string', format: 'date-time' },
+              enabled: { type: ['boolean', 'null'] },
+              rate: { type: ['string', 'null'] },
+              exponent: { type: ['number', 'null'] },
+              takerOnly: { type: ['boolean', 'null'] },
+              makerFeesCharged: { type: ['boolean', 'null'] },
+              rebateRate: { type: ['string', 'null'] },
+              rebateRateSemantics: { type: ['string', 'null'], enum: ['market_level_fraction', null] },
+              amountUnit: { type: 'string', const: 'USDC' },
+              historicalFeesAvailable: { type: 'boolean', const: false },
+            },
+          },
           outcomes: {
             type: 'array',
             items: {
               type: 'object',
-              required: ['assetId', 'name', 'outcomeIndex', 'referencePrice'],
+              required: ['assetId', 'assetIdType', 'positionId', 'clobTokenId', 'name', 'outcomeIndex', 'referencePrice'],
               properties: {
-                assetId: { type: 'string' },
+                assetId: { type: ['string', 'null'] },
+                assetIdType: { type: 'string', enum: ['position_id', 'clob_token_id', 'unavailable'] },
+                positionId: { type: ['string', 'null'] },
+                clobTokenId: { type: ['string', 'null'] },
                 name: { type: ['string', 'null'] },
                 outcomeIndex: { type: 'integer' },
                 referencePrice: {
@@ -159,7 +200,7 @@ const marketCandidateSchema = {
 }
 const marketSearchResponseSchema = {
   type: 'object',
-  required: ['providerCode', 'query', 'retrievedAt', 'items', 'pagination'],
+  required: ['providerCode', 'query', 'retrievedAt', 'items', 'pagination', 'enrichment'],
   properties: {
     providerCode: { type: 'string', const: 'polymarket' },
     query: { type: 'string' },
@@ -167,8 +208,26 @@ const marketSearchResponseSchema = {
     items: { type: 'array', items: marketCandidateSchema },
     pagination: {
       type: 'object',
-      required: ['hasMore', 'totalResults'],
-      properties: { hasMore: { type: 'boolean' }, totalResults: { type: ['integer', 'null'] } },
+      required: ['page', 'pageSize', 'hasMore', 'providerHasMore', 'totalResults', 'nextPage', 'continuationAvailable', 'truncated'],
+      properties: {
+        page: { type: 'integer' },
+        pageSize: { type: 'integer' },
+        hasMore: { type: 'boolean' },
+        providerHasMore: { type: ['boolean', 'null'] },
+        totalResults: { type: ['integer', 'null'] },
+        nextPage: { type: ['integer', 'null'] },
+        continuationAvailable: { type: 'boolean' },
+        truncated: { type: 'boolean' },
+      },
+    },
+    enrichment: {
+      type: 'object',
+      required: ['status', 'errors', 'marketsTruncated'],
+      properties: {
+        status: { type: 'string', enum: ['complete', 'partial'] },
+        errors: { type: 'array', items: { type: 'string' } },
+        marketsTruncated: { type: 'boolean' },
+      },
     },
   },
 }
@@ -207,6 +266,8 @@ const priceHistoryResponseSchema = {
       },
     },
     nextCursor: { type: ['string', 'null'] },
+    invalidPointCount: { type: 'integer' },
+    complete: { type: 'boolean' },
   },
 }
 const paginationResponseProperties = {
@@ -348,6 +409,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
                         name: { type: 'string' },
                         entities: { type: 'array', items: { type: 'string' } },
                         referenceEntities: { type: 'array', items: { type: 'string' } },
+                        auxiliaryEntities: { type: 'array', items: { type: 'string' } },
                         strategy: { type: 'string', enum: ['full_refresh', 'provider_checkpoint'] },
                         snapshotSemantics: { type: 'object', additionalProperties: { type: 'string', enum: ['complete', 'incremental'] } },
                       },
@@ -364,7 +426,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     },
   }, async () => ({ items: registry.listCapabilities() }))
 
-  app.get<{ Querystring: { q: string; limit: number } }>('/v1/market-data/search', {
+  app.get<{ Querystring: { q: string; limit: number; page: number } }>('/v1/market-data/search', {
     config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
     schema: {
       tags: ['public market data'],
@@ -374,13 +436,14 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         properties: {
           q: { type: 'string', minLength: 2, maxLength: 120 },
           limit: { type: 'integer', minimum: 1, maximum: 10, default: 5 },
+          page: { type: 'integer', minimum: 1, maximum: 100, default: 1 },
         },
       },
       response: { 200: marketSearchResponseSchema, 400: errorResponseSchema, 502: errorResponseSchema },
     },
   }, async (request, reply) => {
     try {
-      return await marketData.search(request.query.q, request.query.limit ?? 5, request.raw.signal)
+      return await marketData.search(request.query.q, request.query.limit ?? 5, request.query.page ?? 1, request.raw.signal)
     } catch (error) {
       if (error instanceof PublicMarketError) {
         return reply.code(error.httpStatus).send(errorBody(request.id, error.code, 'Public market data is temporarily unavailable.'))
@@ -601,13 +664,13 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       },
     )
 
-    privateApi.get<{ Params: PortfolioParams } & { Querystring: PageQuery }>('/portfolios/:portfolioId/positions', {
+    privateApi.get<{ Params: PortfolioParams } & { Querystring: SourcePageQuery }>('/portfolios/:portfolioId/positions', {
       schema: {
         ...authSchema,
         tags: ['portfolio data'],
         summary: 'List the latest provider-reported or reconstructed position snapshots',
         params: portfolioParamsSchema,
-        querystring: paginationQuerySchema,
+        querystring: sourcePaginationQuerySchema,
         response: {
           200: paginatedSchema({
             id: uuidSchema,
@@ -630,6 +693,11 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
             origin: { type: 'string' },
             observedAt: { type: 'string', format: 'date-time' },
             retrievedAt: { type: 'string', format: 'date-time' },
+            positionState: { type: 'string', enum: ['provider_reported_positive', 'provider_reported_zero', 'provider_confirmed_closed', 'provider_reported_redeemable', 'not_seen_in_latest_successful_refresh', 'latest_refresh_incomplete', 'unknown'] },
+            observationStatus: { type: 'string', enum: ['observed_in_latest_successful_refresh', 'not_seen_in_latest_successful_refresh', 'latest_attempt_incomplete', 'unknown'] },
+            lastSuccessfulSyncAt: { type: ['string', 'null'], format: 'date-time' },
+            latestAttemptAt: { type: ['string', 'null'], format: 'date-time' },
+            latestAttemptStatus: { type: ['string', 'null'] },
             providerStatus: { type: ['string', 'null'] },
             redeemable: { type: ['boolean', 'null'] },
             mergeable: { type: ['boolean', 'null'] },
@@ -656,10 +724,11 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       const portfolio = await getOwnedPortfolio(options.database, request.params.portfolioId, request.principalId!)
       if (!portfolio) return reply.code(404).send(errorBody(request.id, 'not_found', 'The requested resource was not found.'))
       const { limit, offset } = request.query
-      const items = await options.database.selectDistinctOn(
+      const positionRows = await options.database.selectDistinctOn(
         [positionSnapshots.providerAccountId, positionSnapshots.instrumentId],
         {
           id: positionSnapshots.id,
+          syncRunId: positionSnapshots.syncRunId,
           providerAccountId: providerAccounts.id,
           providerCode: providerAccounts.providerCode,
           sourceLabel: providerAccounts.label,
@@ -683,6 +752,10 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
           redeemable: positionSnapshots.redeemable,
           mergeable: positionSnapshots.mergeable,
           archived: positionSnapshots.archived,
+          lastSuccessfulRunId: dataCoverage.lastSuccessfulRunId,
+          lastSuccessfulSyncAt: dataCoverage.lastSuccessfulSyncAt,
+          latestAttemptAt: dataCoverage.lastAttemptAt,
+          latestAttemptStatus: dataCoverage.lastAttemptStatus,
           providerReported: {
             currentValue: positionSnapshots.providerCurrentValue,
             realizedPnl: positionSnapshots.providerRealizedPnl,
@@ -702,31 +775,69 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         .innerJoin(markets, eq(instruments.marketId, markets.id))
         .innerJoin(events, eq(markets.eventId, events.id))
         .innerJoin(sourceRecords, eq(positionSnapshots.sourceRecordId, sourceRecords.id))
+        .leftJoin(dataCoverage, and(
+          eq(dataCoverage.providerAccountId, positionSnapshots.providerAccountId),
+          eq(dataCoverage.entityType, 'positions'),
+        ))
         .where(and(
           eq(portfolios.id, portfolio.id),
           eq(portfolios.ownerId, request.principalId!),
           eq(positionSnapshots.isCurrent, true),
-          ne(positionSnapshots.quantity, '0'),
+          request.query.providerAccountId ? eq(providerAccounts.id, request.query.providerAccountId) : undefined,
         ))
         .orderBy(positionSnapshots.providerAccountId, positionSnapshots.instrumentId)
         .limit(limit)
         .offset(offset)
+      const items = positionRows.map((position) => {
+        const latestAttemptIncomplete = position.latestAttemptAt !== null
+          && (position.lastSuccessfulSyncAt === null || position.latestAttemptAt > position.lastSuccessfulSyncAt)
+          && position.latestAttemptStatus !== 'complete'
+        const observationStatus = latestAttemptIncomplete
+          ? 'latest_attempt_incomplete'
+          : position.lastSuccessfulRunId === null
+            ? 'unknown'
+            : position.syncRunId === position.lastSuccessfulRunId
+              ? 'observed_in_latest_successful_refresh'
+              : 'not_seen_in_latest_successful_refresh'
+        const positionState = observationStatus === 'latest_attempt_incomplete'
+          ? 'latest_refresh_incomplete'
+          : observationStatus === 'not_seen_in_latest_successful_refresh'
+            ? 'not_seen_in_latest_successful_refresh'
+            : observationStatus === 'unknown'
+              ? 'unknown'
+              : position.providerStatus?.toUpperCase() === 'CLOSED'
+                ? 'provider_confirmed_closed'
+                : position.redeemable === true || ['REDEEMABLE', 'REDEEMABLE_LOST'].includes(position.providerStatus?.toUpperCase() ?? '')
+                  ? 'provider_reported_redeemable'
+                  : new Decimal(position.quantity).isZero()
+                    ? 'provider_reported_zero'
+                    : 'provider_reported_positive'
+        return {
+          ...position,
+          positionState,
+          observationStatus,
+          lastSuccessfulSyncAt: position.lastSuccessfulSyncAt,
+          latestAttemptAt: position.latestAttemptAt,
+          latestAttemptStatus: position.latestAttemptStatus,
+        }
+      })
       return { items, pagination: pagination(limit, offset, items.length) }
     })
 
-    privateApi.get<{ Params: PortfolioParams } & { Querystring: PageQuery }>('/portfolios/:portfolioId/fills', {
+    privateApi.get<{ Params: PortfolioParams } & { Querystring: SourcePageQuery }>('/portfolios/:portfolioId/fills', {
       schema: {
         ...authSchema,
         tags: ['portfolio data'],
         summary: 'List fills with source fee availability and market metadata',
         params: portfolioParamsSchema,
-        querystring: paginationQuerySchema,
+        querystring: sourcePaginationQuerySchema,
         response: {
           200: paginatedSchema({
             id: uuidSchema,
             providerAccountId: uuidSchema,
             providerCode: { type: 'string' },
             externalId: { type: 'string' },
+            identityKind: { type: 'string', enum: ['provider_native', 'source_fingerprint'] },
             eventName: { type: 'string' },
             marketTitle: { type: 'string' },
             outcomeName: { type: 'string' },
@@ -752,6 +863,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         providerAccountId: providerAccounts.id,
         providerCode: providerAccounts.providerCode,
         externalId: fills.externalId,
+        identityKind: fills.identityKind,
         eventName: events.name,
         marketTitle: markets.title,
         outcomeName: instruments.outcomeName,
@@ -771,20 +883,23 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         .innerJoin(markets, eq(instruments.marketId, markets.id))
         .innerJoin(events, eq(markets.eventId, events.id))
         .innerJoin(sourceRecords, eq(fills.sourceRecordId, sourceRecords.id))
-        .where(and(eq(portfolios.id, portfolio.id), eq(portfolios.ownerId, request.principalId!)))
+        .where(and(
+          eq(portfolios.id, portfolio.id), eq(portfolios.ownerId, request.principalId!),
+          request.query.providerAccountId ? eq(providerAccounts.id, request.query.providerAccountId) : undefined,
+        ))
         .orderBy(desc(fills.occurredAt), desc(fills.id))
         .limit(limit)
         .offset(offset)
       return { items, pagination: pagination(limit, offset, items.length) }
     })
 
-    privateApi.get<{ Params: PortfolioParams } & { Querystring: PageQuery }>('/portfolios/:portfolioId/cash-movements', {
+    privateApi.get<{ Params: PortfolioParams } & { Querystring: SourcePageQuery }>('/portfolios/:portfolioId/cash-movements', {
       schema: {
         ...authSchema,
         tags: ['portfolio data'],
         summary: 'List signed deposits, withdrawals, transfers, and adjustments',
         params: portfolioParamsSchema,
-        querystring: paginationQuerySchema,
+        querystring: sourcePaginationQuerySchema,
         response: {
           200: paginatedSchema({
             id: uuidSchema,
@@ -822,27 +937,32 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         .innerJoin(providerAccounts, eq(cashMovements.providerAccountId, providerAccounts.id))
         .innerJoin(portfolios, eq(providerAccounts.portfolioId, portfolios.id))
         .innerJoin(sourceRecords, eq(cashMovements.sourceRecordId, sourceRecords.id))
-        .where(and(eq(portfolios.id, portfolio.id), eq(portfolios.ownerId, request.principalId!)))
+        .where(and(
+          eq(portfolios.id, portfolio.id), eq(portfolios.ownerId, request.principalId!),
+          request.query.providerAccountId ? eq(providerAccounts.id, request.query.providerAccountId) : undefined,
+        ))
         .orderBy(desc(cashMovements.occurredAt), desc(cashMovements.id))
         .limit(limit)
         .offset(offset)
       return { items, pagination: pagination(limit, offset, items.length) }
     })
 
-    privateApi.get<{ Params: PortfolioParams } & { Querystring: PageQuery }>('/portfolios/:portfolioId/activity-facts', {
+    privateApi.get<{ Params: PortfolioParams } & { Querystring: SourcePageQuery }>('/portfolios/:portfolioId/activity-facts', {
       schema: {
         ...authSchema,
         tags: ['portfolio data'],
         summary: 'List provider activity that has not been reconciled to canonical financial records',
         params: portfolioParamsSchema,
-        querystring: paginationQuerySchema,
+        querystring: sourcePaginationQuerySchema,
         response: {
           200: paginatedSchema({
             id: uuidSchema,
             providerAccountId: uuidSchema,
             providerCode: { type: 'string' },
             activityType: { type: 'string' },
-            occurredAt: { type: 'string', format: 'date-time' },
+            identityKind: { type: 'string', enum: ['provider_native', 'source_fingerprint'] },
+            sourceEndpoint: { type: 'string', enum: ['activity', 'trades', 'positions'] },
+            occurredAt: { type: ['string', 'null'], format: 'date-time' },
             transactionHash: { type: ['string', 'null'] },
             externalMarketId: { type: ['string', 'null'] },
             externalInstrumentId: { type: ['string', 'null'] },
@@ -850,7 +970,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
             quantity: { type: ['string', 'null'] },
             amount: { type: ['string', 'null'] },
             assetCode: { type: ['string', 'null'] },
-            classification: { type: 'string' },
+            price: { type: ['string', 'null'] },
+            classification: { type: 'string', enum: ['unreconciled', 'unresolved', 'overlap_candidate'] },
+            resolutionReason: { type: ['string', 'null'] },
           }),
           404: errorResponseSchema,
         },
@@ -863,6 +985,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         id: providerActivityFacts.id,
         providerAccountId: providerAccounts.id,
         providerCode: providerAccounts.providerCode,
+        identityKind: providerActivityFacts.identityKind,
+        sourceEndpoint: providerActivityFacts.sourceEndpoint,
         activityType: providerActivityFacts.activityType,
         occurredAt: providerActivityFacts.occurredAt,
         transactionHash: providerActivityFacts.transactionHash,
@@ -872,11 +996,16 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         quantity: providerActivityFacts.quantity,
         amount: providerActivityFacts.amount,
         assetCode: providerActivityFacts.assetCode,
+        price: providerActivityFacts.price,
         classification: providerActivityFacts.classification,
+        resolutionReason: providerActivityFacts.resolutionReason,
       }).from(providerActivityFacts)
         .innerJoin(providerAccounts, eq(providerActivityFacts.providerAccountId, providerAccounts.id))
         .innerJoin(portfolios, eq(providerAccounts.portfolioId, portfolios.id))
-        .where(and(eq(portfolios.id, portfolio.id), eq(portfolios.ownerId, request.principalId!)))
+        .where(and(
+          eq(portfolios.id, portfolio.id), eq(portfolios.ownerId, request.principalId!),
+          request.query.providerAccountId ? eq(providerAccounts.id, request.query.providerAccountId) : undefined,
+        ))
         .orderBy(desc(providerActivityFacts.occurredAt), desc(providerActivityFacts.id))
         .limit(limit)
         .offset(offset)
@@ -1021,13 +1150,13 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       return { items, pagination: pagination(limit, offset, items.length) }
     })
 
-    privateApi.get<{ Params: PortfolioParams } & { Querystring: PageQuery }>('/portfolios/:portfolioId/coverage', {
+    privateApi.get<{ Params: PortfolioParams } & { Querystring: SourcePageQuery }>('/portfolios/:portfolioId/coverage', {
       schema: {
         ...authSchema,
         tags: ['data coverage'],
         summary: 'Show available, partial, and unsupported data by source',
         params: portfolioParamsSchema,
-        querystring: paginationQuerySchema,
+        querystring: sourcePaginationQuerySchema,
         response: {
           200: paginatedSchema({
             providerAccountId: uuidSchema,
@@ -1090,7 +1219,10 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       }).from(dataCoverage)
         .innerJoin(providerAccounts, eq(dataCoverage.providerAccountId, providerAccounts.id))
         .innerJoin(portfolios, eq(providerAccounts.portfolioId, portfolios.id))
-        .where(and(eq(portfolios.id, portfolio.id), eq(portfolios.ownerId, request.principalId!)))
+        .where(and(
+          eq(portfolios.id, portfolio.id), eq(portfolios.ownerId, request.principalId!),
+          request.query.providerAccountId ? eq(providerAccounts.id, request.query.providerAccountId) : undefined,
+        ))
         .orderBy(providerAccounts.providerCode, dataCoverage.entityType)
         .limit(limit)
         .offset(offset)
@@ -1116,6 +1248,14 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
             pagesRead: { type: 'integer' },
             recordsSeen: { type: 'integer' },
             recordsRejected: { type: 'integer' },
+            rowsReceived: { type: 'integer' },
+            sourceRowsRetained: { type: 'integer' },
+            invalidRecords: { type: 'integer' },
+            recordsPersisted: { type: 'integer' },
+            exactDuplicates: { type: 'integer' },
+            unresolvedRecords: { type: 'integer' },
+            overlapCandidates: { type: 'integer' },
+            excludedRecords: { type: 'integer' },
             cursorAtStart: { type: ['string', 'null'] },
             cursorAtEnd: { type: ['string', 'null'] },
             checkpointAtStart: { type: ['string', 'null'] },
@@ -1142,6 +1282,14 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         pagesRead: syncRuns.pagesRead,
         recordsSeen: syncRuns.recordsSeen,
         recordsRejected: syncRuns.recordsRejected,
+        rowsReceived: syncRuns.rowsReceived,
+        sourceRowsRetained: syncRuns.sourceRowsRetained,
+        invalidRecords: syncRuns.invalidRecords,
+        recordsPersisted: syncRuns.recordsPersisted,
+        exactDuplicates: syncRuns.exactDuplicates,
+        unresolvedRecords: syncRuns.unresolvedRecords,
+        overlapCandidates: syncRuns.overlapCandidates,
+        excludedRecords: syncRuns.excludedRecords,
         cursorAtStart: syncRuns.cursorAtStart,
         cursorAtEnd: syncRuns.cursorAtEnd,
         checkpointAtStart: syncRuns.checkpointAtStart,
@@ -1176,12 +1324,20 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
               streams: {
                 type: 'array', items: {
                   type: 'object',
-                  required: ['streamName', 'status', 'pagesRead', 'recordsSeen', 'errorCode', 'runId'],
+                  required: ['streamName', 'status', 'pagesRead', 'recordsSeen', 'rowsReceived', 'sourceRowsRetained', 'invalidRecords', 'recordsPersisted', 'exactDuplicates', 'unresolvedRecords', 'overlapCandidates', 'excludedRecords', 'errorCode', 'runId'],
                   properties: {
                     streamName: { type: 'string' },
                     status: { type: 'string', enum: ['complete', 'partial', 'failed'] },
                     pagesRead: { type: 'integer' },
                     recordsSeen: { type: 'integer' },
+                    rowsReceived: { type: 'integer' },
+                    sourceRowsRetained: { type: 'integer' },
+                    invalidRecords: { type: 'integer' },
+                    recordsPersisted: { type: 'integer' },
+                    exactDuplicates: { type: 'integer' },
+                    unresolvedRecords: { type: 'integer' },
+                    overlapCandidates: { type: 'integer' },
+                    excludedRecords: { type: 'integer' },
                     errorCode: { type: ['string', 'null'] },
                     runId: uuidSchema,
                   },

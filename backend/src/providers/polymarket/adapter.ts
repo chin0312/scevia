@@ -26,6 +26,7 @@ interface TimeWindow {
 
 interface PagePayload {
   stream: 'positions' | 'trades' | 'activity'
+  positionStatus?: 'OPEN' | 'CLOSED'
   rows: Record<string, unknown>[]
   tokenRows: Record<string, unknown>[]
   retrievedAt: string
@@ -58,6 +59,7 @@ export class PolymarketAdapter implements ProviderAdapter {
       {
         name: 'trades',
         entities: ['markets', 'fills'],
+        auxiliaryEntities: ['activity'],
         strategy: 'provider_checkpoint',
         snapshotSemantics: {},
       },
@@ -95,6 +97,7 @@ export class PolymarketAdapter implements ProviderAdapter {
   normalizePage(page: ProviderPage, streamName: string): NormalizedRecord[] {
     const parsedPayload = z.object({
       stream: z.enum(['positions', 'trades', 'activity']),
+      positionStatus: z.enum(['OPEN', 'CLOSED']).optional(),
       rows: z.array(z.record(z.string(), z.unknown())).max(PAGE_SIZE),
       tokenRows: z.array(z.record(z.string(), z.unknown())).max(PAGE_SIZE * 4),
       retrievedAt: z.string().datetime({ offset: true }),
@@ -104,16 +107,30 @@ export class PolymarketAdapter implements ProviderAdapter {
     }
     const { rows, tokenRows, retrievedAt } = parsedPayload.data
     const records: unknown[] = []
+    let sourceRowsRetained = 0
+    let invalidRecords = 0
 
     if (streamName === 'positions') {
-      for (const row of rows) {
+      for (const [rowIndex, row] of rows.entries()) {
         const market = marketFromPosition(row)
         if (market) records.push(market)
-        const position = positionFromProviderRow(row, retrievedAt)
+        const position = positionFromProviderRow(row, retrievedAt, parsedPayload.data.positionStatus)
         if (position) {
+          sourceRowsRetained += 1
           records.push(position)
           const price = priceFromPosition(row, retrievedAt)
           if (price) records.push(price)
+        } else {
+          const unresolved = hasRetainableSourceEvidence(row)
+            ? activityFactFromRow(row, rowIndex, 'unresolved', 'position_fields_invalid', 'positions', 'POSITION_UNRESOLVED')
+            : null
+          if (unresolved) {
+            records.push({
+              ...unresolved,
+              rawPayload: { ...(unresolved.rawPayload as Record<string, unknown>), ...minimalPositionPayload(row) },
+            })
+            sourceRowsRetained += 1
+          } else invalidRecords += 1
         }
       }
     } else if (streamName === 'trades') {
@@ -122,38 +139,86 @@ export class PolymarketAdapter implements ProviderAdapter {
         return tokenId ? [[tokenId, token] as const] : []
       }))
       const emittedMarkets = new Set<string>()
-      for (const row of rows) {
+      for (const [rowIndex, row] of rows.entries()) {
         const tokenId = nonEmptyString(row.token_id)
         const token = tokenId ? tokensById.get(tokenId) : undefined
         const oppositeId = token ? nonEmptyString(token.opposite_token_id) : null
         const opposite = oppositeId ? tokensById.get(oppositeId) : undefined
-        if (!token || !opposite) continue
+        if (!token || !opposite) {
+          const unresolved = unresolvedTradeFact(row, rowIndex, !token ? 'token_metadata_missing' : 'opposite_token_metadata_missing')
+          if (unresolved) { records.push(unresolved); sourceRowsRetained += 1 } else invalidRecords += 1
+          continue
+        }
         const market = marketFromTokenPair(token, opposite, row)
-        if (!market) continue
+        if (!market) {
+          const unresolved = unresolvedTradeFact(row, rowIndex, 'market_metadata_invalid')
+          if (unresolved) { records.push(unresolved); sourceRowsRetained += 1 } else invalidRecords += 1
+          continue
+        }
         const externalMarketId = nonEmptyString(market.externalMarketId)
-        if (!externalMarketId) continue
+        if (!externalMarketId) {
+          const unresolved = unresolvedTradeFact(row, rowIndex, 'market_identity_missing')
+          if (unresolved) { records.push(unresolved); sourceRowsRetained += 1 } else invalidRecords += 1
+          continue
+        }
         if (!emittedMarkets.has(externalMarketId)) {
           emittedMarkets.add(externalMarketId)
           records.push(market)
         }
-        const fill = fillFromProviderRow(row, token)
-        if (fill) records.push(fill)
+        const fill = fillFromProviderRow(row, token, rowIndex)
+        if (fill) { records.push(fill); sourceRowsRetained += 1 }
+        else {
+          const unresolved = unresolvedTradeFact(row, rowIndex, 'trade_fields_invalid')
+          if (unresolved) { records.push(unresolved); sourceRowsRetained += 1 } else invalidRecords += 1
+        }
       }
     } else {
-      for (const row of rows) {
-        const type = nonEmptyString(row.type)?.toUpperCase()
-        if (!type) continue
-        if (type === 'TRADE' && row.is_combo !== true) continue
-        if (type === 'DEPOSIT' || type === 'WITHDRAWAL') {
-          const movement = cashMovementFromActivity(row)
-          if (movement) records.push(movement)
+      for (const [rowIndex, row] of rows.entries()) {
+        const type = nonEmptyString(row.type)?.toUpperCase().slice(0, 64)
+        if (!type) {
+          const unresolved = hasRetainableSourceEvidence(row)
+            ? activityFactFromRow(row, rowIndex, 'unresolved', 'activity_type_missing', 'activity', 'UNKNOWN_ACTIVITY')
+            : null
+          if (unresolved) { records.push(unresolved); sourceRowsRetained += 1 } else invalidRecords += 1
           continue
         }
-        const activityFact = activityFactFromRow(row)
-        if (activityFact) records.push(activityFact)
+        if (type === 'TRADE') {
+          const overlap = activityFactFromRow(row, rowIndex, 'overlap_candidate', null, 'activity')
+          if (overlap) { records.push(overlap); sourceRowsRetained += 1 } else invalidRecords += 1
+          continue
+        }
+        if (type === 'DEPOSIT' || type === 'WITHDRAWAL') {
+          const movement = cashMovementFromActivity(row)
+          if (movement) { records.push(movement); sourceRowsRetained += 1 }
+          else {
+            const unresolved = activityFactFromRow(row, rowIndex, 'unresolved', 'cash_movement_fields_invalid', 'activity')
+            if (unresolved) { records.push(unresolved); sourceRowsRetained += 1 } else invalidRecords += 1
+          }
+          continue
+        }
+        const activityFact = activityFactFromRow(row, rowIndex)
+        if (activityFact) { records.push(activityFact); sourceRowsRetained += 1 } else invalidRecords += 1
       }
     }
 
+    page.diagnostics = { ...page.diagnostics, sourceRowsRetained, invalidRecords }
+    const unresolvedRows = records.filter((record) => typeof record === 'object' && record !== null
+      && (record as { kind?: unknown }).kind === 'activity_fact'
+      && (record as { classification?: unknown }).classification === 'unresolved').length
+    const coverageReason = invalidRecords > 0 ? 'provider_records_rejected'
+      : unresolvedRows > 0 && streamName === 'trades' ? 'unresolved_trade_rows'
+        : unresolvedRows > 0 ? 'unresolved_activity_rows' : null
+    if (coverageReason !== null) {
+      const affectedEntities = streamName === 'positions' ? ['positions']
+        : streamName === 'trades' ? ['fills']
+          : ['activity', 'cash_movements']
+      for (const entity of affectedEntities) {
+        const prior = page.coverage[entity as keyof ProviderPage['coverage']]
+        if (prior && prior.reasonCode !== 'account_identity_mismatch') {
+          page.coverage[entity as keyof ProviderPage['coverage']] = { ...prior, status: 'partial', reasonCode: coverageReason }
+        }
+      }
+    }
     try {
       return records.map((record) => normalizedRecordSchema.parse(record))
     } catch {
@@ -162,27 +227,33 @@ export class PolymarketAdapter implements ProviderAdapter {
   }
 
   private async fetchPositions(request: FetchPageRequest): Promise<ProviderPage> {
+    const positionPage = decodePositionCursor(request.cursor)
     const query = new URLSearchParams({
       user: request.externalAccountId.toLowerCase(),
       limit: String(PAGE_SIZE),
-      status: 'OPEN',
+      status: positionPage.status,
       sort_by: 'TIMESTAMP',
       sort_direction: 'DESC',
       filter_type: 'TOKENS',
       filter_amount: '0',
       include_archived: 'true',
     })
-    if (request.cursor) query.set('cursor', request.cursor)
+    if (positionPage.cursor) query.set('cursor', positionPage.cursor)
     const envelope = envelopeSchema.parse(await this.client.getData('positions', query, request.signal))
-    const rows = envelope.data ?? []
+    const returnedRows = envelope.data ?? []
+    const { rows, excludedRecords } = validateAccountRows(returnedRows, request.externalAccountId)
     const nextCursor = envelope.pagination?.next_cursor ?? null
+    const cursorAfterPage = nextCursor !== null
+      ? encodePositionCursor(positionPage.status, nextCursor)
+      : positionPage.status === 'OPEN' ? encodePositionCursor('CLOSED', null) : null
     const retrievedAt = new Date().toISOString()
     return {
-      payload: { stream: 'positions', rows, tokenRows: [], retrievedAt } satisfies PagePayload,
-      nextCursor,
+      payload: { stream: 'positions', positionStatus: positionPage.status, rows, tokenRows: [], retrievedAt } satisfies PagePayload,
+      nextCursor: cursorAfterPage,
       checkpoint: null,
+      diagnostics: { upstreamRowsReceived: returnedRows.length, excludedRecords },
       coverage: {
-        positions: partialCoverage('provider_position_filter_and_snapshot_order'),
+        positions: partialCoverage(excludedRecords > 0 ? 'account_identity_mismatch' : 'provider_position_filter_and_snapshot_order'),
         prices: partialCoverage('provider_mark_timestamp_unavailable'),
       },
     }
@@ -199,7 +270,8 @@ export class PolymarketAdapter implements ProviderAdapter {
     })
     if (request.cursor) query.set('cursor', request.cursor)
     const envelope = envelopeSchema.parse(await this.client.getData('trades', query, request.signal))
-    const rows = envelope.data ?? []
+    const returnedRows = envelope.data ?? []
+    const { rows, excludedRecords } = validateAccountRows(returnedRows, request.externalAccountId)
     const firstIds = uniqueTokenIds(rows.map((row) => row.token_id))
     const firstTokenRows = await this.fetchTokenRows(firstIds, request.signal)
     const oppositeIds = uniqueTokenIds(firstTokenRows.map((row) => row.opposite_token_id))
@@ -214,8 +286,9 @@ export class PolymarketAdapter implements ProviderAdapter {
       } satisfies PagePayload,
       nextCursor: envelope.pagination?.next_cursor ?? null,
       checkpoint: JSON.stringify(window),
+      diagnostics: { upstreamRowsReceived: returnedRows.length, excludedRecords },
       coverage: {
-        fills: partialCoverage('provider_trade_id_not_exposed'),
+        fills: partialCoverage(excludedRecords > 0 ? 'account_identity_mismatch' : 'provider_trade_id_not_exposed'),
         markets: partialCoverage('wallet_scoped_market_metadata'),
       },
     }
@@ -232,14 +305,17 @@ export class PolymarketAdapter implements ProviderAdapter {
     })
     if (request.cursor) query.set('cursor', request.cursor)
     const envelope = envelopeSchema.parse(await this.client.getData('activity', query, request.signal))
+    const returnedRows = envelope.data ?? []
+    const { rows, excludedRecords } = validateAccountRows(returnedRows, request.externalAccountId)
     return {
       payload: {
-        stream: 'activity', rows: envelope.data ?? [], tokenRows: [], retrievedAt: new Date().toISOString(),
+        stream: 'activity', rows, tokenRows: [], retrievedAt: new Date().toISOString(),
       } satisfies PagePayload,
       nextCursor: envelope.pagination?.next_cursor ?? null,
       checkpoint: JSON.stringify(window),
+      diagnostics: { upstreamRowsReceived: returnedRows.length, excludedRecords },
       coverage: {
-        activity: partialCoverage('provider_activity_id_not_exposed'),
+        activity: partialCoverage(excludedRecords > 0 ? 'account_identity_mismatch' : 'provider_activity_id_not_exposed'),
         cash_movements: partialCoverage('provider_cash_asset_identity_unavailable'),
       },
     }
@@ -282,6 +358,48 @@ function partialCoverage(reasonCode: string): EntityCoverageReport {
   return { status: 'partial', coverageStart: null, coverageEnd: null, sourceAsOf: null, reasonCode }
 }
 
+function decodePositionCursor(value: string | null): { status: 'OPEN' | 'CLOSED'; cursor: string | null } {
+  if (value === null) return { status: 'OPEN', cursor: null }
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>
+    if ((parsed.status === 'OPEN' || parsed.status === 'CLOSED')
+      && (parsed.cursor === null || typeof parsed.cursor === 'string')) {
+      return { status: parsed.status, cursor: parsed.cursor as string | null }
+    }
+  } catch {
+    // Older checkpoints stored the provider cursor directly; resume them as OPEN.
+  }
+  return { status: 'OPEN', cursor: value }
+}
+
+function encodePositionCursor(status: 'OPEN' | 'CLOSED', cursor: string | null): string {
+  return JSON.stringify({ status, cursor })
+}
+
+function validateAccountRows(
+  rows: Record<string, unknown>[],
+  requestedAccount: string,
+): { rows: Record<string, unknown>[]; excludedRecords: number } {
+  const normalizedRequested = requestedAccount.toLowerCase()
+  const validRows: Record<string, unknown>[] = []
+  let excludedRecords = 0
+  for (const row of rows) {
+    const hasProxyWallet = Object.hasOwn(row, 'proxy_wallet') || Object.hasOwn(row, 'proxyWallet')
+    const returnedAccount = nonEmptyString(row.proxy_wallet) ?? nonEmptyString(row.proxyWallet)
+    // The documented request is scoped by `user`; older response shapes may omit proxy_wallet.
+    if (!hasProxyWallet) {
+      validRows.push(row)
+      continue
+    }
+    if (returnedAccount === null || !ADDRESS_PATTERN.test(returnedAccount) || returnedAccount.toLowerCase() !== normalizedRequested) {
+      excludedRecords += 1
+      continue
+    }
+    validRows.push(row)
+  }
+  return { rows: validRows, excludedRecords }
+}
+
 function marketFromPosition(row: Record<string, unknown>): Record<string, unknown> | null {
   const conditionId = nonEmptyString(row.condition_id)
   const tokenId = nonEmptyString(row.token_id)
@@ -290,20 +408,21 @@ function marketFromPosition(row: Record<string, unknown>): Record<string, unknow
   if (!conditionId || !tokenId || !oppositeTokenId || !title) return null
   const outcome = nonEmptyString(row.outcome) ?? 'Outcome 0'
   const oppositeOutcome = nonEmptyString(row.opposite_outcome) ?? 'Outcome 1'
-  const resolved = row.redeemable === true || row.status === 'REDEEMABLE' || row.status === 'REDEEMABLE_LOST'
-  const eventId = nonEmptyString(row.event_id) ?? nonEmptyString(row.event_slug) ?? conditionId
+  const eventIdentity = providerEventIdentity(row.event_id, row.event_slug, conditionId)
   const eventName = nonEmptyString(row.event_slug) ?? title
   return {
     kind: 'market',
-    externalEventId: eventId,
+    externalEventId: eventIdentity.externalId,
+    eventIdentityKind: eventIdentity.kind,
     eventName,
     eventDescription: null,
     resolutionRules: null,
-    eventLifecycle: resolved ? 'resolved' : row.archived === true ? 'archived' : 'open',
+    // A wallet position can indicate market state, but it cannot determine the event lifecycle.
+    eventLifecycle: 'unknown',
     eventResolvesAt: null,
     externalMarketId: conditionId,
     marketTitle: title,
-    marketLifecycle: resolved ? 'resolved' : row.archived === true ? 'archived' : 'open',
+    marketLifecycle: 'unknown',
     settlementRules: null,
     settlementAssetCode: null,
     eventSourceUpdatedAt: null,
@@ -316,11 +435,22 @@ function marketFromPosition(row: Record<string, unknown>): Record<string, unknow
   }
 }
 
-function positionFromProviderRow(row: Record<string, unknown>, retrievedAt: string): Record<string, unknown> | null {
+function positionFromProviderRow(
+  row: Record<string, unknown>,
+  retrievedAt: string,
+  queriedStatus: 'OPEN' | 'CLOSED' | undefined,
+): Record<string, unknown> | null {
   const externalId = nonEmptyString(row.token_id)
   const externalMarketId = nonEmptyString(row.condition_id)
-  const quantity = decimalString(row.current_size)
-  if (!externalId || !externalMarketId || quantity === null) return null
+  const providerStatus = nonEmptyString(row.status)?.toUpperCase() ?? queriedStatus ?? null
+  const quantity = row.current_size === undefined || row.current_size === null
+    ? providerStatus === 'CLOSED' ? '0' : null
+    : decimalString(row.current_size)
+  const averageCostPrice = probabilityPrice(row.avg_price)
+  const markPrice = probabilityPrice(row.current_price)
+  const invalidProvidedPrice = (row.avg_price !== undefined && row.avg_price !== null && averageCostPrice === null)
+    || (row.current_price !== undefined && row.current_price !== null && markPrice === null)
+  if (!externalId || !externalMarketId || quantity === null || new Decimal(quantity).lessThan(0) || invalidProvidedPrice) return null
   return {
     kind: 'position',
     externalId,
@@ -328,13 +458,13 @@ function positionFromProviderRow(row: Record<string, unknown>, retrievedAt: stri
     externalInstrumentId: externalId,
     observedAt: retrievedAt,
     quantity,
-    averageCostPrice: decimalString(row.avg_price),
-    markPrice: decimalString(row.current_price),
+    averageCostPrice,
+    markPrice,
     markAt: null,
     settlementAssetCode: null,
     origin: 'provider_reported',
     reconciliationStatus: 'not_started',
-    providerStatus: nonEmptyString(row.status),
+    providerStatus,
     redeemable: booleanOrNull(row.redeemable),
     mergeable: booleanOrNull(row.mergeable),
     archived: booleanOrNull(row.archived),
@@ -349,14 +479,14 @@ function positionFromProviderRow(row: Record<string, unknown>, retrievedAt: stri
       totalSize: decimalString(row.total_size),
       percentPnl: decimalString(row.percent_pnl),
     },
-    rawPayload: minimalPositionPayload(row),
+    rawPayload: { ...minimalPositionPayload(row), queried_status: queriedStatus ?? null },
   }
 }
 
 function priceFromPosition(row: Record<string, unknown>, retrievedAt: string): Record<string, unknown> | null {
   const externalInstrumentId = nonEmptyString(row.token_id)
   const externalMarketId = nonEmptyString(row.condition_id)
-  const price = decimalString(row.current_price)
+  const price = probabilityPrice(row.current_price)
   if (!externalInstrumentId || !externalMarketId || price === null) return null
   return {
     kind: 'price',
@@ -376,7 +506,18 @@ function priceFromPosition(row: Record<string, unknown>, retrievedAt: string): R
   }
 }
 
-function fillFromProviderRow(row: Record<string, unknown>, token: Record<string, unknown>): Record<string, unknown> | null {
+function probabilityPrice(value: unknown): string | null {
+  const price = decimalString(value)
+  if (price === null) return null
+  const decimal = new Decimal(price)
+  return decimal.greaterThanOrEqualTo(0) && decimal.lessThanOrEqualTo(1) ? price : null
+}
+
+function fillFromProviderRow(
+  row: Record<string, unknown>,
+  token: Record<string, unknown>,
+  rowIndex: number,
+): Record<string, unknown> | null {
   const externalMarketId = nonEmptyString(row.condition_id)
   const externalInstrumentId = nonEmptyString(row.token_id)
   const side = nonEmptyString(row.side)?.toUpperCase()
@@ -384,14 +525,20 @@ function fillFromProviderRow(row: Record<string, unknown>, token: Record<string,
   const quantity = decimalString(row.size)
   const price = decimalString(row.price)
   const transactionHash = nonEmptyString(row.transaction_hash)?.toLowerCase() ?? null
-  if (!externalMarketId || !externalInstrumentId || (side !== 'BUY' && side !== 'SELL') || !occurredAt || quantity === null || price === null) return null
-  const id = fingerprint('trade', [
-    nonEmptyString(row.proxy_wallet)?.toLowerCase() ?? '', transactionHash ?? '', externalMarketId,
-    externalInstrumentId, side, occurredAt, quantity, price,
-  ])
+  if (!externalMarketId || !externalInstrumentId || (side !== 'BUY' && side !== 'SELL') || !occurredAt || quantity === null
+    || new Decimal(quantity).lessThanOrEqualTo(0) || price === null || new Decimal(price).lessThan(0) || new Decimal(price).greaterThan(1)) return null
+  const nativeId = nonEmptyString(row.id) ?? nonEmptyString(row.trade_id) ?? nonEmptyString(row.tradeId)
+  // Data API v2 documents no fill ID. This source-observation fingerprint deliberately
+  // excludes mutable quantity and price; row index preserves same-page indistinguishable rows.
+  const id = nativeId
+    ? `provider:${nativeId}`
+    : fingerprint('source-observation', [
+      transactionHash ?? '', externalMarketId, externalInstrumentId, side, occurredAt, rowIndex,
+    ])
   return {
     kind: 'fill',
     externalId: `polymarket-v2:${id}`,
+    identityKind: nativeId ? 'provider_native' : 'source_fingerprint',
     externalMarketId,
     externalInstrumentId,
     direction: side.toLowerCase(),
@@ -408,7 +555,7 @@ function fillFromProviderRow(row: Record<string, unknown>, token: Record<string,
       condition_id: externalMarketId,
       token_id: externalInstrumentId,
       side,
-      timestamp: Number(row.timestamp),
+      timestamp: Number.isFinite(Number(row.timestamp)) ? Number(row.timestamp) : null,
       size: quantity,
       price,
       token_outcome: nonEmptyString(token.outcome),
@@ -428,17 +575,18 @@ function marketFromTokenPair(
   if (!marketId || !tokenId || !oppositeId || !title) return null
   if (nonEmptyString(opposite.condition_id) !== marketId) return null
   const eventSlug = nonEmptyString(token.event_slug) ?? nonEmptyString(trade.event_slug)
-  const eventId = nonEmptyString(token.event_id) ?? eventSlug ?? marketId
+  const eventIdentity = providerEventIdentity(token.event_id ?? trade.event_id, eventSlug, marketId)
   const lifecycle = token.resolved === true || opposite.resolved === true
     ? 'resolved'
     : token.closed === true || opposite.closed === true ? 'closed' : 'open'
   return {
     kind: 'market',
-    externalEventId: eventId,
+    externalEventId: eventIdentity.externalId,
+    eventIdentityKind: eventIdentity.kind,
     eventName: eventSlug ?? title,
     eventDescription: null,
     resolutionRules: null,
-    eventLifecycle: lifecycle,
+    eventLifecycle: 'unknown',
     eventResolvesAt: null,
     externalMarketId: marketId,
     marketTitle: title,
@@ -465,8 +613,9 @@ function marketFromTokenPair(
     ],
     rawPayload: {
       condition_id: marketId,
-      event_id: eventId,
+      event_id: nonEmptyString(token.event_id) ?? nonEmptyString(trade.event_id),
       event_slug: eventSlug,
+      event_identity_kind: eventIdentity.kind,
       title,
       version: nonEmptyString(token.module),
       outcomes: [tokenId, oppositeId],
@@ -497,16 +646,27 @@ function cashMovementFromActivity(row: Record<string, unknown>): Record<string, 
   }
 }
 
-function activityFactFromRow(row: Record<string, unknown>): Record<string, unknown> | null {
-  const activityType = nonEmptyString(row.type)?.toUpperCase()
+function activityFactFromRow(
+  row: Record<string, unknown>,
+  rowIndex: number,
+  classification: 'unreconciled' | 'unresolved' | 'overlap_candidate' = 'unreconciled',
+  resolutionReason: string | null = null,
+  sourceEndpoint: 'activity' | 'trades' | 'positions' = 'activity',
+  activityTypeOverride: string | null = null,
+): Record<string, unknown> | null {
+  const activityType = activityTypeOverride ?? nonEmptyString(row.type)?.toUpperCase().slice(0, 64)
   const occurredAt = epochSecondsToIso(row.timestamp)
-  if (!activityType || !occurredAt) return null
-  const amount = decimalString(row.usdc_size)
-  const quantity = decimalString(row.size)
-  const id = fingerprint('activity', activityIdentity(row, occurredAt, amount ?? quantity ?? ''))
+  if (!activityType || !hasRetainableSourceEvidence(row)) return null
+  const amount = decimalString(row.usdc_size ?? row.current_value)
+  const quantity = decimalString(row.size ?? row.current_size)
+  const id = sourceObservationIdentity(row, activityType, occurredAt, rowIndex)
   return {
     kind: 'activity_fact',
-    externalId: `polymarket-v2:${id}`,
+    externalId: `polymarket-v2:${id.value}`,
+    identityKind: id.identityKind,
+    classification,
+    resolutionReason,
+    sourceEndpoint,
     activityType,
     occurredAt,
     transactionHash: nonEmptyString(row.transaction_hash)?.toLowerCase() ?? null,
@@ -515,9 +675,62 @@ function activityFactFromRow(row: Record<string, unknown>): Record<string, unkno
     side: nonEmptyString(row.side),
     quantity,
     amount,
+    price: decimalString(row.price ?? row.current_price),
     assetCode: amount === null ? null : 'USDC',
-    rawPayload: minimalActivityPayload(row),
+    rawPayload: { ...minimalActivityPayload(row), source_endpoint: sourceEndpoint, source_identity_kind: id.identityKind, resolution_reason: resolutionReason },
   }
+}
+
+function unresolvedTradeFact(row: Record<string, unknown>, rowIndex: number, reasonCode: string): Record<string, unknown> | null {
+  const fact = activityFactFromRow(row, rowIndex, 'unresolved', reasonCode, 'trades', 'TRADE_UNRESOLVED')
+  if (!fact || fact.kind !== 'activity_fact') return null
+  return { ...fact, activityType: 'TRADE_UNRESOLVED' }
+}
+
+function hasRetainableSourceEvidence(row: Record<string, unknown>): boolean {
+  return nonEmptyString(row.transaction_hash) !== null
+    || nonEmptyString(row.condition_id) !== null
+    || nonEmptyString(row.token_id) !== null
+    || nonEmptyString(row.proxy_wallet) !== null
+    || decimalString(row.size ?? row.current_size) !== null
+    || decimalString(row.usdc_size ?? row.current_value) !== null
+    || decimalString(row.price ?? row.current_price) !== null
+    || epochSecondsToIso(row.timestamp) !== null
+}
+
+function sourceObservationIdentity(
+  row: Record<string, unknown>,
+  type: string,
+  occurredAt: string | null,
+  rowIndex: number,
+): { value: string; identityKind: 'provider_native' | 'source_fingerprint' } {
+  const nativeId = nonEmptyString(row.id) ?? nonEmptyString(row.activity_id) ?? nonEmptyString(row.trade_id)
+  if (nativeId) return { value: `provider:${type}:${nativeId}`, identityKind: 'provider_native' }
+  return {
+    value: fingerprint('source-observation', [
+      nonEmptyString(row.proxy_wallet)?.toLowerCase() ?? '',
+      nonEmptyString(row.transaction_hash)?.toLowerCase() ?? '',
+      type,
+      occurredAt,
+      nonEmptyString(row.condition_id) ?? '',
+      nonEmptyString(row.token_id) ?? '',
+      nonEmptyString(row.side)?.toUpperCase() ?? '',
+      rowIndex,
+    ]),
+    identityKind: 'source_fingerprint',
+  }
+}
+
+function providerEventIdentity(
+  eventId: unknown,
+  eventSlug: unknown,
+  marketId: string,
+): { externalId: string; kind: 'provider_native' | 'provider_slug' | 'market_scoped_fallback' } {
+  const id = nonEmptyString(eventId)
+  if (id) return { externalId: `polymarket:event:id:${id}`, kind: 'provider_native' }
+  const slug = nonEmptyString(eventSlug)
+  if (slug) return { externalId: `polymarket:event:slug:${slug}`, kind: 'provider_slug' }
+  return { externalId: `polymarket:event:market:${marketId}`, kind: 'market_scoped_fallback' }
 }
 
 function activityIdentity(row: Record<string, unknown>, occurredAt: string, amount: string): unknown[] {

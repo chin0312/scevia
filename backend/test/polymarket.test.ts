@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { PolymarketAdapter } from '../src/providers/polymarket/adapter.js'
-import { PolymarketHttpClient, parseProviderJson } from '../src/providers/polymarket/http.js'
+import { decimalString, PolymarketHttpClient, parseProviderJson } from '../src/providers/polymarket/http.js'
 import { PolymarketMarketDataService, supportedPolymarketUrl } from '../src/providers/polymarket/market-data.js'
 import type { FetchPageRequest } from '../src/providers/adapter.js'
 
@@ -31,6 +31,10 @@ describe('Polymarket provider adapter', () => {
     const parsed = parseProviderJson('{"size":0.123456789012345678,"price":1.2300e-2}') as Record<string, unknown>
     expect(parsed.size).toBe('0.123456789012345678')
     expect(parsed.price).toBe('1.2300e-2')
+    expect(decimalString('1e999')).toBeNull()
+    expect(decimalString('1e-99')).toBeNull()
+    expect(decimalString('1.1234567890123456789')).toBeNull()
+    expect(decimalString('0.000000000000000001')).toBe('0.000000000000000001')
   })
 
   it('requests open archived positions and preserves provider state without claiming a complete snapshot', async () => {
@@ -58,6 +62,91 @@ describe('Polymarket provider adapter', () => {
     expect(position.providerReported?.currentValue).toBe('0.493827156049382716')
     expect(position.markAt).toBeNull()
     expect(page.coverage.positions?.status).toBe('partial')
+  })
+
+  it('continues from OPEN into CLOSED positions and emits explicit zero tombstones', async () => {
+    const calls: URL[] = []
+    const client = new PolymarketHttpClient(async (input) => {
+      const url = new URL(String(input))
+      calls.push(url)
+      return url.searchParams.get('status') === 'OPEN'
+        ? jsonResponse({ data: [], pagination: { next_cursor: null } })
+        : jsonResponse({ data: [{ proxy_wallet: WALLET, condition_id: 'condition-a', token_id: '101', current_size: null, status: 'CLOSED' }], pagination: { next_cursor: null } })
+    })
+    const adapter = new PolymarketAdapter(client)
+    const openPage = await adapter.fetchPage(request('positions'))
+    expect(openPage.nextCursor).toContain('CLOSED')
+    const closedPage = await adapter.fetchPage(request('positions', { cursor: openPage.nextCursor }))
+    const position = adapter.normalizePage(closedPage, 'positions').find((record) => record.kind === 'position')
+    expect(calls.map((url) => url.searchParams.get('status'))).toEqual(['OPEN', 'CLOSED'])
+    expect(position).toMatchObject({ kind: 'position', quantity: '0', providerStatus: 'CLOSED' })
+  })
+
+  it('retains invalid position and trade values as unresolved facts instead of publishing them as holdings or fills', async () => {
+    const adapter = new PolymarketAdapter(new PolymarketHttpClient(async () => jsonResponse({ data: [] })))
+    const positionPage = await adapter.fetchPage(request('positions'))
+    positionPage.payload = {
+      stream: 'positions',
+      positionStatus: 'OPEN',
+      rows: [{
+        proxy_wallet: WALLET,
+        condition_id: 'condition-a',
+        token_id: '101',
+        current_size: '-2',
+        avg_price: '1.2',
+        current_price: '0.4',
+      }],
+      tokenRows: [],
+      retrievedAt: '2026-11-25T10:00:00Z',
+    }
+    const unresolvedPosition = adapter.normalizePage(positionPage, 'positions').find((record) => record.kind === 'activity_fact')
+    expect(unresolvedPosition).toMatchObject({
+      kind: 'activity_fact', classification: 'unresolved', resolutionReason: 'position_fields_invalid',
+      quantity: '-2', sourceEndpoint: 'positions',
+    })
+    if (unresolvedPosition?.kind === 'activity_fact') {
+      expect(unresolvedPosition.rawPayload.avg_price).toBe('1.2')
+    }
+
+    const tradePage = {
+      payload: {
+        stream: 'trades',
+        rows: [{ transaction_hash: '0xinvalid-price', condition_id: 'condition-a', token_id: '101', side: 'BUY', size: '2', price: '1.2', timestamp: 1795564800 }],
+        tokenRows: [
+          { token_id: '101', opposite_token_id: '102', condition_id: 'condition-a', title: 'Market A', outcome: 'Yes', outcome_index: 0 },
+          { token_id: '102', opposite_token_id: '101', condition_id: 'condition-a', title: 'Market A', outcome: 'No', outcome_index: 1 },
+        ],
+        retrievedAt: '2026-11-25T10:00:00Z',
+      },
+      nextCursor: null,
+      checkpoint: null,
+      coverage: { fills: { status: 'partial' as const, coverageStart: null, coverageEnd: null, sourceAsOf: null, reasonCode: 'provider_trade_id_not_exposed' }, markets: { status: 'partial' as const, coverageStart: null, coverageEnd: null, sourceAsOf: null, reasonCode: 'wallet_scoped_market_metadata' } },
+      diagnostics: { upstreamRowsReceived: 1 },
+    }
+    const unresolvedTrade = adapter.normalizePage(tradePage, 'trades').find((record) => record.kind === 'activity_fact')
+    expect(unresolvedTrade).toMatchObject({
+      kind: 'activity_fact', classification: 'unresolved', resolutionReason: 'trade_fields_invalid',
+      activityType: 'TRADE_UNRESOLVED', price: '1.2', sourceEndpoint: 'trades',
+    })
+    expect(adapter.normalizePage(tradePage, 'trades').some((record) => record.kind === 'fill')).toBe(false)
+  })
+
+  it('excludes mismatched account rows, accepts user-scoped rows without an echoed wallet, and retains counters', async () => {
+    const client = new PolymarketHttpClient(async () => jsonResponse({
+      data: [
+        { proxy_wallet: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', condition_id: 'wrong', token_id: '1', current_size: '2' },
+        { proxy_wallet: 'malformed', condition_id: 'invalid', token_id: '2', current_size: '2' },
+        { proxy_wallet: 123, condition_id: 'non-string-account', token_id: '3', current_size: '2' },
+        { condition_id: 'condition-a', token_id: '101', opposite_token_id: '102', title: 'Market A', current_size: '3' },
+      ],
+      pagination: { next_cursor: null },
+    }))
+    const adapter = new PolymarketAdapter(client)
+    const page = await adapter.fetchPage(request('positions'))
+    const records = adapter.normalizePage(page, 'positions')
+    expect(records.filter((record) => record.kind === 'position')).toHaveLength(1)
+    expect(page.diagnostics).toMatchObject({ upstreamRowsReceived: 4, excludedRecords: 3, sourceRowsRetained: 1, invalidRecords: 0 })
+    expect(page.coverage.positions?.reasonCode).toBe('account_identity_mismatch')
   })
 
   it('pages initial and resumed trade history and creates stable composite fill identities', async () => {
@@ -100,6 +189,26 @@ describe('Polymarket provider adapter', () => {
     expect(firstPage.coverage.fills?.reasonCode).toBe('provider_trade_id_not_exposed')
   })
 
+  it('retains trade observations when token metadata is missing and keeps same-transaction rows distinct', async () => {
+    const tradeRow = { transaction_hash: '0xabc', condition_id: 'condition-a', token_id: '999', side: 'BUY', size: '2', price: '0.25', timestamp: 1795564800 }
+    const client = new PolymarketHttpClient(async (input) => {
+      const url = new URL(String(input))
+      if (url.pathname.endsWith('/v2/trades')) return jsonResponse({ data: [tradeRow, tradeRow], pagination: { next_cursor: null } })
+      return jsonResponse({ data: [] })
+    })
+    const adapter = new PolymarketAdapter(client)
+    const page = await adapter.fetchPage(request('trades'))
+    const facts = adapter.normalizePage(page, 'trades').filter((record) => record.kind === 'activity_fact')
+    expect(facts).toHaveLength(2)
+    expect(facts.map((fact) => fact.kind === 'activity_fact' ? fact.resolutionReason : null)).toEqual([
+      'token_metadata_missing', 'token_metadata_missing',
+    ])
+    expect(facts.map((fact) => fact.kind === 'activity_fact' ? fact.quantity : null)).toEqual(['2', '2'])
+    expect(facts[0]?.kind === 'activity_fact' && facts[1]?.kind === 'activity_fact'
+      ? facts[0].externalId === facts[1].externalId
+      : true).toBe(false)
+  })
+
   it('maps deposits and withdrawals as signed cash flows while keeping other account events unreconciled', async () => {
     const client = new PolymarketHttpClient(async () => jsonResponse({
       data: [
@@ -120,7 +229,8 @@ describe('Polymarket provider adapter', () => {
 
     expect(cash).toHaveLength(2)
     expect(cash.map((record) => record.kind === 'cash_movement' ? record.signedAmount : null)).toEqual(['10.25', '-3'])
-    expect(facts.map((record) => record.kind === 'activity_fact' ? record.activityType : null)).toEqual(['REDEEM', 'MERGE', 'TRADE'])
+    expect(facts.map((record) => record.kind === 'activity_fact' ? record.activityType : null)).toEqual(['REDEEM', 'MERGE', 'TRADE', 'TRADE'])
+    expect(facts.filter((record) => record.kind === 'activity_fact' && record.classification === 'overlap_candidate')).toHaveLength(2)
     expect(page.coverage.activity?.status).toBe('partial')
     expect(page.coverage.cash_movements?.status).toBe('partial')
   })
@@ -140,6 +250,7 @@ describe('Polymarket public market data', () => {
     const calls: Array<{ url: URL; init: RequestInit | undefined }> = []
     const marketRows = Array.from({ length: 50 }, (_, marketIndex) => ({
       id: `market-${marketIndex}`,
+      version: 'v1',
       slug: `market-${marketIndex}`,
       conditionId: `condition-${marketIndex}`,
       question: `Question ${marketIndex}`,
@@ -149,6 +260,10 @@ describe('Polymarket public market data', () => {
       active: true,
       negRisk: marketIndex === 0,
       description: 'Provider market description',
+      feesEnabled: marketIndex === 0 || marketIndex === 2,
+      feeSchedule: marketIndex === 0
+        ? { rate: 0.05, exponent: 1, takerOnly: true, rebateRate: 0.25 }
+        : marketIndex === 2 ? { rate: -0.05, exponent: -1, takerOnly: true, rebateRate: 1.5 } : null,
     }))
     const client = new PolymarketHttpClient(async (input, init) => {
       const url = new URL(String(input))
@@ -164,7 +279,7 @@ describe('Polymarket public market data', () => {
       return jsonResponse(Object.fromEntries(body.map(({ token_id }) => [token_id, '0.4200'])))
     })
     const service = new PolymarketMarketDataService(client)
-    const result = await service.search('event one', 5)
+    const result = await service.search('event one', 5, 2)
     const resultItems = result.items as Array<Record<string, unknown>>
     const firstEvent = resultItems[0]!
     const markets = firstEvent.markets as Array<Record<string, unknown>>
@@ -174,10 +289,16 @@ describe('Polymarket public market data', () => {
     expect(calls.map(({ url }) => url.hostname)).toEqual(['gamma-api.polymarket.com', 'gamma-api.polymarket.com', 'clob.polymarket.com'])
     expect(markets).toHaveLength(50)
     expect(markets[0]?.negativeRisk).toBe(true)
+    expect(markets[0]?.feeMetadata).toMatchObject({ status: 'known', rate: '0.05', exponent: 1, takerOnly: true, amountUnit: 'USDC' })
+    expect(markets[1]?.feeMetadata).toMatchObject({ status: 'fee_free', enabled: false })
+    expect(markets[2]?.feeMetadata).toMatchObject({ status: 'incomplete', rate: null, exponent: null, rebateRate: null })
     expect(outcomes).toHaveLength(11)
     expect(outcomes[0]?.assetId).toBe('1')
+    expect(outcomes[0]?.assetIdType).toBe('clob_token_id')
     expect(outcomes[0]?.referencePrice).toMatchObject({ value: '0.42', sourceTimestamp: null })
     expect(lastOutcomes[10]?.referencePrice).toMatchObject({ value: null, freshness: 'not_requested_due_to_batch_limit' })
+    expect(calls[0]?.url.searchParams.get('page')).toBe('2')
+    expect(result.pagination).toMatchObject({ page: 2, pageSize: 5, hasMore: false, continuationAvailable: false })
   })
 
   it('resolves supported event links with all candidate markets and rejects SSRF-style inputs before fetching', async () => {
@@ -196,7 +317,7 @@ describe('Polymarket public market data', () => {
       }
       return jsonResponse({ '11': '0.5', '12': '0.5', '21': '0.3', '22': '0.7' })
     }))
-    const resolved = await service.resolve('https://www.polymarket.com/event/event-one')
+    const resolved = await service.resolve('https://www.polymarket.com/event/event-one?utm_source=share&ref=invite')
     const item = resolved.item as Record<string, unknown>
     expect(resolved.resolvedAs).toBe('event')
     expect((item.markets as unknown[])).toHaveLength(2)
@@ -213,7 +334,8 @@ describe('Polymarket public market data', () => {
       expect(() => supportedPolymarketUrl(unsafe)).toThrow()
     }
     await expect(service.resolve('https://polymarket.com@127.0.0.1/event/evil')).rejects.toMatchObject({ httpStatus: 400 })
-    expect(requestCount).toBe(2)
+    expect(resolved.sourceUrl).toBe('https://polymarket.com/event/event-one')
+    expect(requestCount).toBe(1)
   })
 
   it('returns historical source timestamps and refuses automatic redirects', async () => {
@@ -221,7 +343,7 @@ describe('Polymarket public market data', () => {
     const service = new PolymarketMarketDataService(new PolymarketHttpClient(async (input) => {
       const url = new URL(String(input))
       urls.push(url)
-      return textResponse('{"data":[{"timestamp":1795564800,"price":0.123456789012345678,"resolution_seconds":3600}],"pagination":{"next_cursor":"next"}}')
+      return textResponse('{"data":[{"timestamp":1795564800,"price":0.123456789012345678,"resolution_seconds":3600},{"timestamp":1795564801,"price":2,"resolution_seconds":3600}],"pagination":{"next_cursor":"next"}}')
     }))
     const result = await service.priceHistory({ tokenId: '123', interval: '1w', bucketSeconds: 3600 })
     const items = result.items as Array<Record<string, unknown>>
@@ -229,6 +351,7 @@ describe('Polymarket public market data', () => {
     expect(urls[0]?.searchParams.get('bucket_seconds')).toBe('3600')
     expect(items[0]).toMatchObject({ price: '0.123456789012345678', timestampBasis: 'provider_observation', resolutionSeconds: 3600 })
     expect(result.nextCursor).toBe('next')
+    expect(result).toMatchObject({ invalidPointCount: 1, complete: false })
 
     const redirectingClient = new PolymarketHttpClient(async (_input, init) => {
       expect(init?.redirect).toBe('error')

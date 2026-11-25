@@ -22,6 +22,14 @@ export interface StreamSyncResult {
   status: SyncStatus
   pagesRead: number
   recordsSeen: number
+  rowsReceived: number
+  sourceRowsRetained: number
+  invalidRecords: number
+  recordsPersisted: number
+  exactDuplicates: number
+  unresolvedRecords: number
+  overlapCandidates: number
+  excludedRecords: number
   errorCode: string | null
   runId: string
 }
@@ -118,6 +126,11 @@ export class IngestionService {
           throw new IngestionError('invalid_provider_stream_configuration')
         }
       }
+      for (const auxiliaryEntity of stream.auxiliaryEntities ?? []) {
+        if (adapter.capabilities.operations[auxiliaryEntity] !== 'supported' || stream.entities.includes(auxiliaryEntity)) {
+          throw new IngestionError('invalid_provider_stream_configuration')
+        }
+      }
       for (const entity of Object.keys(stream.snapshotSemantics) as Array<'positions' | 'cash_balances'>) {
         if (!stream.entities.includes(entity)) throw new IngestionError('invalid_provider_stream_configuration')
       }
@@ -158,6 +171,14 @@ export class IngestionService {
     let durableCheckpoint = checkpoint.durableCheckpoint
     let pagesRead = 0
     let recordsSeen = 0
+    let rowsReceived = 0
+    let sourceRowsRetained = 0
+    let invalidRecords = 0
+    let recordsPersisted = 0
+    let exactDuplicates = 0
+    let unresolvedRecords = 0
+    let overlapCandidates = 0
+    let excludedRecords = 0
     let status: SyncStatus = 'failed'
     let errorCode: string | null = null
     const seenCursors = new Set<string>()
@@ -202,7 +223,7 @@ export class IngestionService {
           ? validatedPage.checkpoint
           : durableCheckpoint
         const retrievedAt = new Date().toISOString()
-        await persistPage({
+        const persistedPage = await persistPage({
           database: this.database,
           providerAccountId: account.id,
           providerCode: account.providerCode,
@@ -215,9 +236,19 @@ export class IngestionService {
           retrievedAt,
           records,
           snapshotSemantics: stream.snapshotSemantics,
+          ...(validatedPage.diagnostics ? { diagnostics: validatedPage.diagnostics } : {}),
         })
         pagesRead += 1
         recordsSeen += records.length
+        rowsReceived += validatedPage.diagnostics?.upstreamRowsReceived ?? 0
+        sourceRowsRetained += validatedPage.diagnostics?.sourceRowsRetained ?? 0
+        invalidRecords += validatedPage.diagnostics?.invalidRecords ?? 0
+        excludedRecords += validatedPage.diagnostics?.excludedRecords ?? 0
+        // persistPage writes the same counters transactionally with the page checkpoint.
+        recordsPersisted += persistedPage.recordsPersisted
+        exactDuplicates += persistedPage.exactDuplicates
+        unresolvedRecords += persistedPage.unresolvedRecords
+        overlapCandidates += persistedPage.overlapCandidates
         this.mergeReports(reports, validatedPage.coverage)
         cursor = validatedPage.nextCursor
         durableCheckpoint = nextDurableCheckpoint
@@ -253,7 +284,22 @@ export class IngestionService {
       status = pagesRead > 0 ? 'partial' : 'failed'
     })
 
-    return { streamName: stream.name, status, pagesRead, recordsSeen, errorCode, runId }
+    return {
+      streamName: stream.name,
+      status,
+      pagesRead,
+      recordsSeen,
+      rowsReceived,
+      sourceRowsRetained,
+      invalidRecords,
+      recordsPersisted,
+      exactDuplicates,
+      unresolvedRecords,
+      overlapCandidates,
+      excludedRecords,
+      errorCode,
+      runId,
+    }
   }
 
   private async getOrCreateCheckpoint(providerAccountId: string, syncName: string): Promise<string> {
@@ -436,6 +482,7 @@ export class IngestionService {
       }).where(eq(syncRuns.id, input.runId))
       await writeStreamCoverage(tx, {
         providerAccountId: input.providerAccountId,
+        runId: input.runId,
         stream: input.stream,
         reports: input.reports,
         retrievedAt: input.finishedAt,
@@ -478,7 +525,9 @@ export class IngestionService {
         coverageStart: starts.length ? starts.reduce((a, b) => new Date(a) <= new Date(b) ? a : b) : null,
         coverageEnd: ends.length ? ends.reduce((a, b) => new Date(a) >= new Date(b) ? a : b) : null,
         sourceAsOf: asOfs.length ? asOfs.reduce((a, b) => new Date(a) >= new Date(b) ? a : b) : null,
-        reasonCode: next.reasonCode ?? prior.reasonCode ?? null,
+        reasonCode: next.reasonCode === 'account_identity_mismatch' || prior.reasonCode === 'account_identity_mismatch'
+          ? 'account_identity_mismatch'
+          : prior.reasonCode ?? next.reasonCode ?? null,
       }
     }
   }

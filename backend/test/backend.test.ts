@@ -134,11 +134,15 @@ describe('migrations and canonical persistence', () => {
 
   it('ingests Polymarket records into PostgreSQL and exposes only authorized normalized facts', async () => {
     const wallet = '0x1234567890abcdef1234567890abcdef12345678'
+    let omitPositions = false
     const fetcher: typeof fetch = async (input) => {
       const url = new URL(String(input))
       if (url.pathname.endsWith('/v2/positions')) {
+        if (omitPositions) {
+          return new Response(JSON.stringify({ data: [], pagination: { next_cursor: null } }), { status: 200, headers: { 'content-type': 'application/json' } })
+        }
         return new Response(JSON.stringify({
-          data: [{
+          data: url.searchParams.get('status') === 'OPEN' ? [{
             proxy_wallet: wallet,
             condition_id: 'condition-a',
             token_id: '101',
@@ -164,7 +168,12 @@ describe('migrations and canonical persistence', () => {
             redeemable: false,
             mergeable: false,
             archived: false,
-          }],
+          }, {
+            proxy_wallet: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            condition_id: 'condition-other',
+            token_id: '999',
+            current_size: '9',
+          }] : [],
           pagination: { next_cursor: null },
         }), { status: 200, headers: { 'content-type': 'application/json' } })
       }
@@ -181,6 +190,15 @@ describe('migrations and canonical persistence', () => {
             timestamp: 1795564800,
             title: 'Will the test condition happen?',
             event_id: 'event-a',
+          }, {
+            proxy_wallet: wallet,
+            transaction_hash: '0xmissing-meta',
+            condition_id: 'condition-a',
+            token_id: '999',
+            side: 'SELL',
+            size: '2.5',
+            price: '0.3',
+            timestamp: 1795564700,
           }],
           pagination: { next_cursor: null },
         }), { status: 200, headers: { 'content-type': 'application/json' } })
@@ -226,9 +244,18 @@ describe('migrations and canonical persistence', () => {
     expect(first.json().status).toBe('complete')
     expect(second.statusCode).toBe(200)
     expect(second.json().status).toBe('complete')
+    const firstStreams = first.json().streams as Array<Record<string, unknown>>
+    const secondStreams = second.json().streams as Array<Record<string, unknown>>
+    expect(firstStreams.find((stream) => stream.streamName === 'positions')).toMatchObject({
+      rowsReceived: 2, sourceRowsRetained: 1, excludedRecords: 1,
+    })
+    expect(firstStreams.find((stream) => stream.streamName === 'trades')).toMatchObject({
+      rowsReceived: 2, sourceRowsRetained: 2, unresolvedRecords: 1,
+    })
+    expect((secondStreams.find((stream) => stream.streamName === 'trades')?.exactDuplicates as number)).toBeGreaterThan(0)
     expect(await database.select({ id: fills.id }).from(fills)).toHaveLength(1)
     expect(await database.select({ id: cashMovements.id }).from(cashMovements)).toHaveLength(1)
-    expect(await database.select({ id: providerActivityFacts.id }).from(providerActivityFacts)).toHaveLength(1)
+    expect(await database.select({ id: providerActivityFacts.id }).from(providerActivityFacts)).toHaveLength(2)
     const [fill] = await database.select({ quantity: fills.quantity, feeAmount: fills.feeAmount, feeStatus: fills.feeStatus }).from(fills)
     expect(fill).toEqual({ quantity: '4.500000000000000001', feeAmount: null, feeStatus: 'unavailable' })
 
@@ -248,14 +275,45 @@ describe('migrations and canonical persistence', () => {
       headers: auth,
     })
     expect(positionsResponse.statusCode).toBe(200)
+    const sourceScopedPositions = await app.inject({
+      method: 'GET',
+      url: `/v1/portfolios/${PORTFOLIO_ID}/positions?providerAccountId=${encodeURIComponent(accountId)}`,
+      headers: auth,
+    })
+    expect(sourceScopedPositions.statusCode).toBe(200)
+    expect(sourceScopedPositions.json().items.every((item: { providerAccountId: string }) => item.providerAccountId === accountId)).toBe(true)
     expect(positionsResponse.json().items[0]).toMatchObject({
       providerStatus: 'OPEN',
       providerReported: { currentValue: '1.800000000000000000' },
     })
     expect(factsResponse.statusCode).toBe(200)
     expect(factsResponse.json().items[0]).toMatchObject({ activityType: 'REDEEM', classification: 'unreconciled' })
+    expect(factsResponse.json().items[1]).toMatchObject({
+      activityType: 'TRADE_UNRESOLVED',
+      sourceEndpoint: 'trades',
+      classification: 'unresolved',
+      resolutionReason: 'token_metadata_missing',
+      quantity: '2.500000000000000000',
+      price: '0.300000000000000000',
+    })
     expect(factsResponse.body).not.toContain('rawPayload')
     expect(hiddenFacts.statusCode).toBe(404)
+
+    omitPositions = true
+    const emptyRefresh = await app.inject({ method: 'POST', url: `/v1/provider-accounts/${accountId}/sync`, headers: auth })
+    expect(emptyRefresh.statusCode).toBe(200)
+    expect(emptyRefresh.json().status).toBe('complete')
+    const stalePositionRead = await app.inject({
+      method: 'GET',
+      url: `/v1/portfolios/${PORTFOLIO_ID}/positions?providerAccountId=${encodeURIComponent(accountId)}`,
+      headers: auth,
+    })
+    expect(stalePositionRead.statusCode).toBe(200)
+    expect(stalePositionRead.json().items[0]).toMatchObject({
+      quantity: '4.500000000000000001',
+      observationStatus: 'not_seen_in_latest_successful_refresh',
+      positionState: 'not_seen_in_latest_successful_refresh',
+    })
   })
 
   it('keeps provider events distinct and stores varying outcome and settlement values', async () => {
@@ -936,7 +994,40 @@ describe('migrations and canonical persistence', () => {
       headers: { authorization: `Bearer ${TOKEN}` },
     })
     expect(response.statusCode).toBe(200)
-    expect(response.json().items).toHaveLength(0)
+    expect(response.json().items).toHaveLength(1)
+    expect(response.json().items[0]).toMatchObject({
+      quantity: '0.000000000000000000',
+      positionState: 'not_seen_in_latest_successful_refresh',
+      observationStatus: 'not_seen_in_latest_successful_refresh',
+    })
+
+    const reopenedAdapter: ProviderAdapter = {
+      capabilities,
+      fetchPage: (request) => original.fetchPage(request),
+      normalizePage: (page, streamName) => original.normalizePage(page, streamName).map((record) => record.kind === 'position'
+        ? {
+          ...record,
+          externalId: 'position-reopened',
+          observedAt: '2026-11-26T10:00:00Z',
+          quantity: '25',
+          providerStatus: 'OPEN',
+          rawPayload: { ...record.rawPayload, id: 'position-reopened', observed: '2026-11-26T10:00:00Z', quantity: '25' },
+        }
+        : record),
+    }
+    const reopened = await new IngestionService(database, new ProviderRegistry([reopenedAdapter])).syncProviderAccount(MULTI_ACCOUNT_ROW_ID)
+    expect(reopened.status).toBe('complete')
+    const reopenedRead = await app.inject({
+      method: 'GET',
+      url: `/v1/portfolios/${PORTFOLIO_ID}/positions?limit=10&offset=0`,
+      headers: { authorization: `Bearer ${TOKEN}` },
+    })
+    expect(reopenedRead.json().items[0]).toMatchObject({
+      quantity: '25.000000000000000000',
+      providerStatus: 'OPEN',
+      positionState: 'provider_reported_positive',
+      observationStatus: 'observed_in_latest_successful_refresh',
+    })
   })
 
   it('keeps newer canonical market metadata when an older source revision arrives', async () => {
