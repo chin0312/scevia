@@ -22,6 +22,14 @@ export interface StreamSyncResult {
   status: SyncStatus
   pagesRead: number
   recordsSeen: number
+  rowsReceived: number
+  sourceRowsRetained: number
+  invalidRecords: number
+  recordsPersisted: number
+  exactDuplicates: number
+  unresolvedRecords: number
+  overlapCandidates: number
+  excludedRecords: number
   errorCode: string | null
   runId: string
 }
@@ -46,13 +54,17 @@ export class IngestionService {
     private readonly registry: ProviderRegistry,
   ) {}
 
-  async syncProviderAccount(account: string | { id: string }): Promise<SyncResult> {
+  async syncProviderAccount(account: string | { id: string }, scope: 'all' | 'current' | 'history' = 'all'): Promise<SyncResult> {
     const accountId = typeof account === 'string' ? account : account.id
     const storedAccount = await this.loadSyncAccount(accountId)
     const adapter = this.registry.get(storedAccount.providerCode)
     this.validateStreams(adapter)
+    const streams = adapter.capabilities.streams.filter((stream) => scope === 'all'
+      || (scope === 'current') === (stream.snapshotSemantics.positions !== undefined || stream.snapshotSemantics.cash_balances !== undefined))
+    if (streams.length === 0) throw new IngestionError('sync_scope_unavailable')
     const startedAt = new Date().toISOString()
     const deadline = Date.now() + MAX_SYNC_DURATION_MS
+    const streamBudgetMs = Math.max(1, Math.floor(MAX_SYNC_DURATION_MS / streams.length))
 
     const accountCheckpointId = await this.getOrCreateCheckpoint(accountId, ACCOUNT_LOCK_NAME)
     const leaseToken = randomUUID()
@@ -61,14 +73,14 @@ export class IngestionService {
     const results: StreamSyncResult[] = []
     try {
       await this.database.transaction((tx) => initializeCoverage(tx, accountId, adapter.capabilities, new Date()))
-      for (const stream of adapter.capabilities.streams) {
+      for (const stream of streams) {
         results.push(await this.syncStream({
           account: storedAccount,
           adapter,
           stream,
           accountCheckpointId,
           leaseToken,
-          deadline,
+          deadline: Math.min(deadline, Date.now() + streamBudgetMs),
         }))
       }
     } finally {
@@ -102,7 +114,7 @@ export class IngestionService {
     const names = new Set<string>()
     const configuredEntities = new Set<CoverageEntity>()
     for (const stream of adapter.capabilities.streams) {
-      if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(stream.name) || names.has(stream.name) || stream.entities.length === 0) {
+      if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(stream.name) || names.has(stream.name) || (stream.entities.length === 0 && !stream.auxiliaryEntities?.length)) {
         throw new IngestionError('invalid_provider_stream_configuration')
       }
       names.add(stream.name)
@@ -111,6 +123,16 @@ export class IngestionService {
         if (adapter.capabilities.operations[entity] !== 'supported') throw new IngestionError('invalid_provider_stream_configuration')
         if (configuredEntities.has(entity)) throw new IngestionError('provider_entity_configured_in_multiple_streams')
         configuredEntities.add(entity)
+      }
+      for (const referenceEntity of stream.referenceEntities ?? []) {
+        if (referenceEntity !== 'markets') {
+          throw new IngestionError('invalid_provider_stream_configuration')
+        }
+      }
+      for (const auxiliaryEntity of stream.auxiliaryEntities ?? []) {
+        if (adapter.capabilities.operations[auxiliaryEntity] !== 'supported' || stream.entities.includes(auxiliaryEntity)) {
+          throw new IngestionError('invalid_provider_stream_configuration')
+        }
       }
       for (const entity of Object.keys(stream.snapshotSemantics) as Array<'positions' | 'cash_balances'>) {
         if (!stream.entities.includes(entity)) throw new IngestionError('invalid_provider_stream_configuration')
@@ -145,13 +167,21 @@ export class IngestionService {
 
     const runId = randomUUID()
     const startedAt = new Date().toISOString()
-    const restartCompleteSnapshot = Object.values(stream.snapshotSemantics).includes('complete') && checkpoint.cursor !== null
+    const restartCompleteSnapshot = stream.strategy === 'full_refresh' && Object.keys(stream.snapshotSemantics).length > 0 && checkpoint.cursor !== null
     const cursorAtStart = restartCompleteSnapshot ? null : checkpoint.cursor
     const checkpointAtStart = stream.strategy === 'provider_checkpoint' ? checkpoint.durableCheckpoint : null
     let cursor = cursorAtStart
     let durableCheckpoint = checkpoint.durableCheckpoint
     let pagesRead = 0
     let recordsSeen = 0
+    let rowsReceived = 0
+    let sourceRowsRetained = 0
+    let invalidRecords = 0
+    let recordsPersisted = 0
+    let exactDuplicates = 0
+    let unresolvedRecords = 0
+    let overlapCandidates = 0
+    let excludedRecords = 0
     let status: SyncStatus = 'failed'
     let errorCode: string | null = null
     const seenCursors = new Set<string>()
@@ -196,7 +226,7 @@ export class IngestionService {
           ? validatedPage.checkpoint
           : durableCheckpoint
         const retrievedAt = new Date().toISOString()
-        await persistPage({
+        const persistedPage = await persistPage({
           database: this.database,
           providerAccountId: account.id,
           providerCode: account.providerCode,
@@ -209,9 +239,19 @@ export class IngestionService {
           retrievedAt,
           records,
           snapshotSemantics: stream.snapshotSemantics,
+          ...(validatedPage.diagnostics ? { diagnostics: validatedPage.diagnostics } : {}),
         })
         pagesRead += 1
         recordsSeen += records.length
+        rowsReceived += validatedPage.diagnostics?.upstreamRowsReceived ?? 0
+        sourceRowsRetained += validatedPage.diagnostics?.sourceRowsRetained ?? 0
+        invalidRecords += validatedPage.diagnostics?.invalidRecords ?? 0
+        excludedRecords += validatedPage.diagnostics?.excludedRecords ?? 0
+        // persistPage writes the same counters transactionally with the page checkpoint.
+        recordsPersisted += persistedPage.recordsPersisted
+        exactDuplicates += persistedPage.exactDuplicates
+        unresolvedRecords += persistedPage.unresolvedRecords
+        overlapCandidates += persistedPage.overlapCandidates
         this.mergeReports(reports, validatedPage.coverage)
         cursor = validatedPage.nextCursor
         durableCheckpoint = nextDurableCheckpoint
@@ -219,7 +259,12 @@ export class IngestionService {
         seenCursors.add(cursor)
         if (pagesRead >= MAX_PAGE_COUNT) throw new IngestionError('provider_page_limit_reached')
       }
-      status = 'complete'
+      if (stream.snapshotSemantics.positions === 'incremental' && (invalidRecords > 0 || excludedRecords > 0 || unresolvedRecords > 0)) {
+        status = 'partial'
+        errorCode = 'position_refresh_contains_unusable_rows'
+      } else {
+        status = 'complete'
+      }
     } catch (error) {
       status = pagesRead > 0 ? 'partial' : 'failed'
       errorCode = this.safeErrorCode(error)
@@ -247,7 +292,22 @@ export class IngestionService {
       status = pagesRead > 0 ? 'partial' : 'failed'
     })
 
-    return { streamName: stream.name, status, pagesRead, recordsSeen, errorCode, runId }
+    return {
+      streamName: stream.name,
+      status,
+      pagesRead,
+      recordsSeen,
+      rowsReceived,
+      sourceRowsRetained,
+      invalidRecords,
+      recordsPersisted,
+      exactDuplicates,
+      unresolvedRecords,
+      overlapCandidates,
+      excludedRecords,
+      errorCode,
+      runId,
+    }
   }
 
   private async getOrCreateCheckpoint(providerAccountId: string, syncName: string): Promise<string> {
@@ -363,7 +423,12 @@ export class IngestionService {
           ? error.retryable
           : error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')
         if (!retryable || attempt === MAX_RETRY_ATTEMPTS || Date.now() >= input.deadline) throw error
-        await new Promise((resolve) => setTimeout(resolve, Math.min(100 * attempt, Math.max(0, input.deadline - Date.now()))))
+        const requestedDelay = error instanceof ProviderAdapterError && error.retryAfterMs !== null
+          ? error.retryAfterMs
+          : 100 * attempt
+        const remainingBudget = Math.max(0, input.deadline - Date.now())
+        if (requestedDelay >= remainingBudget) throw error
+        await new Promise((resolve) => setTimeout(resolve, requestedDelay))
       } finally {
         if (timeout) clearTimeout(timeout)
       }
@@ -425,6 +490,7 @@ export class IngestionService {
       }).where(eq(syncRuns.id, input.runId))
       await writeStreamCoverage(tx, {
         providerAccountId: input.providerAccountId,
+        runId: input.runId,
         stream: input.stream,
         reports: input.reports,
         retrievedAt: input.finishedAt,
@@ -467,7 +533,9 @@ export class IngestionService {
         coverageStart: starts.length ? starts.reduce((a, b) => new Date(a) <= new Date(b) ? a : b) : null,
         coverageEnd: ends.length ? ends.reduce((a, b) => new Date(a) >= new Date(b) ? a : b) : null,
         sourceAsOf: asOfs.length ? asOfs.reduce((a, b) => new Date(a) >= new Date(b) ? a : b) : null,
-        reasonCode: next.reasonCode ?? prior.reasonCode ?? null,
+        reasonCode: next.reasonCode === 'account_identity_mismatch' || prior.reasonCode === 'account_identity_mismatch'
+          ? 'account_identity_mismatch'
+          : prior.reasonCode ?? next.reasonCode ?? null,
       }
     }
   }

@@ -5,6 +5,12 @@ export interface ProviderPage {
   nextCursor: string | null
   checkpoint: string | null
   coverage: Partial<Record<CoverageEntity, EntityCoverageReport>>
+  diagnostics?: {
+    upstreamRowsReceived?: number
+    sourceRowsRetained?: number
+    invalidRecords?: number
+    excludedRecords?: number
+  }
 }
 
 export interface FetchPageRequest {
@@ -25,6 +31,7 @@ export class ProviderAdapterError extends Error {
   constructor(
     readonly code: string,
     readonly retryable: boolean,
+    readonly retryAfterMs: number | null = null,
   ) {
     super(code)
     this.name = 'ProviderAdapterError'

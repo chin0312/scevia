@@ -128,6 +128,7 @@ export const markets = scevia.table(
     eventId: uuid('event_id').notNull().references(() => events.id, { onDelete: 'cascade' }),
     providerCode: text('provider_code').notNull(),
     externalId: text('external_id').notNull(),
+    eventIdentityKind: text('event_identity_kind').notNull().default('provider_native'),
     title: text('title').notNull(),
     lifecycle: text('lifecycle').notNull().default('unknown'),
     settlementRules: text('settlement_rules'),
@@ -232,6 +233,7 @@ export const fills = scevia.table(
     instrumentId: uuid('instrument_id').notNull().references(() => instruments.id),
     sourceRecordId: uuid('source_record_id').notNull().references(() => sourceRecords.id),
     externalId: text('external_id').notNull(),
+    identityKind: text('identity_kind').notNull().default('provider_native'),
     direction: tradeDirectionEnum('direction').notNull(),
     occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull(),
     quantity: numeric('quantity', { precision: 38, scale: 18 }).notNull(),
@@ -251,6 +253,37 @@ export const fills = scevia.table(
       'fills_fee_status_consistent',
       sql`(${table.feeStatus} = 'unavailable' AND ${table.feeAmount} IS NULL) OR (${table.feeStatus} IN ('reported', 'estimated') AND ${table.feeAmount} IS NOT NULL)`,
     ),
+  ],
+)
+
+export const providerActivityFacts = scevia.table(
+  'provider_activity_facts',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    providerAccountId: uuid('provider_account_id')
+      .notNull()
+      .references(() => providerAccounts.id, { onDelete: 'cascade' }),
+    sourceRecordId: uuid('source_record_id').notNull().references(() => sourceRecords.id),
+    externalId: text('external_id').notNull(),
+    identityKind: text('identity_kind').notNull().default('source_fingerprint'),
+    sourceEndpoint: text('source_endpoint').notNull().default('activity'),
+    activityType: text('activity_type').notNull(),
+    occurredAt: timestamp('occurred_at', { withTimezone: true }),
+    transactionHash: text('transaction_hash'),
+    externalMarketId: text('external_market_id'),
+    externalInstrumentId: text('external_instrument_id'),
+    side: text('side'),
+    quantity: numeric('quantity', { precision: 38, scale: 18 }),
+    price: numeric('price', { precision: 38, scale: 18 }),
+    amount: numeric('amount', { precision: 38, scale: 18 }),
+    assetCode: text('asset_code'),
+    classification: text('classification').notNull().default('unreconciled'),
+    resolutionReason: text('resolution_reason'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('provider_activity_facts_account_external_unique').on(table.providerAccountId, table.externalId),
+    index('provider_activity_facts_account_occurred_idx').on(table.providerAccountId, table.occurredAt, table.id),
   ],
 )
 
@@ -332,6 +365,19 @@ export const positionSnapshots = scevia.table(
     markPrice: numeric('mark_price', { precision: 38, scale: 18 }),
     markAt: timestamp('mark_at', { withTimezone: true }),
     settlementAssetCode: text('settlement_asset_code'),
+    providerStatus: text('provider_status'),
+    redeemable: boolean('redeemable'),
+    mergeable: boolean('mergeable'),
+    archived: boolean('archived'),
+    providerCurrentValue: numeric('provider_current_value', { precision: 38, scale: 18 }),
+    providerRealizedPnl: numeric('provider_realized_pnl', { precision: 38, scale: 18 }),
+    providerUnrealizedPnl: numeric('provider_unrealized_pnl', { precision: 38, scale: 18 }),
+    providerTotalPnl: numeric('provider_total_pnl', { precision: 38, scale: 18 }),
+    providerEntryCost: numeric('provider_entry_cost', { precision: 38, scale: 18 }),
+    providerEntryFees: numeric('provider_entry_fees', { precision: 38, scale: 18 }),
+    providerTotalCost: numeric('provider_total_cost', { precision: 38, scale: 18 }),
+    providerTotalSize: numeric('provider_total_size', { precision: 38, scale: 18 }),
+    providerPercentPnl: numeric('provider_percent_pnl', { precision: 38, scale: 18 }),
     origin: positionOriginEnum('origin').notNull(),
     reconciliationStatus: reconciliationStatusEnum('reconciliation_status').notNull().default('not_started'),
     isCurrent: boolean('is_current').notNull().default(false),
@@ -412,12 +458,20 @@ export const syncRuns = scevia.table(
     pagesRead: integer('pages_read').notNull().default(0),
     recordsSeen: integer('records_seen').notNull().default(0),
     recordsRejected: integer('records_rejected').notNull().default(0),
+    rowsReceived: integer('rows_received').notNull().default(0),
+    sourceRowsRetained: integer('source_rows_retained').notNull().default(0),
+    invalidRecords: integer('invalid_records').notNull().default(0),
+    recordsPersisted: integer('records_persisted').notNull().default(0),
+    exactDuplicates: integer('exact_duplicates').notNull().default(0),
+    unresolvedRecords: integer('unresolved_records').notNull().default(0),
+    overlapCandidates: integer('overlap_candidates').notNull().default(0),
+    excludedRecords: integer('excluded_records').notNull().default(0),
     errorCode: text('error_code'),
   },
   (table) => [
     index('sync_runs_account_started_idx').on(table.providerAccountId, table.startedAt),
     check('sync_runs_pages_nonnegative', sql`${table.pagesRead} >= 0`),
-    check('sync_runs_records_nonnegative', sql`${table.recordsSeen} >= 0 AND ${table.recordsRejected} >= 0`),
+    check('sync_runs_records_nonnegative', sql`${table.recordsSeen} >= 0 AND ${table.recordsRejected} >= 0 AND ${table.rowsReceived} >= 0 AND ${table.sourceRowsRetained} >= 0 AND ${table.invalidRecords} >= 0 AND ${table.recordsPersisted} >= 0 AND ${table.exactDuplicates} >= 0 AND ${table.unresolvedRecords} >= 0 AND ${table.overlapCandidates} >= 0 AND ${table.excludedRecords} >= 0`),
   ],
 )
 
@@ -467,6 +521,7 @@ export const dataCoverage = scevia.table(
     lastAttemptCoverageStatus: coverageStatusEnum('last_attempt_coverage_status'),
     lastAttemptReasonCode: text('last_attempt_reason_code'),
     lastSuccessfulSyncAt: timestamp('last_successful_sync_at', { withTimezone: true }),
+    lastSuccessfulRunId: uuid('last_successful_run_id'),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
@@ -474,3 +529,14 @@ export const dataCoverage = scevia.table(
     index('data_coverage_account_updated_idx').on(table.providerAccountId, table.updatedAt),
   ],
 )
+
+// Counts source rows committed within one attempt, independently of economic multiplicity.
+export const activityFactOccurrences = scevia.table('activity_fact_occurrences', {
+  syncRunId: uuid('sync_run_id').notNull().references(() => syncRuns.id, { onDelete: 'cascade' }),
+  activityFactId: uuid('activity_fact_id').notNull().references(() => providerActivityFacts.id, { onDelete: 'cascade' }),
+  observations: integer('observations').notNull(),
+}, (table) => [
+  uniqueIndex('activity_fact_occurrences_run_fact_unique').on(table.syncRunId, table.activityFactId),
+  index('activity_fact_occurrences_fact_idx').on(table.activityFactId),
+  check('activity_fact_occurrences_positive', sql`${table.observations} > 0`),
+])

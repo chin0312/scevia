@@ -6,6 +6,7 @@ export type CoverageState = 'complete' | 'partial' | 'unavailable' | 'unknown'
 export type CoverageEntity =
   | 'markets'
   | 'fills'
+  | 'activity'
   | 'cash_movements'
   | 'settlements'
   | 'positions'
@@ -15,6 +16,8 @@ export type CoverageEntity =
 export type ProviderSyncStream = {
   name: string
   entities: CoverageEntity[]
+  referenceEntities?: CoverageEntity[]
+  auxiliaryEntities?: CoverageEntity[]
   strategy: 'full_refresh' | 'provider_checkpoint'
   snapshotSemantics: Partial<Record<'positions' | 'cash_balances', 'complete' | 'incremental'>>
 }
@@ -92,6 +95,7 @@ const rawPayloadSchema = z.record(z.string(), z.unknown()).refine((value) => {
 const normalizedMarketSchema = z.object({
   kind: z.literal('market'),
   externalEventId: z.string().min(1).max(256),
+  eventIdentityKind: z.enum(['provider_native', 'provider_slug', 'market_scoped_fallback', 'unknown']).optional(),
   eventName: z.string().min(1).max(500),
   eventDescription: z.string().max(10_000).nullable(),
   resolutionRules: z.string().max(20_000).nullable(),
@@ -117,6 +121,7 @@ const normalizedMarketSchema = z.object({
 const normalizedFillSchema = z.object({
   kind: z.literal('fill'),
   externalId: z.string().min(1).max(256),
+  identityKind: z.enum(['provider_native', 'source_fingerprint']).optional(),
   externalMarketId: z.string().min(1).max(256),
   externalInstrumentId: z.string().min(1).max(256),
   direction: z.enum(['buy', 'sell']),
@@ -177,6 +182,41 @@ const normalizedPositionSchema = z.object({
   settlementAssetCode: z.string().min(1).max(32).nullable(),
   origin: z.enum(['provider_reported', 'reconstructed']),
   reconciliationStatus: z.enum(['not_started', 'pending', 'matched', 'difference']),
+  providerStatus: z.string().min(1).max(64).nullable().optional(),
+  redeemable: z.boolean().nullable().optional(),
+  mergeable: z.boolean().nullable().optional(),
+  archived: z.boolean().nullable().optional(),
+  providerReported: z.object({
+    currentValue: decimalTextSchema.nullable(),
+    realizedPnl: decimalTextSchema.nullable(),
+    unrealizedPnl: decimalTextSchema.nullable(),
+    totalPnl: decimalTextSchema.nullable(),
+    entryCost: decimalTextSchema.nullable(),
+    entryFees: decimalTextSchema.nullable(),
+    totalCost: decimalTextSchema.nullable(),
+    totalSize: decimalTextSchema.nullable(),
+    percentPnl: decimalTextSchema.nullable(),
+  }).strict().optional(),
+  rawPayload: rawPayloadSchema,
+}).strict()
+
+const normalizedActivityFactSchema = z.object({
+  kind: z.literal('activity_fact'),
+  externalId: z.string().min(1).max(256),
+  identityKind: z.enum(['provider_native', 'source_fingerprint']).optional(),
+  classification: z.enum(['unreconciled', 'unresolved', 'overlap_candidate']).optional(),
+  resolutionReason: z.string().regex(/^[a-z0-9_]{1,64}$/).nullable().optional(),
+  sourceEndpoint: z.enum(['activity', 'trades', 'positions']).optional(),
+  activityType: z.string().min(1).max(64),
+  occurredAt: utcTimestampSchema.nullable(),
+  transactionHash: z.string().max(128).nullable(),
+  externalMarketId: z.string().max(256).nullable(),
+  externalInstrumentId: z.string().max(256).nullable(),
+  side: z.string().max(16).nullable(),
+  quantity: decimalTextSchema.nullable(),
+  price: decimalTextSchema.nullable().optional(),
+  amount: decimalTextSchema.nullable(),
+  assetCode: z.string().min(1).max(32).nullable(),
   rawPayload: rawPayloadSchema,
 }).strict()
 
@@ -209,6 +249,7 @@ const normalizedRecordUnion = z.discriminatedUnion('kind', [
   normalizedPositionSchema,
   normalizedCashBalanceSchema,
   normalizedPriceSchema,
+  normalizedActivityFactSchema,
 ])
 
 export const normalizedRecordSchema = normalizedRecordUnion.superRefine((record, context) => {
@@ -229,6 +270,7 @@ export type NormalizedSettlement = Extract<NormalizedRecord, { kind: 'settlement
 export type NormalizedPosition = Extract<NormalizedRecord, { kind: 'position' }>
 export type NormalizedCashBalance = Extract<NormalizedRecord, { kind: 'cash_balance' }>
 export type NormalizedPrice = Extract<NormalizedRecord, { kind: 'price' }>
+export type NormalizedActivityFact = Extract<NormalizedRecord, { kind: 'activity_fact' }>
 
 export const normalizedAtUtc = (value: string): string => new Date(value).toISOString()
 

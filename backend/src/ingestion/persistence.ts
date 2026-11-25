@@ -5,6 +5,7 @@ import type { NodePgTransaction } from 'drizzle-orm/node-postgres'
 import * as schema from '../db/schema.js'
 import type { Database } from '../db/client.js'
 import {
+  activityFactOccurrences,
   cashBalanceSnapshots,
   cashMovements,
   events,
@@ -13,6 +14,7 @@ import {
   markets,
   positionSnapshots,
   priceObservations,
+  providerActivityFacts,
   settlements,
   sourceRecordRevisions,
   sourceRecords,
@@ -38,11 +40,16 @@ export interface PersistPageInput {
   retrievedAt: string
   records: NormalizedRecord[]
   snapshotSemantics: ProviderSyncStream['snapshotSemantics']
+  diagnostics?: { upstreamRowsReceived?: number; sourceRowsRetained?: number; invalidRecords?: number; excludedRecords?: number }
 }
 
 export interface PersistPageResult {
   recordsSeen: number
   recordsByType: Record<string, number>
+  recordsPersisted: number
+  exactDuplicates: number
+  unresolvedRecords: number
+  overlapCandidates: number
 }
 
 async function upsertSourceRecord(
@@ -52,7 +59,7 @@ async function upsertSourceRecord(
     record: NormalizedRecord
     retrievedAt: string
   },
-): Promise<{ id: string; accepted: boolean }> {
+): Promise<{ id: string; accepted: boolean; duplicate: boolean }> {
   const { providerAccountId, record, retrievedAt } = input
   const recordType = record.kind
   const externalRecordId = record.kind === 'market' ? record.externalMarketId : record.externalId
@@ -60,7 +67,7 @@ async function upsertSourceRecord(
   const payloadSha256 = createHash('sha256').update(JSON.stringify(payload)).digest('hex')
   const sourceOccurredAt = record.kind === 'market'
     ? record.sourceUpdatedAt
-    : record.kind === 'fill' || record.kind === 'cash_movement'
+    : record.kind === 'fill' || record.kind === 'cash_movement' || record.kind === 'activity_fact'
       ? record.occurredAt
       : record.kind === 'settlement'
         ? record.settledAt
@@ -76,6 +83,7 @@ async function upsertSourceRecord(
     .limit(1)
 
   if (current) {
+    if (current.payloadSha256 === payloadSha256) return { id: current.id, accepted: true, duplicate: true }
     const incomingRevisionAt = record.kind === 'market' && record.sourceUpdatedAt !== null
       ? new Date(record.sourceUpdatedAt)
       : null
@@ -96,7 +104,7 @@ async function upsertSourceRecord(
       // Keep the latest source-record payload, but let upsertMarket decide the
       // event and market revisions independently. A newer event revision can
       // accompany an older market revision in the same provider response.
-      return { id: current.id, accepted: true }
+      return { id: current.id, accepted: true, duplicate: false }
     }
     if (current.payloadSha256 !== payloadSha256) {
       await tx.insert(sourceRecordRevisions).values({
@@ -117,7 +125,7 @@ async function upsertSourceRecord(
       sourceRevisionAt: record.kind === 'market' && record.sourceUpdatedAt !== null ? new Date(record.sourceUpdatedAt) : null,
       retrievedAt: new Date(retrievedAt),
     }).where(eq(sourceRecords.id, current.id))
-    return { id: current.id, accepted: true }
+    return { id: current.id, accepted: true, duplicate: false }
   }
 
   const [created] = await tx.insert(sourceRecords).values({
@@ -131,7 +139,7 @@ async function upsertSourceRecord(
     sourceRevisionAt: record.kind === 'market' && record.sourceUpdatedAt !== null ? new Date(record.sourceUpdatedAt) : null,
     retrievedAt: new Date(retrievedAt),
   }).onConflictDoNothing().returning({ id: sourceRecords.id })
-  if (created) return { id: created.id, accepted: true }
+  if (created) return { id: created.id, accepted: true, duplicate: false }
 
   const [raced] = await tx.select({ id: sourceRecords.id }).from(sourceRecords).where(and(
     eq(sourceRecords.providerAccountId, providerAccountId),
@@ -139,7 +147,7 @@ async function upsertSourceRecord(
     eq(sourceRecords.externalRecordId, externalRecordId),
   )).limit(1)
   if (!raced) throw new IngestionError('source_record_persist_failed')
-  return { id: raced.id, accepted: true }
+  return { id: raced.id, accepted: true, duplicate: true }
 }
 
 async function upsertMarket(
@@ -149,35 +157,66 @@ async function upsertMarket(
 ): Promise<boolean> {
   const incomingEventUpdatedAt = record.eventSourceUpdatedAt === null ? null : new Date(record.eventSourceUpdatedAt)
   const incomingMarketUpdatedAt = record.sourceUpdatedAt === null ? null : new Date(record.sourceUpdatedAt)
-  const [existingEvent] = await tx.select({ id: events.id, sourceUpdatedAt: events.sourceUpdatedAt })
-    .from(events).where(and(eq(events.providerCode, providerCode), eq(events.externalId, record.externalEventId))).limit(1).for('update')
+  const incomingIdentityKind = record.eventIdentityKind ?? 'unknown'
+  const [existingMarket] = await tx.select({
+    id: markets.id,
+    eventId: markets.eventId,
+    eventExternalId: sql<string>`(select external_id from ${events} where id = ${markets.eventId})`,
+    eventIdentityKind: markets.eventIdentityKind,
+    sourceUpdatedAt: markets.sourceUpdatedAt,
+    lifecycle: markets.lifecycle,
+    title: markets.title,
+  }).from(markets)
+    .where(and(eq(markets.providerCode, providerCode), eq(markets.externalId, record.externalMarketId)))
+    .limit(1).for('update')
+  const marketRevisionIsNewer = incomingMarketUpdatedAt !== null
+    && (!existingMarket?.sourceUpdatedAt || incomingMarketUpdatedAt > existingMarket.sourceUpdatedAt)
+
+  const keepExistingEventLink = existingMarket !== undefined
+    && (identityRank(incomingIdentityKind) < identityRank(existingMarket.eventIdentityKind)
+      || (incomingIdentityKind === 'provider_native' && existingMarket.eventIdentityKind === 'provider_native'
+        && existingMarket.eventExternalId !== record.externalEventId && !marketRevisionIsNewer))
+  let eventId: string | undefined
+  if (keepExistingEventLink) {
+    eventId = existingMarket.eventId
+  } else {
+  const [existingEvent] = await tx.select({
+    id: events.id,
+    sourceUpdatedAt: events.sourceUpdatedAt,
+    lifecycle: events.lifecycle,
+    name: events.name,
+  }).from(events).where(and(eq(events.providerCode, providerCode), eq(events.externalId, record.externalEventId))).limit(1).for('update')
+  const eventRevisionIsNewer = incomingEventUpdatedAt !== null
+    && (!existingEvent?.sourceUpdatedAt || incomingEventUpdatedAt > existingEvent.sourceUpdatedAt)
+  const eventLifecycle = chooseLifecycle(existingEvent?.lifecycle, record.eventLifecycle, eventRevisionIsNewer)
+  const eventName = existingEvent && !eventRevisionIsNewer ? existingEvent.name : record.eventName
 
   const [event] = await tx.insert(events).values({
     providerCode,
     externalId: record.externalEventId,
-    name: record.eventName,
+    name: eventName,
     description: record.eventDescription,
     resolutionRules: record.resolutionRules,
-    lifecycle: record.eventLifecycle,
+    lifecycle: eventLifecycle,
     resolvesAt: record.eventResolvesAt === null ? null : new Date(record.eventResolvesAt),
     sourceUpdatedAt: incomingEventUpdatedAt,
     updatedAt: new Date(),
   }).onConflictDoUpdate({
     target: [events.providerCode, events.externalId],
     set: {
-      name: record.eventName,
-      description: record.eventDescription,
-      resolutionRules: record.resolutionRules,
-      lifecycle: record.eventLifecycle,
-      resolvesAt: record.eventResolvesAt === null ? null : new Date(record.eventResolvesAt),
+      name: eventName,
+      description: record.eventDescription === null ? events.description : record.eventDescription,
+      resolutionRules: record.resolutionRules === null ? events.resolutionRules : record.resolutionRules,
+      lifecycle: eventLifecycle,
+      resolvesAt: record.eventResolvesAt === null ? events.resolvesAt : new Date(record.eventResolvesAt),
       sourceUpdatedAt: incomingEventUpdatedAt,
       updatedAt: new Date(),
     },
     setWhere: incomingEventUpdatedAt === null
       ? isNull(events.sourceUpdatedAt)
-      : sql`${events.sourceUpdatedAt} IS NULL OR ${events.sourceUpdatedAt} <= ${incomingEventUpdatedAt}`,
+      : sql`${events.sourceUpdatedAt} IS NULL OR ${events.sourceUpdatedAt} < ${incomingEventUpdatedAt}`,
   }).returning({ id: events.id })
-  let eventId = event?.id ?? existingEvent?.id
+  eventId = event?.id ?? existingEvent?.id
   if (!eventId) {
     const [racedEvent] = await tx.select({ id: events.id }).from(events).where(and(
       eq(events.providerCode, providerCode),
@@ -186,17 +225,20 @@ async function upsertMarket(
     eventId = racedEvent?.id
   }
   if (!eventId) throw new IngestionError('provider_event_persist_failed')
+  }
 
-  const [existingMarket] = await tx.select({ id: markets.id, sourceUpdatedAt: markets.sourceUpdatedAt })
-    .from(markets).where(and(eq(markets.providerCode, providerCode), eq(markets.externalId, record.externalMarketId))).limit(1).for('update')
-  if (existingMarket?.sourceUpdatedAt && (!incomingMarketUpdatedAt || incomingMarketUpdatedAt < existingMarket.sourceUpdatedAt)) return false
+  if (!eventId) throw new IngestionError('provider_event_persist_failed')
+  const marketLifecycle = chooseLifecycle(existingMarket?.lifecycle, record.marketLifecycle, marketRevisionIsNewer)
+  const marketTitle = existingMarket && !marketRevisionIsNewer ? existingMarket.title : record.marketTitle
+  const eventIdentityKind = keepExistingEventLink ? existingMarket!.eventIdentityKind : incomingIdentityKind
 
   const [market] = await tx.insert(markets).values({
     eventId,
     providerCode,
     externalId: record.externalMarketId,
-    title: record.marketTitle,
-    lifecycle: record.marketLifecycle,
+    eventIdentityKind,
+    title: marketTitle,
+    lifecycle: marketLifecycle,
     settlementRules: record.settlementRules,
     settlementAssetCode: record.settlementAssetCode,
     sourceUpdatedAt: incomingMarketUpdatedAt,
@@ -205,18 +247,20 @@ async function upsertMarket(
     target: [markets.providerCode, markets.externalId],
     set: {
       eventId,
-      title: record.marketTitle,
-      lifecycle: record.marketLifecycle,
-      settlementRules: record.settlementRules,
-      settlementAssetCode: record.settlementAssetCode,
+      eventIdentityKind,
+      title: marketTitle,
+      lifecycle: marketLifecycle,
+      settlementRules: record.settlementRules === null ? markets.settlementRules : record.settlementRules,
+      settlementAssetCode: record.settlementAssetCode === null ? markets.settlementAssetCode : record.settlementAssetCode,
       sourceUpdatedAt: incomingMarketUpdatedAt,
       updatedAt: new Date(),
     },
     setWhere: incomingMarketUpdatedAt === null
       ? isNull(markets.sourceUpdatedAt)
-      : sql`${markets.sourceUpdatedAt} IS NULL OR ${markets.sourceUpdatedAt} <= ${incomingMarketUpdatedAt}`,
+      : sql`${markets.sourceUpdatedAt} IS NULL OR ${markets.sourceUpdatedAt} < ${incomingMarketUpdatedAt}`,
   }).returning({ id: markets.id })
-  if (!market) {
+  const persistedMarket = market ?? existingMarket
+  if (!persistedMarket) {
     const [racedMarket] = await tx.select({ id: markets.id }).from(markets).where(and(
       eq(markets.providerCode, providerCode),
       eq(markets.externalId, record.externalMarketId),
@@ -227,7 +271,7 @@ async function upsertMarket(
 
   for (const outcome of record.outcomes) {
     await tx.insert(instruments).values({
-      marketId: market.id,
+      marketId: persistedMarket.id,
       externalId: outcome.externalId,
       outcomeName: outcome.name,
       outcomeType: outcome.outcomeType,
@@ -236,14 +280,35 @@ async function upsertMarket(
     }).onConflictDoUpdate({
       target: [instruments.marketId, instruments.externalId],
       set: {
-        outcomeName: outcome.name,
-        outcomeType: outcome.outcomeType,
-        payoutAmount: outcome.payoutAmount,
-        settlementAssetCode: outcome.settlementAssetCode,
+        outcomeName: /^Outcome \d+$/.test(outcome.name) ? instruments.outcomeName : outcome.name,
+        outcomeType: outcome.outcomeType === 'provider_outcome' ? instruments.outcomeType : outcome.outcomeType,
+        payoutAmount: outcome.payoutAmount === null ? instruments.payoutAmount : marketRevisionIsNewer
+          ? outcome.payoutAmount : sql`coalesce(${instruments.payoutAmount}, ${outcome.payoutAmount})`,
+        settlementAssetCode: outcome.settlementAssetCode === null ? instruments.settlementAssetCode : marketRevisionIsNewer
+          ? outcome.settlementAssetCode : sql`coalesce(${instruments.settlementAssetCode}, ${outcome.settlementAssetCode})`,
       },
     })
   }
-  return true
+  return market !== undefined
+}
+
+function identityRank(value: string): number {
+  if (value === 'provider_native') return 3
+  if (value === 'provider_slug') return 2
+  if (value === 'market_scoped_fallback') return 1
+  return 0
+}
+
+function chooseLifecycle(existing: string | undefined, incoming: string, hasNewerRevision: boolean): string {
+  if (!existing || hasNewerRevision || incoming === existing) return incoming
+  const rank = (value: string): number => {
+    if (value === 'unknown') return 0
+    if (value === 'open' || value === 'active') return 1
+    if (value === 'closed' || value === 'archived') return 2
+    if (value === 'resolved') return 3
+    return 0
+  }
+  return rank(incoming) < rank(existing) ? existing : incoming
 }
 
 async function resolveInstrument(
@@ -269,11 +334,17 @@ export async function persistPage(input: PersistPageInput): Promise<PersistPageR
   const marketRecords = input.records.filter((record) => record.kind === 'market')
   const financialRecords = input.records.filter((record) => record.kind !== 'market')
   const recordsByType: Record<string, number> = {}
+  let recordsPersisted = 0
+  let exactDuplicates = 0
+  const unresolvedRecords = input.records.filter((record) => record.kind === 'activity_fact' && record.classification === 'unresolved').length
+  const overlapCandidates = input.records.filter((record) => record.kind === 'activity_fact' && record.classification === 'overlap_candidate').length
 
   await input.database.transaction(async (tx) => {
     for (const record of marketRecords) {
       const source = await upsertSourceRecord(tx, { providerAccountId: input.providerAccountId, record, retrievedAt: input.retrievedAt })
       if (source.accepted) await upsertMarket(tx, input.providerCode, record)
+      if (source.duplicate) exactDuplicates += 1
+      else recordsPersisted += 1
       recordsByType[record.kind] = (recordsByType[record.kind] ?? 0) + 1
     }
 
@@ -281,6 +352,8 @@ export async function persistPage(input: PersistPageInput): Promise<PersistPageR
       if ('feeAmount' in record) assertFeeIsExplicit(record)
       const source = await upsertSourceRecord(tx, { providerAccountId: input.providerAccountId, record, retrievedAt: input.retrievedAt })
       const sourceRecordId = source.id
+      if (source.duplicate) exactDuplicates += 1
+      else recordsPersisted += 1
 
       if (record.kind === 'fill') {
         const instrumentId = await resolveInstrument(tx, input.providerCode, record.externalMarketId, record.externalInstrumentId)
@@ -289,6 +362,7 @@ export async function persistPage(input: PersistPageInput): Promise<PersistPageR
           instrumentId,
           sourceRecordId,
           externalId: record.externalId,
+          identityKind: record.identityKind ?? 'provider_native',
           direction: record.direction,
           occurredAt: new Date(record.occurredAt),
           quantity: record.quantity,
@@ -302,6 +376,7 @@ export async function persistPage(input: PersistPageInput): Promise<PersistPageR
           set: {
             instrumentId,
             sourceRecordId,
+            identityKind: record.identityKind ?? 'provider_native',
             direction: record.direction,
             occurredAt: new Date(record.occurredAt),
             quantity: record.quantity,
@@ -361,6 +436,52 @@ export async function persistPage(input: PersistPageInput): Promise<PersistPageR
             feeStatus: record.feeStatus,
           },
         })
+      } else if (record.kind === 'activity_fact') {
+        const [fact] = await tx.insert(providerActivityFacts).values({
+          providerAccountId: input.providerAccountId,
+          sourceRecordId,
+          externalId: record.externalId,
+          identityKind: record.identityKind ?? 'source_fingerprint',
+          sourceEndpoint: record.sourceEndpoint ?? 'activity',
+          activityType: record.activityType,
+          occurredAt: record.occurredAt === null ? null : new Date(record.occurredAt),
+          transactionHash: record.transactionHash,
+          externalMarketId: record.externalMarketId,
+          externalInstrumentId: record.externalInstrumentId,
+          side: record.side,
+          quantity: record.quantity,
+          price: record.price ?? null,
+          amount: record.amount,
+          assetCode: record.assetCode,
+          classification: record.classification ?? 'unreconciled',
+          resolutionReason: record.resolutionReason ?? null,
+        }).onConflictDoUpdate({
+          target: [providerActivityFacts.providerAccountId, providerActivityFacts.externalId],
+          set: {
+            sourceRecordId,
+            identityKind: record.identityKind ?? 'source_fingerprint',
+            sourceEndpoint: record.sourceEndpoint ?? 'activity',
+            activityType: record.activityType,
+            occurredAt: record.occurredAt === null ? null : new Date(record.occurredAt),
+            transactionHash: record.transactionHash,
+            externalMarketId: record.externalMarketId,
+            externalInstrumentId: record.externalInstrumentId,
+            side: record.side,
+            quantity: record.quantity,
+            price: record.price ?? null,
+            amount: record.amount,
+            assetCode: record.assetCode,
+            classification: record.classification ?? 'unreconciled',
+            resolutionReason: record.resolutionReason ?? null,
+          },
+        }).returning({ id: providerActivityFacts.id })
+        if (!fact) throw new IngestionError('activity_fact_persist_failed')
+        await tx.insert(activityFactOccurrences).values({
+          syncRunId: input.runId, activityFactId: fact.id, observations: 1,
+        }).onConflictDoUpdate({
+          target: [activityFactOccurrences.syncRunId, activityFactOccurrences.activityFactId],
+          set: { observations: sql`${activityFactOccurrences.observations} + 1` },
+        })
       } else if (record.kind === 'position') {
         const instrumentId = await resolveInstrument(tx, input.providerCode, record.externalMarketId, record.externalInstrumentId)
         const observedAt = new Date(record.observedAt)
@@ -395,6 +516,19 @@ export async function persistPage(input: PersistPageInput): Promise<PersistPageR
           markPrice: record.markPrice,
           markAt: record.markAt === null ? null : new Date(record.markAt),
           settlementAssetCode: record.settlementAssetCode,
+          providerStatus: record.providerStatus ?? null,
+          redeemable: record.redeemable ?? null,
+          mergeable: record.mergeable ?? null,
+          archived: record.archived ?? null,
+          providerCurrentValue: record.providerReported?.currentValue ?? null,
+          providerRealizedPnl: record.providerReported?.realizedPnl ?? null,
+          providerUnrealizedPnl: record.providerReported?.unrealizedPnl ?? null,
+          providerTotalPnl: record.providerReported?.totalPnl ?? null,
+          providerEntryCost: record.providerReported?.entryCost ?? null,
+          providerEntryFees: record.providerReported?.entryFees ?? null,
+          providerTotalCost: record.providerReported?.totalCost ?? null,
+          providerTotalSize: record.providerReported?.totalSize ?? null,
+          providerPercentPnl: record.providerReported?.percentPnl ?? null,
           origin: record.origin,
           reconciliationStatus: record.reconciliationStatus,
           isCurrent: false,
@@ -410,6 +544,19 @@ export async function persistPage(input: PersistPageInput): Promise<PersistPageR
             markPrice: record.markPrice,
             markAt: record.markAt === null ? null : new Date(record.markAt),
             settlementAssetCode: record.settlementAssetCode,
+            providerStatus: record.providerStatus ?? null,
+            redeemable: record.redeemable ?? null,
+            mergeable: record.mergeable ?? null,
+            archived: record.archived ?? null,
+            providerCurrentValue: record.providerReported?.currentValue ?? null,
+            providerRealizedPnl: record.providerReported?.realizedPnl ?? null,
+            providerUnrealizedPnl: record.providerReported?.unrealizedPnl ?? null,
+            providerTotalPnl: record.providerReported?.totalPnl ?? null,
+            providerEntryCost: record.providerReported?.entryCost ?? null,
+            providerEntryFees: record.providerReported?.entryFees ?? null,
+            providerTotalCost: record.providerReported?.totalCost ?? null,
+            providerTotalSize: record.providerReported?.totalSize ?? null,
+            providerPercentPnl: record.providerReported?.percentPnl ?? null,
             origin: record.origin,
             reconciliationStatus: record.reconciliationStatus,
             isCurrent: false,
@@ -520,11 +667,20 @@ export async function persistPage(input: PersistPageInput): Promise<PersistPageR
       cursorAtEnd: input.nextCursor,
       pagesRead: sql`${syncRuns.pagesRead} + 1`,
       recordsSeen: sql`${syncRuns.recordsSeen} + ${input.records.length}`,
+      rowsReceived: sql`${syncRuns.rowsReceived} + ${input.diagnostics?.upstreamRowsReceived ?? 0}`,
+      sourceRowsRetained: sql`${syncRuns.sourceRowsRetained} + ${input.diagnostics?.sourceRowsRetained ?? 0}`,
+      invalidRecords: sql`${syncRuns.invalidRecords} + ${input.diagnostics?.invalidRecords ?? 0}`,
+      recordsPersisted: sql`${syncRuns.recordsPersisted} + ${recordsPersisted}`,
+      exactDuplicates: sql`${syncRuns.exactDuplicates} + ${exactDuplicates}`,
+      unresolvedRecords: sql`${syncRuns.unresolvedRecords} + ${unresolvedRecords}`,
+      overlapCandidates: sql`${syncRuns.overlapCandidates} + ${overlapCandidates}`,
+      excludedRecords: sql`${syncRuns.excludedRecords} + ${input.diagnostics?.excludedRecords ?? 0}`,
+      recordsRejected: sql`${syncRuns.recordsRejected} + ${(input.diagnostics?.excludedRecords ?? 0) + (input.diagnostics?.invalidRecords ?? 0)}`,
     }).where(eq(syncRuns.id, input.runId))
     await updateObservedRanges(tx, input.providerAccountId, input.records, new Date(input.retrievedAt))
   })
 
-  return { recordsSeen: input.records.length, recordsByType }
+  return { recordsSeen: input.records.length, recordsByType, recordsPersisted, exactDuplicates, unresolvedRecords, overlapCandidates }
 }
 
 export async function initializeCoverage(
@@ -547,7 +703,7 @@ export async function initializeCoverage(
 
 function coverageTimestamp(record: NormalizedRecord): string | null {
   if (record.kind === 'market') return record.sourceUpdatedAt
-  if (record.kind === 'fill' || record.kind === 'cash_movement') return record.occurredAt
+  if (record.kind === 'fill' || record.kind === 'cash_movement' || record.kind === 'activity_fact') return record.occurredAt
   if (record.kind === 'settlement') return record.settledAt
   return record.observedAt
 }
@@ -564,6 +720,7 @@ export async function updateObservedRanges(
     if (at === null) continue
     const entity = record.kind === 'market' ? 'markets'
       : record.kind === 'fill' ? 'fills'
+        : record.kind === 'activity_fact' ? 'activity'
         : record.kind === 'cash_movement' ? 'cash_movements'
           : record.kind === 'settlement' ? 'settlements'
             : record.kind === 'position' ? 'positions'
@@ -608,6 +765,7 @@ export async function updateObservedRanges(
 
 export interface CoverageWriteInput {
   providerAccountId: string
+  runId: string
   stream: ProviderSyncStream
   reports: Partial<Record<CoverageEntity, EntityCoverageReport>>
   retrievedAt: string
@@ -674,13 +832,19 @@ export async function writeStreamCoverage(tx: DatabaseTransaction, input: Covera
       lastAttemptAt: attemptedAt,
       lastAttemptStatus: input.syncStatus,
       lastAttemptCoverageStatus: report?.status ?? 'unknown' as const,
-      lastAttemptReasonCode: staleSnapshotNotPublished ? 'stale_snapshot_rejected' : report?.reasonCode ?? input.errorCode,
+      lastAttemptReasonCode: staleSnapshotNotPublished ? 'stale_snapshot_rejected' : input.errorCode ?? report?.reasonCode,
       lastSuccessfulSyncAt: input.syncStatus === 'complete'
         && (report?.status === 'complete' || report?.status === 'partial')
         && (entityType !== 'positions' || input.stream.snapshotSemantics.positions !== 'complete' || input.positionSnapshotComplete)
         && (entityType !== 'cash_balances' || input.stream.snapshotSemantics.cash_balances !== 'complete' || input.cashBalanceSnapshotComplete)
         ? attemptedAt
         : existing?.lastSuccessfulSyncAt ?? null,
+      lastSuccessfulRunId: input.syncStatus === 'complete'
+        && (report?.status === 'complete' || report?.status === 'partial')
+        && (entityType !== 'positions' || input.stream.snapshotSemantics.positions !== 'complete' || input.positionSnapshotComplete)
+        && (entityType !== 'cash_balances' || input.stream.snapshotSemantics.cash_balances !== 'complete' || input.cashBalanceSnapshotComplete)
+        ? input.runId
+        : existing?.lastSuccessfulRunId ?? null,
       updatedAt: attemptedAt,
     }
     await tx.insert(schema.dataCoverage).values({
