@@ -108,5 +108,14 @@ await at(1440, 900, async (p) => {
   await p.evaluate(() => sessionStorage.setItem('scevia-dev-fx', 'alt')); await p.goto(base + '/overview'); await p.locator('#holdings').waitFor()
   await p.getByRole('button', { name: 'Settings' }).click(); await p.getByRole('dialog', { name: 'Settings' }).getByText('Rates in use').click(); await shot(p, 'settings-other-providers')
 })
+// Analytics and Risk depth: performance, attribution, patterns, trade analysis; concentration basis, settlement paths, timing.
+for (const [w, h] of [[1440, 900], [768, 1024], [375, 812]]) await at(w, h, async (p) => {
+  await fresh(p, '/analytics'); await p.locator('#returns').scrollIntoViewIfNeeded(); await shot(p, `analytics-returns-${w}`)
+  await p.locator('#patterns').scrollIntoViewIfNeeded(); await shot(p, `analytics-patterns-${w}`)
+  await p.locator('#largest').scrollIntoViewIfNeeded(); await shot(p, `analytics-trades-${w}`)
+  await fresh(p, '/risk'); await p.locator('#conc').scrollIntoViewIfNeeded(); await shot(p, `risk-concentration-${w}`)
+  await p.locator('#settlement').scrollIntoViewIfNeeded(); await shot(p, `risk-settlement-${w}`)
+  await p.locator('#calendar').scrollIntoViewIfNeeded(); await shot(p, `risk-timing-${w}`)
+})
 await browser.close()
 console.log('done')

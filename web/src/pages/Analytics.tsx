@@ -4,22 +4,23 @@ import { useSettings } from '../lib/settings'
 import { useWidth } from '../components/charts'
 import { useDetails } from '../components/details'
 import { SectionRail, useHashScroll, type RailSection } from '../components/shell'
-import { Button, Callout, Card, CardHeader, Chip, Delta, Legend, PageHead, Pills, Seg, Tabs, cx } from '../components/ui'
+import { Button, Card, CardHeader, Delta, Legend, PageHead, Pills, Tabs, cx } from '../components/ui'
 import { PLATFORM_NAME } from '../data/labels'
 import type { Platform } from '../data/types'
-import { attribution, entryBuckets, fmtDate, insights, tradeNet, type PeriodStats, type PlatformFilter } from '../lib/finance'
+import { attribution, fmtDate, tradeNet, type PeriodStats, type PlatformFilter } from '../lib/finance'
+import { performanceFromSeries } from '../lib/analytics'
+import { AttributionCard, MetricValue, MonthlyReturns, PatternExplorer, ReturnsCard, TradeAnalysis } from './analytics/sections'
 import { fmt, kfmt, pct, sfmt } from '../lib/format'
 import type { ClosedTrade } from '../data/types'
 import { useFinance } from '../lib/financeContext'
 import { DataIssues } from '../components/Workspace'
-import { HELP } from '../lib/help'
 import { count } from '../lib/text'
 
 const RAIL: RailSection[] = [
-  { id: 'summary', label: 'Summary', icon: 'home', children: [{ id: 'highlights', label: 'Highlights' }] },
-  { id: 'performance', label: 'Performance', icon: 'trend', children: [{ id: 'pnl', label: 'P&L over time' }, { id: 'attribution', label: 'Attribution' }] },
-  { id: 'patterns', label: 'Patterns', icon: 'spark' },
-  { id: 'detail', label: 'Entry price & metrics', icon: 'table', children: [{ id: 'entry', label: 'Entry price' }, { id: 'metrics', label: 'Metrics table' }] },
+  { id: 'performance', label: 'Performance', icon: 'trend', children: [{ id: 'highlights', label: 'Highlights' }, { id: 'pnl', label: 'P&L over time' }, { id: 'returns', label: 'Returns' }, { id: 'metrics', label: 'Period comparison' }] },
+  { id: 'attribution', label: 'Attribution', icon: 'bars' },
+  { id: 'patterns', label: 'Trading patterns', icon: 'spark' },
+  { id: 'trades', label: 'Trade analysis', icon: 'table', children: [{ id: 'largest', label: 'Largest results' }, { id: 'by-market', label: 'By market' }, { id: 'activity', label: 'Activity' }] },
 ]
 const PLATFORM_FILTER = ['All', 'Polymarket', 'Kalshi'] as const
 type PlatformLabel = (typeof PLATFORM_FILTER)[number]
@@ -85,29 +86,25 @@ function PnlChart({ f, start, end, prior, stats, tab, onMonth }: { f: PlatformFi
 }
 
 export default function Analytics() {
-  const { ACCOUNTS, HISTORY_START, periodAvailable, periodRange, periodStats } = useFinance()
+  const { ACCOUNTS, HISTORY_START, periodAvailable, periodRange, periodStats, series } = useFinance()
   useHashScroll()
   const [plat, setPlat] = useState<PlatformLabel>('All')
   const [chosen, setPeriod] = useState<PeriodValue>(useSettings().settings.defaultPeriod)
   const period: PeriodValue = typeof chosen === 'string' && !periodAvailable(chosen) ? 'All' : chosen
   const [compareOn, setCompareOn] = useState(true)
   const [tab, setTab] = useState<'Net' | 'Realized' | 'By platform'>('Net')
-  const [attrBy, setAttrBy] = useState<'Category' | 'Platform'>(useSettings().settings.defaultGrouping === 'platform' ? 'Platform' : 'Category')
   const details = useDetails()
-  const [hotBucket, setHotBucket] = useState<number | null>(null)
 
   const f = toFilter(plat)
   const range = periodRange(period)
   const stats = useMemo(() => periodStats(f, periodRange(period)), [f, period])
+  const perf = useMemo(() => performanceFromSeries(series(f, range.start, range.end)), [f, range.start, range.end])
   const prior = useMemo(() => { const p = periodRange(period).prior; return p ? periodStats(f, p) : null }, [f, period])
   const compare = compareOn && prior !== null
-  const attr = attribution(stats.trades, attrBy === 'Category' ? 'category' : 'platform').map((a) => ({ ...a, label: attrBy === 'Platform' ? PLATFORM_NAME[a.key as Platform] : a.key }))
-  const ins = useMemo(() => insights(stats.trades), [stats])
-  const buckets = useMemo(() => entryBuckets(stats.trades), [stats])
+  const attr = attribution(stats.trades, 'category')
   const top = attr[0], worst = [...attr].sort((a, b) => a.net - b.net)[0]
   const gains = attr.filter((a) => a.net > 0).reduce((s, a) => s + a.net, 0)
   const worstMonth = [...stats.months].sort((a, b) => a.realized - b.realized)[0]
-  const attrMax = Math.max(1, ...attr.map((a) => Math.abs(a.net)))
   const scope = f === 'all' ? 'all platforms' : plat
   const fmtOpt = (v: number | null, f: (x: number) => string) => (v == null ? '—' : f(v))
 
@@ -142,114 +139,56 @@ export default function Analytics() {
           <span className="t3 history-from">History from {fmtDate(HISTORY_START, { month: 'short', day: 'numeric', year: 'numeric' })}</span><DataIssues denominations={ACCOUNTS.map((a) => a.denomination)} /></div>
         <p className="summary">
           Over this period you made <b className={stats.netPnl >= 0 ? 'gain' : 'loss'}>{sfmt(stats.netPnl, 2)}</b> net{compare && prior ? <>, <b>{sfmt(stats.netPnl - prior.netPnl)}</b> vs. the prior period</> : ''}: <b>{sfmt(stats.realized)}</b> realized on {count(stats.trades.length, 'trade')} closed in the period, and <b>{sfmt(stats.unrealizedChange)}</b> change in unrealized P&amp;L{stats.openFillFees ? <> (after <b>{fmt(stats.openFillFees, 2)}</b> fees on new purchases)</> : ''}.
-          {top && top.net > 0 && <> <a href="#attribution">{top.label}</a> made {gains > 0 ? pct((top.net / gains) * 100, 0) : '—'} of realized gains.</>}
-          {worst && worst.net < 0 && <> The weakest group was <a href="#attribution">{worst.label}</a> ({sfmt(worst.net)}).</>}
+          {top && top.net > 0 && <> <a href="#attribution">{top.key}</a> made {gains > 0 ? pct((top.net / gains) * 100, 0) : '—'} of realized gains.</>}
+          {worst && worst.net < 0 && <> The weakest group was <a href="#attribution">{worst.key}</a> ({sfmt(worst.net)}).</>}
           {worstMonth && worstMonth.realized < 0 && <> Worst month: {monthLabel(worstMonth.month)} ({sfmt(worstMonth.realized)}).</>}
         </p>
 
+        <section className="anchor" id="performance" aria-label="Performance">
         <Card id="highlights">
           <CardHeader title="Highlights" sub={compare ? 'Compared with the prior period' : prior ? undefined : 'No earlier period to compare with'} />
-          <div className="card-b hl">
-            <div className="hl-group"><h5 className="caps">Return</h5>
-              <div className={cx('hl-tile', stats.netPnl >= 0 ? 'good' : 'bad')}><div className="l">Net P&amp;L</div><div className={cx('v', stats.netPnl >= 0 ? 'gain' : 'loss')}>{sfmt(stats.netPnl)}</div><div className="f">{compare && prior ? `${stats.netPnl >= prior.netPnl ? '▲' : '▼'} ${sfmt(stats.netPnl - prior.netPnl)} vs prior` : 'after fees, deposits excluded'}</div></div>
-              <div className={cx('hl-tile', stats.realized >= 0 ? 'good' : 'bad')}><div className="l">Realized (closed trades)</div><div className={cx('v', stats.realized >= 0 ? 'gain' : 'loss')}>{sfmt(stats.realized)}</div><div className="f">{count(stats.trades.length, 'trade')}, {fmt(stats.fees)} fees</div></div>
-            </div>
-            <div className="hl-group"><h5 className="caps">Risk</h5>
-              <div className={cx('hl-tile', stats.drawdown ? 'bad' : 'neutral')}><div className="l">Largest drawdown</div><div className={cx('v', stats.drawdown && 'loss')}>{stats.drawdown ? sfmt(-stats.drawdown.amount) : 'None'}</div><div className="f">{stats.drawdown ? `${fmtDate(stats.drawdown.from)} – ${fmtDate(stats.drawdown.to)}, ${stats.drawdown.recoveredOn ? `recovered ${fmtDate(stats.drawdown.recoveredOn)}` : 'not yet recovered'}` : 'No fall below an earlier peak'}</div></div>
-              <div className="hl-tile neutral"><div className="l">Win rate</div><div className="v">{stats.winRate == null ? 'No data' : pct(stats.winRate * 100, 0)}</div><div className="f">{count(stats.resolved, 'resolved trade')}{stats.resolved < 30 ? '. Limited sample size' : `, profit factor ${fmtOpt(stats.profitFactor, (v) => v.toFixed(2))}`}</div></div>
+          <div className="card-b hl hl-4">
+            <div className={cx('hl-tile', stats.netPnl >= 0 ? 'good' : 'bad')}><div className="l">Net P&amp;L</div><div className={cx('v', stats.netPnl >= 0 ? 'gain' : 'loss')}>{sfmt(stats.netPnl)}</div><div className="f">{compare && prior ? `${stats.netPnl >= prior.netPnl ? '▲' : '▼'} ${sfmt(stats.netPnl - prior.netPnl)} vs. prior` : `${sfmt(stats.realized)} realized`}</div></div>
+            <div className="hl-tile neutral"><div className="l">Time-weighted return</div><div className={cx('v', (perf.twr.value ?? 0) > 0 && 'gain', (perf.twr.value ?? 0) < 0 && 'loss')}><MetricValue m={perf.twr} f={(v) => `${v >= 0 ? '+' : '−'}${pct(Math.abs(v) * 100)}`} /></div><div className="f">{perf.twr.value == null ? perf.twr.reason : 'Deposits and withdrawals excluded'}</div></div>
+            <div className={cx('hl-tile', (perf.maximumDrawdown.value ?? 0) < 0 ? 'bad' : 'neutral')}><div className="l">Maximum drawdown</div><div className={cx('v', (perf.maximumDrawdown.value ?? 0) < 0 && 'loss')}><MetricValue m={perf.maximumDrawdown} f={(v) => (v < 0 ? `−${pct(Math.abs(v) * 100)}` : 'None')} /></div><div className="f">{stats.drawdown ? `${sfmt(-stats.drawdown.amount)} of P&L, ${stats.drawdown.recoveredOn ? `recovered ${fmtDate(stats.drawdown.recoveredOn)}` : 'not yet recovered'}` : 'No fall below an earlier peak'}</div></div>
+            <div className="hl-tile neutral"><div className="l">Win rate</div><div className="v">{stats.winRate == null ? 'No data' : pct(stats.winRate * 100, 0)}</div><div className="f">{count(stats.resolved, 'resolved trade')}{stats.resolved < 30 ? '. Limited sample size' : `, profit factor ${fmtOpt(stats.profitFactor, (v) => v.toFixed(2))}`}</div></div>
+          </div>
+        </Card>
+
+        <Card id="pnl">
+          <CardHeader title="Cumulative P&L" right={<Tabs label="Chart view" options={['Net', 'Realized', 'By platform'] as const} value={tab} onChange={setTab} />} />
+          <div className="card-b">
+            <PnlChart f={f} start={range.start} end={range.end} prior={compare ? range.prior : null} stats={stats} tab={tab} onMonth={openMonth} />
+            <div style={{ marginTop: 'var(--space-3)' }}>
+              <Legend items={tab === 'By platform'
+                ? [{ label: 'Polymarket', color: 'var(--color-platform-polymarket)', kind: 'ln' }, { label: 'Kalshi', color: 'var(--color-platform-kalshi)', kind: 'ln' }]
+                : [{ label: tab === 'Net' ? 'Cumulative net P&L' : 'Cumulative realized', color: 'var(--color-text-primary)', kind: 'ln' }, { label: 'Realized gain month', color: 'var(--color-gain-fg)' }, { label: 'Realized loss month', color: 'var(--color-loss-fg)' }, ...(compare && tab === 'Net' ? [{ label: 'Prior period', kind: 'dash' as const }] : [])]} />
             </div>
           </div>
         </Card>
 
-        <div className="grid g-21 anchor" id="performance">
-          <Card id="pnl">
-            <CardHeader title="Cumulative P&L" right={<Tabs label="Chart view" options={['Net', 'Realized', 'By platform'] as const} value={tab} onChange={setTab} />} />
-            <div className="card-b">
-              <PnlChart f={f} start={range.start} end={range.end} prior={compare ? range.prior : null} stats={stats} tab={tab} onMonth={openMonth} />
-              <div style={{ marginTop: 'var(--space-3)' }}>
-                <Legend items={tab === 'By platform'
-                  ? [{ label: 'Polymarket', color: 'var(--color-platform-polymarket)', kind: 'ln' }, { label: 'Kalshi', color: 'var(--color-platform-kalshi)', kind: 'ln' }]
-                  : [{ label: tab === 'Net' ? 'Cumulative net P&L' : 'Cumulative realized', color: 'var(--color-text-primary)', kind: 'ln' }, { label: 'Realized gain month', color: 'var(--color-gain-fg)' }, { label: 'Realized loss month', color: 'var(--color-loss-fg)' }, ...(compare && tab === 'Net' ? [{ label: 'Prior period', kind: 'dash' as const }] : [])]} />
-              </div>
-            </div>
-          </Card>
-          <Card id="attribution">
-            <CardHeader title="Attribution" info={HELP.attribution} right={<Seg label="Group by" options={['Category', 'Platform'] as const} value={attrBy} onChange={setAttrBy} />} />
-            <div className="card-b">
-              {attr.length === 0 && <div className="empty"><p>No trades closed in this period.</p></div>}
-              {attr.map((a) => (
-                <button type="button" className="attr attr-btn hoverable" key={a.key} aria-label={`${a.label}: ${sfmt(a.net)} across ${count(a.n, 'trade')}. View trades`}
-                  onClick={() => openTrades(`${a.label} closed trades`, stats.trades.filter((t) => (attrBy === 'Category' ? t.category : t.platform) === a.key))}>
-                  <span>{a.label}</span>
-                  <div className="ng">{a.net < 0 && <i style={{ width: `${(-a.net / attrMax) * 100}%` }} />}</div>
-                  <div className="ps">{a.net > 0 && <i style={{ width: `${(a.net / attrMax) * 100}%` }} />}</div>
-                  <span className={cx('r', a.net >= 0 ? 'gain' : 'loss')}>{sfmt(a.net)}</span><span className="r t3">{a.n}</span>
-                </button>
-              ))}
-              <div className="attr" style={{ fontWeight: 'var(--font-weight-semibold)' }}><span>Realized</span><span /><span /><span className={cx('r', stats.realized >= 0 ? 'gain' : 'loss')}>{sfmt(stats.realized)}</span><span className="r t3">{stats.trades.length}</span></div>
-              <div className="attr t2"><span title={stats.openFillFees > 0 ? `Includes −${fmt(stats.openFillFees, 2)} fees on new purchases` : undefined}>Change in unrealized</span><span /><span /><span className={cx('r', stats.unrealizedChange >= 0 ? 'gain' : 'loss')}>{sfmt(stats.unrealizedChange)}</span><span className="r t3">—</span></div>
-              <div className="attr" style={{ fontWeight: 'var(--font-weight-semibold)' }}><span>Net P&amp;L</span><span /><span /><span className={cx('r', stats.netPnl >= 0 ? 'gain' : 'loss')}>{sfmt(stats.netPnl)}</span><span className="r t3" /></div>
-            </div>
-          </Card>
+        <div className="grid g-21">
+          <ReturnsCard perf={perf} />
+          <MonthlyReturns perf={perf} />
         </div>
 
-        <section id="patterns" className="anchor grid g-3">
-          <div className="card insight"><Chip tone={ins.longshots && ins.longshots.net < 0 ? 'no' : 'info'}>Longshots</Chip>
-            {ins.longshots ? (<>
-              <h4>Resolved contracts bought under $0.25: <span className={ins.longshots.net >= 0 ? 'gain' : 'loss'}>{sfmt(ins.longshots.net)}</span></h4>
-              <p>You won {ins.longshots.wins} of {ins.longshots.n} ({pct((ins.longshots.wins / ins.longshots.n) * 100, 0)}). Their entry prices implied about {pct(ins.longshots.implied * 100, 0)}.{ins.longshots.worstCategory && ` The weakest category here was ${ins.longshots.worstCategory}.`}</p>
-              <div className="meta"><span>{count(ins.longshots.n, 'trade')}{ins.longshots.n < 30 ? ', limited sample size' : ''}</span><button type="button" className="link" onClick={() => openTrades('Longshot trades (entry < $0.25)', ins.longshots!.trades)}>See trades →</button></div>
-            </>) : <p className="unavailable">Fewer than 5 resolved longshot trades in this period, so there’s nothing reliable to say.</p>}
-          </div>
-          <div className="card insight"><Chip tone="info">Early exits</Chip>
-            {ins.earlyExits ? (<>
-              <h4>{ins.earlyExits.missed} of {ins.earlyExits.n} early exits later resolved in your favour</h4>
-              <p>In hindsight, holding those would have paid about <b className="gain">{fmt(ins.earlyExits.leftOnTable)}</b> more. The other {ins.earlyExits.n - ins.earlyExits.missed} exits kept about <b>{fmt(ins.earlyExits.avoided)}</b> that went to $0. Outcomes weren’t known when you exited, so this measures opportunity cost, not whether the exits were mistakes.</p>
-              <div className="meta"><span>{ins.earlyExits.n} early exits, in hindsight</span><button type="button" className="link" onClick={() => openTrades('Positions sold before resolution', ins.earlyExits!.trades)}>Review exits →</button></div>
-            </>) : <p className="unavailable">Fewer than 5 early exits in this period.</p>}
-          </div>
-          <div className="card insight"><Chip tone="yes">Largest contributor</Chip>
-            {ins.strongest ? (<>
-              <h4>{ins.strongest.c} contributed the most: <span className="gain">{sfmt(ins.strongest.net)}</span></h4>
-              <p>{ins.strongest.n} closed trades. {pct(ins.strongest.winRate * 100, 0)} of the {ins.strongest.resolved} that resolved went your way. The single best trade is {pct(Math.min(1, ins.strongest.topShare) * 100, 0)} of the category’s result{ins.strongest.topShare > 0.5 ? ', so one outcome drives most of it' : ''}.</p>
-              <div className="meta"><span>{count(ins.strongest.n, 'trade')}{ins.strongest.n < 30 ? ', limited sample size' : ''}</span><button type="button" className="link" onClick={() => openTrades(`${ins.strongest!.c} trades`, ins.strongest!.trades)}>Open category →</button></div>
-            </>) : <p className="unavailable">No category has 5+ closed trades with a positive result in this period.</p>}
-          </div>
+        <Card id="metrics" flush>
+          <CardHeader pad title="Period comparison" sub={compare ? 'This period and the prior period' : prior ? undefined : 'No earlier period to compare with'} />
+          <div className="dt-wrap"><table className="dt cmp">
+            <thead><tr><th scope="col">Metric</th><th scope="col" className="r">This period</th>{compare && <><th scope="col" className="r">Prior period</th><th scope="col" className="r">Change</th></>}</tr></thead>
+            <tbody>{metrics.map(([k, val, diff]) => {
+              const d = compare && prior && diff ? diff(stats, prior) : null
+              return <tr key={k}><td>{k}</td><td className="r">{val(stats)}</td>{compare && prior && <><td className="r t3">{val(prior)}</td><td className="r">{d ? <Delta tone={d.good ? 'gain' : 'loss'}>{d.text}</Delta> : <span className="t3">—</span>}</td></>}</tr>
+            })}</tbody>
+          </table></div>
+        </Card>
         </section>
 
-        <div className="grid g-2 anchor" id="detail">
-          <Card id="entry">
-            <CardHeader title="Entry price vs. outcome" info={HELP.calibration} />
-            <div className="card-b">
-              <div className="bucket t3" style={{ fontSize: 'var(--font-size-xs)', paddingTop: 0 }}><span>Entry price</span><span>Your win rate vs. implied</span><span className="r">Trades</span><span className="r">Net P&amp;L</span></div>
-              {buckets.map((b, i) => (
-                <button type="button" key={b.label} className="bucket bucket-btn hoverable" disabled={!b.n} style={{ opacity: hotBucket != null && hotBucket !== i ? 0.45 : 1 }}
-                  onMouseEnter={() => setHotBucket(i)} onMouseLeave={() => setHotBucket(null)} onFocus={() => setHotBucket(i)} onBlur={() => setHotBucket(null)}
-                  aria-label={b.n ? `Entry ${b.label}: ${b.n} resolved trades. View trades` : `Entry ${b.label}: no resolved trades`}
-                  onClick={() => openTrades(`Resolved trades entered at ${b.label}`, b.trades)}>
-                  <span className="mono">{b.label}</span>
-                  {b.n ? <div className="cal"><div className="a" style={{ width: `${(b.winRate ?? 0) * 100}%` }} /><div className="m" style={{ left: `${(b.implied ?? 0) * 100}%` }} /><span>{pct((b.winRate ?? 0) * 100, 0)} <span className="t3">vs {pct((b.implied ?? 0) * 100, 0)}</span></span></div> : <span className="unavailable">no resolved trades</span>}
-                  <span className="r">{b.n}</span><span className={cx('r', b.net >= 0 ? 'gain' : 'loss')}>{b.n ? sfmt(b.net) : '—'}</span>
-                </button>
-              ))}
-              <div style={{ marginTop: 'var(--space-3)' }}>
-                {hotBucket != null && buckets[hotBucket].n
-                  ? <Callout>In this bucket you won {pct((buckets[hotBucket].winRate ?? 0) * 100, 0)} of {count(buckets[hotBucket].n, 'resolved trade')}, while the average entry price implied {pct((buckets[hotBucket].implied ?? 0) * 100, 0)}.</Callout>
-                  : buckets.some((b) => b.n > 0 && b.n < 30) ? <Chip tone="warn">Limited sample size</Chip> : null}
-              </div>
-            </div>
-          </Card>
-          <Card id="metrics" flush>
-            <CardHeader pad title="Metrics" sub={compare ? 'This period and the prior period' : prior ? undefined : 'No earlier period to compare with'} />
-            <div className="dt-wrap"><table className="dt cmp">
-              <thead><tr><th scope="col">Metric</th><th scope="col" className="r">This period</th>{compare && <><th scope="col" className="r">Prior period</th><th scope="col" className="r">Change</th></>}</tr></thead>
-              <tbody>{metrics.map(([k, val, diff]) => {
-                const d = compare && prior && diff ? diff(stats, prior) : null
-                return <tr key={k}><td>{k}</td><td className="r">{val(stats)}</td>{compare && prior && <><td className="r t3">{val(prior)}</td><td className="r">{d ? <Delta tone={d.good ? 'gain' : 'loss'}>{d.text}</Delta> : <span className="t3">—</span>}</td></>}</tr>
-              })}</tbody>
-            </table></div>
-          </Card>
-        </div>
+        <AttributionCard stats={stats} open={openTrades} initial={useSettings().settings.defaultGrouping === 'platform' ? 'Platform' : 'Category'} />
+        <PatternExplorer trades={stats.trades} open={openTrades} scope={f === 'all' ? range.label : `${range.label}, ${scope}`} />
+        <section className="anchor" id="trades" aria-label="Trade analysis">
+          <TradeAnalysis trades={stats.trades} open={openTrades} openOne={(t) => details.open({ kind: 'trades', title: t.market, sub: `Closed on ${PLATFORM_NAME[t.platform]}, ${fmtDate(t.closed, { month: 'short', day: 'numeric', year: 'numeric' })}`, trades: [t] })} />
+        </section>
       </main>
 
     </div>

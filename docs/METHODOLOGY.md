@@ -112,15 +112,40 @@ A retrospective hypothetical portfolio over a past period (`web/src/lib/replay.t
   - shown as unavailable when it starts before `historyStart`.
 - **Largest drawdown:** the largest peak-to-trough fall in cumulative net P&L **on weekly snapshots** within the period.
 
+## Returns, drawdown and calendar returns (Analytics)
+
+Implementation: `web/src/lib/analytics.ts` (`performanceFromSeries`), shaped like the backend performance response (`twr`, `annualizedMwr`, `annualizedVolatility`, `maximumDrawdown` as quality-labelled metrics with an availability and a reason).
+
+- **Interval return** = (closing value − net external flow in the interval) ÷ opening value − 1. Deposits and withdrawals never count as gains. With the bundled weekly snapshots the flow is assumed at the interval end, so every return is labelled an *estimate*; the backend values immediately before and after each flow.
+- **Time-weighted return** links the interval returns. A nonpositive opening value breaks the chain; the return and every later index point are unavailable, never patched. Fewer than two valuations: unavailable.
+- **Drawdown** is the fall of the flow-adjusted index from its prior peak at each sampled date; **maximum drawdown** is the deepest. (The P&L drawdown in Period comparison is the money fall of cumulative net P&L and is a different measure.)
+- **Monthly returns** compound the interval returns ending in each calendar month. The first and last months of a period are marked partial. A month with any unavailable interval is unavailable.
+- **Annualized money-weighted return** needs dated investor cash flows from the accounting service, and **annualized volatility** needs daily valuations. Neither is calculated from the weekly sample; both show *Unavailable* with that reason. Sharpe, Sortino, alpha, beta and benchmarks aren't shown.
+
+## Attribution, trading patterns and trade analysis
+
+- **Attribution** groups closed trades in the period by category, platform, market or side. Each group shows trades, P&L before fees, fees and realized P&L separately. Below the groups: total realized, change in unrealized (including fees on new purchases) and net P&L, as before. Nothing is force-allocated: the change in unrealized isn't split across groups in this build.
+- **Trading patterns** (`cohorts`) group closed trades by one attribute: entry price ($0.20 buckets), side, category, platform, holding period (opened to closed: under 7, 7 to 30, 31 to 90, over 90 days), position size (entry notional = shares × entry price: under $250, $250 to $1,000, $1,000 to $5,000, over $5,000) or exit type (resolved in your favour, resolved against you, sold before resolution).
+  - *Trades* counts closed trades; *Resolved* counts those settled at $1 or $0. Win rate uses resolved trades only, so sales before resolution never count as wins or losses.
+  - *Return on entry* = net P&L ÷ entry notional. Average gain and loss are over trades with a positive or negative net result.
+  - For entry-price cohorts the average entry price of resolved trades is shown next to the win rate. It's the market's price, not a verified probability.
+  - Any cohort under 30 trades flags *Limited sample size*. The exit-type view adds the hindsight note on exits whose event later resolved in your favour (the outcome wasn't known at exit time).
+  - Holding period and position size use trade-level open and close dates and entry notional from the bundled records. The backend performance response doesn't provide these cohorts yet (a Phase 10 candidate).
+- **Trade analysis:** largest gains and losses (net, after fees); return distribution (return on entry in six bins; trades without entry notional are counted as excluded); realized P&L by market; monthly activity (closed trades, entry notional, fees, realized). **Fee burden** = fees ÷ entry notional, labelled an estimate when any fee was estimated and unavailable without trades.
+- Patterns describe what happened. A profitable past cohort doesn't establish a profitable strategy.
+
+## Concentration, settlement paths and resolution timing (Risk)
+
+- **Basis:** concentration can be read on cost basis (capital committed, including purchase fees) or market value (shares × latest mark). A position without a usable value is counted as missing, never as zero. The concentration limit applies to cost basis by event.
+- **Grouping:** event (the same outcome on two platforms counts once), category, platform or account.
+- **Metrics** (`concentration`): the largest group's share and top-3 and top-5 shares, **HHI** = Σ share², and **effective exposures** = 1 ÷ HHI. Effective exposures describe how spread the sizes are; they aren't independent risks.
+- **Settlement outcomes** (`pathSummary`, `pathContributions`): for the portfolio's worst and best feasible joint outcome (the same enumeration as the worst-case tile), the gross payout ($1 per winning share), settlement P&L against cost, change from current marked value (unavailable if any holding lacks a mark), the value with cash, and each event's P&L *under that same joint outcome*. The event rows add up to the path total; incompatible individual worst cases are never combined. Holdings without a supported settlement rule are counted and excluded.
+- **Resolution windows** (`resolutionBuckets`): capital committed by scheduled resolution date in six windows: overdue (date passed without a recorded settlement), within 30 days, 31 to 90 days, 91 to 365 days, later, and no date. A scheduled date isn't a settlement, redemption or cash date.
+- The bundled enumeration is limited to 16 events. At integration the backend's connected-component solver replaces it (with its own documented bounds and per-component availability), so the 16-event limit isn't a product limitation.
+
 ## Descriptive patterns
 
-Analytics shows a pattern only when it has at least 5 trades. It always shows the sample size, and labels anything under 30 trades as a small sample. Patterns describe what happened; they are not statistical evidence of skill.
-
-- **Longshots:** resolved trades with entry price below $0.25. Compares the win rate with the average entry price.
-- **Early exits:** opportunity cost in hindsight.
-  - What holding would have paid on exits whose event later resolved in your favour, vs. value kept on exits whose event went to $0.
-  - The outcome wasn't known at exit time, so this doesn't show the exit was a mistake.
-- **Largest contributor:** the category with the highest net realized P&L. It is measured on the same basis as attribution, so the two always match. It says nothing about consistency.
+The fixed Longshots, Early exits and Largest contributor cards are generalized into the trading-pattern explorer above (entry price covers longshots, category covers the largest contributor). The early-exit hindsight measure remains under the exit-type view: what holding would have paid on exits whose event later resolved in your favour. The outcome wasn't known at exit time, so it doesn't show an exit was a mistake. Patterns describe what happened; they aren't statistical tests or predictions.
 
 ## Settlement and relationships
 

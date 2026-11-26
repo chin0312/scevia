@@ -266,7 +266,7 @@ test('section rail: one active entry; an explicit choice survives reaching the b
   await expect(rail.getByRole('link', { name: 'Event relationships' })).toHaveAttribute('aria-current', 'location')
   await expect(page.locator('#rel')).toBeFocused()
   await page.waitForTimeout(800) // smooth scroll settles at the bottom of the page
-  await expect(rail.getByRole('link', { name: 'Resolution calendar' })).not.toHaveAttribute('aria-current', 'location')
+  await expect(rail.getByRole('link', { name: 'Resolution timing' })).not.toHaveAttribute('aria-current', 'location')
   await expect(rail.locator('[aria-current]')).toHaveCount(1)
 
   await rail.getByRole('link', { name: 'Downside ladder' }).click()
@@ -397,7 +397,7 @@ test('scope: an event opened from a Polymarket-only view starts in that scope an
 test('analytics drill-downs keep the period and platform scope', async ({ page }) => {
   await fresh(page, '/analytics')
   await page.getByRole('radiogroup', { name: 'Platform' }).getByRole('radio', { name: 'Kalshi' }).click()
-  await page.locator('#attribution .attr-btn').first().click()
+  await page.locator('#attribution tbody tr').first().click()
   const dlg = page.getByRole('dialog')
   await expect(dlg).toContainText(periodRange('6M').label)
   await expect(dlg).toContainText('Kalshi')

@@ -15,13 +15,16 @@ import { fmt, kfmt, pct, sfmt } from '../lib/format'
 import { useSettings } from '../lib/settings'
 import { useFinance } from '../lib/financeContext'
 import { DataIssues } from '../components/Workspace'
+import { concentration, pathContributions, pathSummary, resolutionBuckets } from '../lib/analytics'
+import { accountName } from '../lib/useWorkspace'
 import { HELP } from '../lib/help'
 
 const RAIL: RailSection[] = [
   { id: 'summary', label: 'Exposure summary', icon: 'home' },
   { id: 'exposure', label: 'Exposure', icon: 'bars', children: [{ id: 'conc', label: 'Concentration' }, { id: 'ladder', label: 'Downside ladder' }] },
-  { id: 'payoffs', label: 'Outcome payoffs', icon: 'table' },
-  { id: 'context', label: 'Relationships & timing', icon: 'link', children: [{ id: 'rel', label: 'Event relationships' }, { id: 'calendar', label: 'Resolution calendar' }] },
+  { id: 'settlement', label: 'Settlement risk', icon: 'table', children: [{ id: 'payoffs', label: 'Outcome payoffs' }] },
+  { id: 'rel', label: 'Event relationships', icon: 'link' },
+  { id: 'calendar', label: 'Resolution timing', icon: 'cal' },
 ]
 
 /** Largest capital resolving inside any 7-day window within `days`. */
@@ -37,7 +40,7 @@ function busiestWeek(exps: EventExposure[], days = 90) {
 }
 
 export default function Risk() {
-  const { ACCOUNTS, account, baseHoldings, exposures, positionsFor, settlementRangeFor, sourceRelations } = useFinance()
+  const { ACCOUNTS, TODAY, account, baseHoldings, exposures, positionsFor, settlementRangeFor, sourceRelations } = useFinance()
   useHashScroll()
   const nav = useNavigate()
   const toast = useToast()
@@ -46,7 +49,9 @@ export default function Risk() {
   // Factual risk uses source relationships only; hypothetical constraints live in scenarios and never reach here.
   const rels = useMemo(() => sourceRelations(), [])
   const details = useDetails()
-  const [groupBy, setGroupBy] = useState<'By event' | 'By category' | 'By platform'>('By event')
+  const [groupBy, setGroupBy] = useState<'By event' | 'By category' | 'By platform' | 'By account'>('By event')
+  const [basis, setBasis] = useState<'Cost basis' | 'Market value'>('Cost basis')
+  const [pathView, setPathView] = useState<'Worst case' | 'Best case'>('Worst case')
   const { settings, update } = useSettings()
   const limit = settings.guardrail, setLimit = (v: number) => update({ guardrail: v })
   const [editLimit, setEditLimit] = useState<number | null>(null)
@@ -63,18 +68,25 @@ export default function Risk() {
     for (const r of rels) if (r.a === id || r.b === id) return r.cls
     return null
   }
+  // The same groups on either basis: cost (capital committed) or market value (shares × latest mark). A position
+  // without a usable value is counted as missing, never as zero.
   const groups = useMemo(() => {
-    if (groupBy === 'By event') return exps.map((e) => ({ key: e.event.id, name: e.event.name, cost: e.cost, platforms: e.platforms, ids: e.positions.map((p) => p.id) }))
-    const keys = groupBy === 'By category' ? CATEGORIES : (['pm', 'ks'] as const)
-    return keys.map((k) => {
-      const ps = positionsFor('all').filter((p) => (groupBy === 'By category' ? p.category === k : p.platform === k))
-      return { key: k, name: groupBy === 'By category' ? k : PLATFORM_NAME[k as 'pm' | 'ks'], cost: ps.reduce((a, p) => a + p.cost, 0), platforms: [...new Set(ps.map((p) => p.platform))], ids: ps.map((p) => p.id) }
-    }).filter((g) => g.cost > 0).sort((a, b) => b.cost - a.cost)
-  }, [groupBy, exps])
-  const groupLimit = groupBy === 'By event' ? limit : groupBy === 'By category' ? 40 : 100
+    const amount = (ps: { cost: number; value: number }[]) => ps.reduce((a, p) => a + (basis === 'Cost basis' ? p.cost : p.value), 0)
+    const make = (key: string, name: string, ps: ReturnType<typeof positionsFor>) => ({ key, name, cost: ps.reduce((a, p) => a + p.cost, 0), amt: amount(ps), missing: basis === 'Market value' ? ps.filter((p) => !Number.isFinite(p.value)).length : 0, platforms: [...new Set(ps.map((p) => p.platform))], ids: ps.map((p) => p.id) })
+    const all = positionsFor('all')
+    const list = groupBy === 'By event' ? exps.map((e) => make(e.event.id, e.event.name, e.positions))
+      : groupBy === 'By account' ? [...new Set(all.map((p) => p.accountId))].map((id) => make(id, accountName(id), all.filter((p) => p.accountId === id)))
+      : (groupBy === 'By category' ? CATEGORIES : (['pm', 'ks'] as const)).map((k) => make(k, groupBy === 'By category' ? k : PLATFORM_NAME[k as 'pm' | 'ks'], all.filter((p) => (groupBy === 'By category' ? p.category === k : p.platform === k))))
+    return list.filter((g) => g.ids.length > 0).sort((a, b) => b.amt - a.amt)
+  }, [groupBy, exps, basis])
+  const denom = basis === 'Cost basis' ? committed : groups.reduce((a, g) => a + g.amt, 0)
+  const shareOfBasis = (v: number) => (denom > 0 ? (v / denom) * 100 : 0)
+  const conc = concentration(groups.map((g) => ({ value: g.amt })))
+  const unitNoun = groupBy === 'By event' ? 'event' : groupBy === 'By category' ? 'category' : groupBy === 'By platform' ? 'platform' : 'account'
+  const groupLimit = basis === 'Market value' ? 101 : groupBy === 'By event' ? limit : groupBy === 'By category' ? 40 : 100
   // Shares of committed capital; only shown when something is committed (an empty portfolio has no shares, not 0%).
   const shareOf = (c: number) => (committed > 0 ? (c / committed) * 100 : 0)
-  const scale = Math.max(32, Math.ceil(shareOf(groups[0]?.cost ?? 0) / 10) * 10 + 4)
+  const scale = Math.max(32, Math.ceil(shareOfBasis(groups[0]?.amt ?? 0) / 10) * 10 + 4)
   const top = exps[0]
   const over = exps.filter((e) => shareOf(e.cost) > limit)
   const top3 = exps.slice(0, 3).reduce((a, e) => a + e.cost, 0)
@@ -125,7 +137,7 @@ export default function Risk() {
 
       <main>
         <PageHead caption={`${count(acct.openCount, 'position')} across ${count(exps.length, 'event')}`} title="Portfolio risk"
-          actions={<><Seg label="Group by" options={['By event', 'By category', 'By platform'] as const} value={groupBy} onChange={setGroupBy} /><Button variant="primary" onClick={stressTest} disabled={stressIds.length === 0} title={`Choose a scenario and which of the ${count(stressIds.length, 'position')} behind the payoff table to add`}><Icon name="flask" size={15} />Stress-test in Lab…</Button></>} />
+          actions={<><Seg label="Group by" options={['By event', 'By category', 'By platform', 'By account'] as const} value={groupBy} onChange={setGroupBy} /><Button variant="primary" onClick={stressTest} disabled={stressIds.length === 0} title={`Choose a scenario and which of the ${count(stressIds.length, 'position')} behind the payoff table to add`}><Icon name="flask" size={15} />Stress-test in Lab…</Button></>} />
         <DataIssues denominations={ACCOUNTS.map((a) => a.denomination)} />
         {exps.length === 0 && <Callout icon="info">No open positions in the selected sources, so there is no event exposure to analyse. This is an empty portfolio, not missing data.</Callout>}
         <p className="summary">You have <b>{fmt(committed)}</b> committed across {count(exps.length, 'event')}. {over.length > 0
@@ -142,22 +154,29 @@ export default function Risk() {
 
         <div className="grid g-21 anchor" id="exposure">
           <Card id="conc">
-            <CardHeader title={`${groupBy.replace('By ', '').replace(/^./, (c) => c.toUpperCase())} concentration`} sub="Capital committed" info={HELP.concentration}
-              right={<Legend items={[{ label: 'Within limit', color: 'var(--color-data-1)' }, { label: `Over ${groupLimit}%`, color: 'var(--color-warn-fg)' }]} />} />
+            <CardHeader title={`${groupBy.replace('By ', '').replace(/^./, (c) => c.toUpperCase())} concentration`} sub={basis === 'Cost basis' ? 'Capital committed' : 'Market value of open positions'} info={HELP.exposureBasis}
+              right={<Seg label="Concentration basis" options={['Cost basis', 'Market value'] as const} value={basis} onChange={setBasis} />} />
             <div className="card-b">
+              {conc && <dl className="conc-stats">
+                {conc.top.filter((t) => t.count <= groups.length && (t.count === 1 || t.count < groups.length)).map((t) => <div key={t.count}><dt>{t.count === 1 ? `Largest ${unitNoun}` : `Top ${t.count}`}</dt><dd>{pct(t.weight * 100)}</dd></div>)}
+                <div><dt>HHI</dt><dd>{conc.hhi.toFixed(3)}</dd></div>
+                <div><dt>Effective {unitNoun === 'category' ? 'categories' : `${unitNoun}s`}</dt><dd>{conc.effective.toFixed(1)}</dd></div>
+              </dl>}
+              {groups.some((g) => g.missing > 0) && <p className="stale conc-note">{count(groups.reduce((a, g) => a + g.missing, 0), 'position')} without a market value, not counted</p>}
+              {basis === 'Cost basis' && <div className="conc-legend"><Legend items={[{ label: 'Within limit', color: 'var(--color-data-1)' }, { label: `Over ${groupLimit}%`, color: 'var(--color-warn-fg)' }]} /></div>}
               {groups.map((g) => {
-                const s = shareOf(g.cost)
+                const s = shareOfBasis(g.amt)
                 const go = () => groupBy === 'By event' ? openEvent(g.key)
-                  : details.open({ kind: 'group', title: g.name, sub: `${fmt(g.cost)} committed, ${s.toFixed(1)}% of the total`, ids: g.ids })
+                  : details.open({ kind: 'group', title: g.name, sub: `${fmt(g.amt)} ${basis === 'Cost basis' ? 'committed' : 'market value'}, ${s.toFixed(1)}% of the total`, ids: g.ids })
                 return (
-                  <button type="button" key={g.key} className="conc conc-btn hoverable" aria-label={`${g.name}: ${s.toFixed(1)}% of committed capital, view details`} onClick={go}>
+                  <button type="button" key={g.key} className="conc conc-btn hoverable" aria-label={`${g.name}: ${s.toFixed(1)}% of ${basis === 'Cost basis' ? 'committed capital' : 'market value'}, view details`} onClick={go}>
                     <span className="nm">{g.platforms.map((p) => <PlatformBadge key={p} p={p} />)}<span>{g.name}</span></span>
                     <div className="cbar"><i className={cx(s > groupLimit && 'over')} style={{ width: `${(s / scale) * 100}%` }} />{groupLimit < scale && <span className="lim" style={{ left: `${(groupLimit / scale) * 100}%` }} />}</div>
-                    <span className="r">{fmt(g.cost)}</span><span className="r t3">{s.toFixed(1)}%</span>
+                    <span className="r">{fmt(g.amt)}</span><span className="r t3">{s.toFixed(1)}%</span>
                   </button>
                 )
               })}
-              {groupBy === 'By event' && <div style={{ marginTop: 'var(--space-3)' }}><Button size="sm" variant="ghost" onClick={() => setEditLimit(limit)}>Edit {limit}% limit</Button></div>}
+              {groupBy === 'By event' && basis === 'Cost basis' && <div style={{ marginTop: 'var(--space-3)' }}><Button size="sm" variant="ghost" onClick={() => setEditLimit(limit)}>Edit {limit}% limit</Button></div>}
             </div>
           </Card>
           <Card id="ladder">
@@ -193,6 +212,30 @@ export default function Risk() {
           </Card>
         </div>
 
+        <Card id="settlement" flush>
+          <CardHeader pad title="Settlement outcomes" info={HELP.settlementPaths} right={<Tabs label="Settlement path" options={['Worst case', 'Best case'] as const} value={pathView} onChange={setPathView} />} />
+          {!portfolio ? <div className="card-b"><p className="unavailable">{issue === 'too-many-events' ? `More than ${MAX_JOINT_EVENTS} events to check every combination in this build.` : issue === 'no-feasible-outcome' ? 'Recorded relationships leave no possible outcome.' : 'Not available for this portfolio.'}</p></div> : (() => {
+            const path = pathView === 'Worst case' ? portfolio.argmin : portfolio.argmax
+            const sum = pathSummary(Object.values(baseHoldings()), path)
+            const parts = pathContributions(exps, path)
+            return (<>
+              <div className="card-b"><dl className="conc-stats settle-stats">
+                <div><dt>Gross payout</dt><dd>{fmt(sum.payout)}</dd></div>
+                <div><dt>Settlement P&amp;L</dt><dd className={sum.pnl >= 0 ? 'gain' : 'loss'}>{sfmt(sum.pnl)}</dd></div>
+                <div><dt>Change from current value</dt><dd className={sum.change == null ? 't3' : sum.change >= 0 ? 'gain' : 'loss'}>{sum.change == null ? 'Unavailable' : sfmt(sum.change)}</dd></div>
+                <div><dt>With cash</dt><dd>{fmt(acct.cash + sum.payout)}</dd></div>
+              </dl>
+              {sum.unsupported > 0 && <p className="stale conc-note">{count(sum.unsupported, 'holding')} without a supported settlement rule, not included</p>}</div>
+              <div className="dt-wrap"><table className="dt">
+                <thead><tr><th scope="col">Event</th><th scope="col">Outcome</th><th scope="col" className="r">Settlement P&amp;L</th></tr></thead>
+                <tbody>{parts.map(({ e, outcome, pnl }) => <tr key={e.event.id} className="clickable" tabIndex={0} onClick={() => openEvent(e.event.id)} onKeyDown={(ev) => { if (ev.key === 'Enter') { ev.preventDefault(); openEvent(e.event.id) } }}>
+                  <td className="mkt">{e.event.name}</td><td className="t2">{outcome}</td><td className={cx('r', pnl >= 0 ? 'gain' : 'loss')}>{sfmt(pnl)}</td></tr>)}</tbody>
+              </table></div>
+              <div className="foot"><span>{sentences(`One feasible joint outcome of ${count(portfolio.feasible, 'possible combination')}`, portfolio.excluded > 0 && `${count(portfolio.excluded, 'combination')} excluded by verified constraints`)}</span><span /></div>
+            </>)
+          })()}
+        </Card>
+
         <Card id="payoffs" flush>
           <CardHeader pad title="Outcome payoffs" info={HELP.payoffs} right={<Tabs label="Filter events" options={['All events', 'Next 30 days', 'Above limit'] as const} value={filter} onChange={setFilter} />} />
           <div className="po-row h"><span>Event and side</span><span>Resolves</span><span>Better outcome</span><span>Worse outcome</span><span className="r">Share</span></div>
@@ -223,6 +266,11 @@ export default function Risk() {
           <Card id="rel">
             <CardHeader title="Event relationships" info={HELP.relationships} />
             <div className="card-b">
+              {(() => { const held = exps.map((e) => e.event.id), pairs = (held.length * (held.length - 1)) / 2
+                const classified = rels.filter((r) => held.includes(r.a) && held.includes(r.b) && r.cls !== 'unknown')
+                const by = (c: RelClass) => classified.filter((r) => r.cls === c).length
+                const merged = exps.filter((e) => e.positions.length > 1).length
+                return <div className="rel-sum">{merged > 0 && <Chip tone="yes">{count(merged, 'combined event')}</Chip>}{(['equivalent', 'mutex', 'related'] as RelClass[]).filter((c) => by(c)).map((c) => <Chip key={c} tone={REL_TEXT[c].tone}>{by(c)} {REL_TEXT[c].short.toLowerCase()}</Chip>)}<Chip>{count(Math.max(0, pairs - classified.length), 'unclassified pair')}</Chip></div> })()}
               {exps.filter((e) => e.positions.length > 1).map((e) => (
                 <div className="rel" key={e.event.id}><div className="h"><button type="button" className="link" onClick={() => openEvent(e.event.id)}><b>{e.event.name}</b></button><Chip tone="yes">Confirmed equivalent</Chip></div>
                   {e.positions.map((p) => <div className="leg" key={p.id}><PlatformBadge p={p.platform} />{p.market} {p.side}</div>)}
@@ -238,6 +286,10 @@ export default function Risk() {
           <Card id="calendar">
             <CardHeader title="Resolution calendar" sub="Capital committed by scheduled resolution date" info={HELP.calendar} right={<Seg label="Range" options={['90 days', '12 months'] as const} value={range} onChange={setRange} />} />
             <div className="card-b">
+              <div className="timing" role="list" aria-label="Capital committed by resolution window">{resolutionBuckets(exps, TODAY).filter((b) => b.n > 0 || b.label === 'Within 30 days').map((b) => (
+                <button type="button" role="listitem" key={b.label} className={cx('timing-b', (b.label === 'Overdue' || b.label === 'No date') && 'warn')} disabled={!b.n}
+                  onClick={() => details.open({ kind: 'group', title: `Resolving: ${b.label.toLowerCase()}`, sub: `${fmt(b.cost)} committed`, ids: b.exps.flatMap((e) => e.positions.map((p) => p.id)) })}>
+                  <span className="t3">{b.label}</span><b>{fmt(b.cost)}</b><small className="t3">{count(b.n, 'event')}</small></button>))}</div>
               <Calendar exps={exps} range={range} hot={hotCal} setHot={setHotCal} onPick={openEvent} />
               <div className="tl-list cal-list" role="list" aria-label="Next resolutions">
                 {[...exps].sort((a, b) => a.days - b.days).slice(0, 5).map((e) => (

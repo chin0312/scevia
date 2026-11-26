@@ -245,6 +245,31 @@ The frontend's calculations stay fixture, validation and presentation logic. Aut
 - **Legacy migration:** a current-portfolio scenario from the earlier per-portfolio storage without a recorded starting portfolio keeps its configuration and source, shows *Original starting portfolio unavailable* with no results, and needs *Set a new starting portfolio*, which is marked as new (`baselineNote: 'replaced'`). It is never given another portfolio's or an empty state silently.
 - **Current-market funding:** still one virtual cash pool per venue in this prototype, labelled as such; at integration each venue's inputs bind to the backend's native funding buckets (`hypotheticalBuckets`: venue/account + asset), and different assets never fund each other.
 
+### Analytics and Risk: backend capability map
+
+Audited against `main` (`backend/docs/ANALYTICS.md`, `backend/src/analytics/{contracts,performance,exposure,settlement}.ts`, `backend/src/fx/consolidated.ts`). Every backend analytical call uses one selected asset with no implicit FX conversion. The frontend shapes in `web/src/lib/analytics.ts` mirror these responses so Phase 10 swaps adapters, not presentation.
+
+| Capability | Backend on main | Frontend now | Gap / Phase 10 |
+| --- | --- | --- | --- |
+| Net P&L, realized, change in unrealized, investment gain | `/analytics/performance` bridge, history, `investmentGainSinceOpening` (needs classified flows) | Period summary, attribution totals, cumulative chart | Bind to the bridge. Investment gain stays unavailable until provider flows are classified |
+| Time-weighted return | `returns.twr` (flows bracketed exactly) | Weekly estimate, labelled *est.* (`performanceFromSeries`) | Replace with the backend value and its quality label |
+| Annualized MWR | `returns.annualizedMwr` (ACT/365, ≤ 64 payments, bracketed root) | Shown *Unavailable* with reason | Bind |
+| Annualized volatility | `returns.annualizedVolatility` (daily intervals × √365) | Shown *Unavailable* (no daily values) | Bind |
+| Drawdown | `returns.maximumDrawdown`, index history | Index drawdown chart (weekly estimate) and P&L drawdown | Bind |
+| Calendar-period returns | `periodicReturns.daily/weekly/monthly`, partial periods labelled | Monthly heatmap (weekly estimate) | Bind; add weekly/daily views if useful |
+| Attribution | Instrument and event groups, unmapped components and residual kept visible | Closed trades by category, platform, market or side; fees separate; unrealized change total only | Bind event/instrument attribution incl. unmapped and residual rows; no force-allocation |
+| Trading activity and fees | Fills, buys, sells, gross notional; net execution fees, unknown and zero effects, rebates; fee-to-notional | Monthly activity, fee burden (entry notional basis) | Bind posted-fill counts and fee-to-notional; show rebates and unknown fees separately |
+| Win rate, profit factor | Realized exit win rate (posted sales with known results); profit factor unavailable without known losses | Resolved win rate; profit factor | Show both definitions, clearly named |
+| Trade cohorts (entry price, side, category, platform, exit type) | Not a response field | Pattern explorer from closed trades | Phase 10 candidate: backend cohort endpoint, or trade-level rows with the same definitions |
+| Holding period, position size cohorts | Not available (needs validated open/close lot accounting) | From bundled trade dates and entry notional | Phase 10 candidate; needs validated lot-level evidence |
+| Allocation and concentration | `allocation.byInstrument/byMarket/byEvent` (+ venue, account), HHI, effective exposures, top-N shares, mapping coverage and unmapped value | Event/category/platform/account on cost or market basis, HHI, effective exposures, top 1/3/5 | Bind; show unmapped value and mapping coverage when present |
+| Cash-inclusive and acquisition-basis allocation | `allocationBases.cashInclusive`, `acquisitionBasis` (unknown basis counted) | Market value and cost basis, cash shown separately | Bind cash-inclusive weights (unavailable on negative cash) |
+| Settlement extrema and contributions | Exact component solver, best/worst with same-path contributions, feasible count, supported subset, unsupported holdings, cash-inclusive range | Same-path worst/best from the bundled enumeration (≤ 16 events), gross payout, change from value, with cash | Use the component solver; drop the 16-event limit; show per-component availability and unsupported holdings |
+| Pending entitlements | In the ledger, separate from positions | Not in the sample | Show as their own component in Overview and settlement values |
+| Resolution timeline | Buckets from catalog schedule hints, overdue and undated kept apart | Six windows including overdue and no date | Bind; per-market timing needs more evidence |
+| Relationships | Reviewed equivalence, exclusion, implication; thematic stores; connected components | Classification chips and grouped list; unclassified pair count | Add implication when present; keep thematic and unknown non-constraining |
+| Liquidity (spread, depth, exit proceeds, slippage) | Not available | Not shown | Evidence-dependent: needs permitted, reliable orderbook data (Phase 9 evaluation) |
+
 ### Backend dependencies (remaining)
 
 | Need | Backend owner | Frontend seam |
