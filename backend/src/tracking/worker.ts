@@ -3,9 +3,9 @@ import { conflictingResolution } from './lifecycle.js'
 import { lifecycleRank } from './demand.js'
 import { Decimal } from 'decimal.js'
 import { randomUUID } from 'node:crypto'
-import { and, asc, eq, exists, inArray, isNull, lt, lte, or } from 'drizzle-orm'
+import { and, asc, eq, exists, gt, inArray, isNull, lt, lte, or } from 'drizzle-orm'
 import type { Database } from '../db/client.js'
-import { accountTracking, automaticMarketWatches, events, instruments, markets, marketLifecycleEvidence, marketTracking, marketWatches, providerAccounts, sharedMarketObservations } from '../db/schema.js'
+import { accountTracking, automaticMarketWatches, events, instruments, markets, marketLifecycleEvidence, marketResearch, marketTracking, marketWatches, providerAccounts, sharedMarketObservations } from '../db/schema.js'
 import { digest } from '../accounting/decisions.js'
 import type { IngestionService } from '../ingestion/sync.js'
 import type { KalshiMarketDataService } from '../providers/kalshi/market-data.js'
@@ -43,7 +43,9 @@ export class TrackingWorker {
         .innerJoin(events, eq(events.id, markets.eventId))
         .where(and(available(now, marketTracking), inArray(markets.providerCode, providers), isNull(marketTracking.resolution),
           or(exists(tx.select({ id: marketWatches.portfolioId }).from(marketWatches).where(eq(marketWatches.marketId, marketTracking.marketId))),
-            exists(tx.select({ id: automaticMarketWatches.portfolioId }).from(automaticMarketWatches).where(eq(automaticMarketWatches.marketId, marketTracking.marketId))))))
+            exists(tx.select({ id: automaticMarketWatches.portfolioId }).from(automaticMarketWatches).where(eq(automaticMarketWatches.marketId, marketTracking.marketId))),
+            exists(tx.select({ id: marketResearch.ownerId }).from(marketResearch).where(and(eq(marketResearch.marketId, marketTracking.marketId),
+              gt(marketResearch.expiresAt, now)))))))
         .orderBy(asc(marketTracking.nextAttemptAt), asc(marketTracking.marketId)).limit(1).for('update', { skipLocked: true })
       if (!candidate) return null
       await tx.update(marketTracking).set({ leaseToken: token, leaseUntil: leaseEnd(now), lastAttemptAt: now })
@@ -130,6 +132,11 @@ export class TrackingWorker {
   }
 
   async pruneObservations(retentionDays: number, now = new Date()) {
+    const expiredLeases = this.db.select({ owner: marketResearch.ownerId, market: marketResearch.marketId }).from(marketResearch)
+      .where(lte(marketResearch.expiresAt, now)).limit(1000)
+    const leases = await expiredLeases
+    for (const lease of leases) await this.db.delete(marketResearch).where(and(eq(marketResearch.ownerId, lease.owner),
+      eq(marketResearch.marketId, lease.market), lte(marketResearch.expiresAt, now)))
     const cutoff = new Date(now.getTime() - retentionDays * 86_400_000)
     const table = sharedMarketObservations
     const expired = this.db.select({ id: table.id }).from(table).where(lt(table.retrievedAt, cutoff))

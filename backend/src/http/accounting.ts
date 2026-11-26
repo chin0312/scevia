@@ -1,3 +1,5 @@
+import { reportingPerformance } from '../fx/performance.js'
+import { loadFx, reportingCurrency, reportAmounts } from '../fx/reference.js'
 import { lifecycleAt } from '../tracking/lifecycle.js'
 import { reconcileHoldingDemand, trackedDemoCapture } from '../tracking/demand.js'
 import { sharedTrackingEvidence } from '../tracking/evidence.js'
@@ -13,7 +15,7 @@ import { and, count, desc, eq, inArray, isNotNull, isNull, lte, or, sql } from '
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { Database } from '../db/client.js'
-import { financialImportBatches as batches, portfolios, providerAccounts, marketTracking, sourceRecords, instruments, markets, events, reviewedBinaryRules, reviewedSettlementConstraints, portfolioAccountingDecisions as decisions } from '../db/schema.js'
+import { financialImportBatches as batches, portfolios, providerAccounts, users, marketTracking, sharedMarketObservations, sourceRecords, instruments, markets, events, reviewedBinaryRules, reviewedSettlementConstraints, portfolioAccountingDecisions as decisions } from '../db/schema.js'
 import { normalizeManualEvent, parseFinancialCsv } from '../accounting/csv.js'
 import { loadProviderEvidence } from '../accounting/provider-evidence.js'
 import type { Evidence, PortfolioDecision } from '../accounting/model.js'
@@ -68,7 +70,7 @@ function concurrentWrite(error: unknown): boolean {
 export function registerAccountingRoutes(app: FastifyInstance, database: Database, resolvePublic?: (url: string, type: import('../scenarios/public-market.js').PublicSelection['assetIdType'], assetId?: string) => Promise<unknown>) {
   async function owned(portfolioId: string, ownerId: string) {
     const [row] = await database.select({ id: portfolios.id }).from(portfolios)
-      .where(and(eq(portfolios.id, portfolioId), eq(portfolios.ownerId, ownerId))).limit(1)
+      .where(and(eq(portfolios.id, portfolioId), eq(portfolios.ownerId, ownerId), eq(portfolios.simulationOnly, false))).limit(1)
     return row !== undefined
   }
   app.post<{ Params: { portfolioId: string }; Body: { csv: string; kalshiMapping?: unknown; providerAccountId?: string; sourceLinks?: Record<string, string>; replaces?: string; acceptUnlinked?: boolean } }>(prefix + '/imports/preview', {
@@ -643,7 +645,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     asOf: z.iso.datetime({ offset: true }),
     accounts: z.string().max(4000).optional(), venue: z.string().min(1).max(160).optional(),
   })
-  const performanceQuery = analyticsQuery.extend({ from: z.iso.datetime({ offset: true }),
+  const performanceQuery = analyticsQuery.extend({ currency: reportingCurrency.optional(), from: z.iso.datetime({ offset: true }),
     sampling: z.enum(['daily', 'weekly', 'monthly']).optional() })
   function selectAccounts(input: Awaited<ReturnType<typeof loadEvidence>>, requested?: string, venue?: string) {
     const available = new Set([...input.accounts.filter((account) => !venue || account.venue === venue).map((account) => account.account),
@@ -703,6 +705,8 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       const { context, evidence } = analyticalContext(input, accounts, asOf, query.data.asset, query.data.venue)
       try {
         const data = analyzePerformance(evidence, accounts, query.data.asset, from, asOf, context.accountIdentities)
+        const currency = query.data.currency
+        const reporting = currency ? reportingPerformance(await loadFx(tx, from, asOf), data, query.data.asset, currency) : null
         const canonicalKeys = canonicalInstrumentKeys(evidence, asOf)
         const identified = [...new Set(data.attribution.instruments
           .filter((row) => canonicalKeys.has(instrumentKey(row, row.instrument)) && z.uuid().safeParse(row.instrument).success)
@@ -745,13 +749,13 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
         }
         const catalogRevision = digest(metadata.sort((left, right) => left.instrument.localeCompare(right.instrument)))
         const sampling = query.data.sampling ?? 'daily'
-        if (sampling === 'daily') return { context, catalogRevision, from, sampling, ...data, attribution }
+        if (sampling === 'daily') return { context, catalogRevision, from, sampling, ...data, ...(reporting ? { reporting } : {}), attribution }
         const history = data.history.filter((point, index, points) => {
           if (index === 0 || index === points.length - 1) return true
           const date = new Date(point.asOf)
           return sampling === 'weekly' ? date.getUTCDay() === 0 : new Date(date.getTime() + 1).getUTCDate() === 1
         })
-        return { context, catalogRevision, from, sampling, ...data, attribution, history }
+        return { context, catalogRevision, from, sampling, ...data, ...(reporting ? { reporting } : {}), attribution, history }
       }
       catch (error) {
         if (error instanceof Error && ['analytics_range_limit', 'analytics_replay_limit'].includes(error.message)) {
@@ -920,12 +924,25 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       if (model.metadata.some((row) => row.providerMarket.startsWith('simulation:')
         && !row.providerMarket.startsWith('simulation:' + (capture?.catalogRevision ?? capture?.revision) + ':'))) throw new ScenarioError('demo_instrument_scope_mismatch')
     }
+    const lifecycle = await lifecycleAt(tx, [...new Set(model.metadata.map((row) => row.market))], asOf)
+    const quotes = catalog.length ? await tx.selectDistinctOn([sharedMarketObservations.instrumentId], {
+      instrument: sharedMarketObservations.instrumentId, price: sharedMarketObservations.price,
+      retrievedAt: sharedMarketObservations.retrievedAt, source: sharedMarketObservations.source,
+    }).from(sharedMarketObservations).where(and(inArray(sharedMarketObservations.instrumentId, catalog),
+      eq(sharedMarketObservations.asset, asset), lte(sharedMarketObservations.retrievedAt, new Date(asOf))))
+      .orderBy(sharedMarketObservations.instrumentId, desc(sharedMarketObservations.effectiveAt), desc(sharedMarketObservations.retrievedAt)) : []
     const baselineInstruments = new Map(normalizedPublic.map((row) => [row.id, row]))
     for (const id of catalog) {
       const entry = listings.get(id)
       if (!entry) throw new ScenarioError('catalog_instrument_unavailable')
       if ((entry.settlementAsset ?? entry.marketAsset) && (entry.settlementAsset ?? entry.marketAsset) !== asset) throw new ScenarioError('catalog_instrument_asset_mismatch')
-      baselineInstruments.set(id, { id, mark: null, ...baselineInstruments.get(id), ...metadataFor(entry) })
+      const observedLifecycle = lifecycle.get(entry.market)?.filter((row) => !row.conflict).at(-1)?.lifecycle
+      const meta = { ...metadataFor(entry), ...(observedLifecycle ? { lifecycle: observedLifecycle } : {}) }
+      const quote = quotes.find((item) => item.instrument === id)
+      const usable = quote && meta.lifecycle === 'open' && Date.parse(asOf) - quote.retrievedAt.getTime() <= 86_400_000
+      baselineInstruments.set(id, { id, mark: usable ? new Decimal(quote.price).toFixed() : null,
+        ...(usable ? { markAt: quote.retrievedAt.toISOString(), markSource: 'public_retrieval_at_cutoff' as const } : {}),
+        ...baselineInstruments.get(id), ...meta })
     }
     for (const row of local) baselineInstruments.set(row.id, { id: row.id, mark: row.mark, markSource: 'declared_local' })
     const bucketKey = (row: { venue: string; account: string }) => JSON.stringify([row.venue, row.account])
@@ -1217,12 +1234,12 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
 
   })
 
-  app.get<{ Params: { portfolioId: string }; Querystring: { from: string; through: string } }>(prefix + '/accounting/history', {
+  app.get<{ Params: { portfolioId: string }; Querystring: { from: string; through: string; currency?: string } }>(prefix + '/accounting/history', {
     schema: {
       ...auth, tags: ['accounting'], summary: 'Replay daily portfolio valuations over an inclusive UTC range',
       params: portfolioParams,
       querystring: { type: 'object', required: ['from', 'through'], properties: {
-        from: { type: 'string', format: 'date' }, through: { type: 'string', format: 'date' },
+        currency: { type: 'string' }, from: { type: 'string', format: 'date' }, through: { type: 'string', format: 'date' },
       } },
     },
   }, async (request, reply) => {
@@ -1237,10 +1254,15 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     }
     const input = await loadEvidence(portfolioId, new Date(end + day - 1).toISOString(), undefined, undefined, undefined, undefined, new Date(start).toISOString())
     if (input.truncated || input.tracking.truncated || input.evidence.length * days > 100_000) return reply.code(422).send({ error: { code: 'valuation_work_limit' } })
+    const selectedCurrency = reportingCurrency.optional().safeParse(request.query.currency)
+    if (!selectedCurrency.success) return reply.code(422).send({ error: { code: 'invalid_reporting_currency' } })
+    const rates = selectedCurrency.data ? await loadFx(database, new Date(start).toISOString(), new Date(end + day - 1).toISOString()) : []
     const points = Array.from({ length: days }, (_, index) => {
       const asOf = new Date(start + (index + 1) * day - 1).toISOString()
       const state = replay(input, asOf)
-      return { asOf, status: state.status, portfolioScope: state.portfolioScope, discrepancyCount: state.discrepancies.length, balances: state.cash }
+      return { asOf, status: state.status, portfolioScope: state.portfolioScope, discrepancyCount: state.discrepancies.length, balances: state.cash,
+        ...(selectedCurrency.data ? { reporting: reportAmounts(rates,
+          state.cash.map((row) => ({ asset: row.asset, value: row.referencePortfolioValue })), selectedCurrency.data, asOf) } : {}) }
     })
     return { method: 'weighted_average', points }
 
@@ -1249,7 +1271,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
   app.get<{ Params: { portfolioId: string }; Querystring: unknown }>(prefix + '/tracking/valuation', { schema: { ...auth, params: portfolioParams } }, async (request, reply) => {
     const { portfolioId } = request.params
     if (!await owned(portfolioId, request.principalId!)) return reply.code(404).send(missing)
-    const query = z.object({ asset: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$/).optional() }).strict().safeParse(request.query)
+    const query = z.object({ asset: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$/).optional(), currency: reportingCurrency.optional() }).strict().safeParse(request.query)
     if (!query.success) return reply.code(422).send({ error: { code: 'invalid_tracking_scope' } })
     return database.transaction(async (tx) => {
       const asOf = new Date().toISOString()
@@ -1271,11 +1293,30 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       if (valuationCache.size > 10) valuationCache.delete(valuationCache.keys().next().value!)
       const state = prepared(asOf, overlays) ?? replayAccounting(input.evidence, asOf)
       const exposure = query.data.asset ? (await loadExposureInputs(tx, portfolioId, asOf, query.data.asset, {}, [], { input, state })).response : null
+      const [preference] = await tx.select({ currency: users.reportingCurrency }).from(users)
+        .where(eq(users.id, request.principalId!)).limit(1)
+      const currency = query.data.currency ?? preference?.currency ?? 'USD'
+      const rates = await loadFx(tx, asOf, asOf)
+      const scope = (row: { account: string; venue: string; asset: string }) => JSON.stringify([row.venue, row.account, row.asset])
+      const selected = new Set(state.cash.map(scope))
+      const missingObserved = [...input.positions, ...input.balances].some((row) => !row.asset
+        || !selected.has(scope({ ...row, asset: row.asset })))
+      const reporting = reportAmounts(rates, state.cash.map((row) => ({ asset: row.asset, value: row.portfolioValue })), currency, asOf)
+      const qualified = { ...reporting, completeValue: missingObserved ? null : reporting.completeValue,
+        coverage: missingObserved || reporting.completeValue === null ? 'partial_or_unavailable' : 'selected_reconstructed_buckets' }
+      const known = reportAmounts(rates, state.cash.map((row) => ({ asset: row.asset, value: row.balance }))
+        .concat(state.holdings.filter((row) => new Decimal(row.quantity).gt(0)).map((row) => ({ asset: row.asset, value: row.marketValue }))),
+        currency, asOf)
+      const independentlyObserved = exposure && query.data.asset ? reportAmounts(rates,
+        [{ asset: query.data.asset, value: exposure.reportedExposure.knownCombinedSubtotal }], currency, asOf) : null
       const result = { status: state.status, cash: state.cash, holdings: state.holdings,
+        reporting: { ...qualified, reconstructedKnownSubtotal: known.knownSubtotal,
+          observedSelectedAssetSubtotal: independentlyObserved?.knownSubtotal ?? null },
+        fxRevision: reporting.revision,
         ...(exposure ? { exposure, accountFreshness: input.coverage, demoMarketCoverage: input.demoCapture?.trackingCoverage ?? [] } : {}) }
       const exposureDigest = exposure ? { ...exposure, context: { ...exposure.context, asOf: null } } : null
       const revision = digest([financialRevision, marketRevision, state.status, state.cash, state.holdings,
-        exposureDigest, exposure ? input.coverage : null, exposure ? input.demoCapture?.trackingCoverage : null])
+        qualified, known.revision, known.knownSubtotal, independentlyObserved, exposureDigest, exposure ? input.coverage : null, exposure ? input.demoCapture?.trackingCoverage : null])
       reply.header('etag', '"' + revision + '"').header('cache-control', 'private, no-cache')
       if (request.headers['if-none-match'] === '"' + revision + '"') return reply.code(304).send()
       return { asOf, financialRevision, marketRevision, revision, ...result }

@@ -21,7 +21,8 @@
     "check": "npm run lint && npm run typecheck && npm test && npm run build",
     "demo:dataset": "tsx scripts/demo-dataset.ts",
     "verify:polygon-receipt": "tsx scripts/verify-polygon-receipt.ts",
-    "verify:polymarket-account-receipts": "tsx scripts/verify-polymarket-account-receipts.ts"
+    "verify:polymarket-account-receipts": "tsx scripts/verify-polymarket-account-receipts.ts",
+    "fx:import": "tsx scripts/import-fx-references.ts"
   },
   "dependencies": {
     "@fastify/cors": "11.4.3",

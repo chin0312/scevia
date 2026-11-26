@@ -11,7 +11,7 @@ const watchBody = z.object({ markets: z.array(z.uuid()).max(20) }).strict()
 export function registerTrackingRoutes(app: FastifyInstance, db: Database, reconcile: (portfolioId: string) => Promise<void>,
   operational: () => { running: boolean; accountIds: string[]; stream: { status: string; heartbeatAt: string | null } }) {
   const path = '/portfolios/:portfolioId/tracking'
-  const owner = (id: string, principal: string) => and(eq(portfolios.id, id), eq(portfolios.ownerId, principal))
+  const owner = (id: string, principal: string) => and(eq(portfolios.id, id), eq(portfolios.ownerId, principal), eq(portfolios.simulationOnly, false))
   const marketStatus = { marketId: markets.id, provider: markets.providerCode, nativeMarket: markets.externalId,
     lifecycle: marketTracking.lifecycle, checkedAt: marketTracking.lastAttemptAt, refreshedAt: marketTracking.lastSuccessAt,
     nextAttemptAt: marketTracking.nextAttemptAt, failures: marketTracking.failures, metadataAt: marketTracking.metadataAt,
@@ -44,9 +44,21 @@ export function registerTrackingRoutes(app: FastifyInstance, db: Database, recon
       .innerJoin(instruments, eq(instruments.id, sharedMarketObservations.instrumentId))
         .where(or(inArray(instruments.marketId, marketsStatus.map((row) => row.marketId)),
         inArray(instruments.marketId, holdingsMarkets.map((row) => row.marketId))))
-      .orderBy(instruments.id, sharedMarketObservations.asset, desc(sharedMarketObservations.effectiveAt)).limit(100)
+      .orderBy(instruments.id, sharedMarketObservations.asset, desc(sharedMarketObservations.effectiveAt)).limit(501)
+    const now = Date.now()
+    const terminal = new Set([...marketsStatus, ...holdingsMarkets].filter((row) => row.resolution).map((row) => row.marketId))
+    const qualified = observations.slice(0, 500).filter((row) => !terminal.has(row.marketId)).map((row) => ({
+      ...row, freshness: now - (row.observedAt ?? row.retrievedAt).getTime() <= 360_000 ? 'recent' : 'stale',
+      acquisition: row.source === 'polymarket_clob_ws' ? 'stream' : 'poll',
+    }))
+    const withCoverage = <T extends { marketId: string; resolution: unknown }>(row: T) => ({
+      ...row, referenceCoverage: row.resolution ? 'terminal' : qualified.filter((quote) => quote.marketId === row.marketId
+        && quote.freshness === 'recent').length >= 2 ? 'recent_standard_pair'
+        : qualified.some((quote) => quote.marketId === row.marketId) ? 'partial_or_stale' : 'unavailable',
+    })
     const runtime = operational()
-    return { portfolioId, workerRunning: runtime.running, stream: runtime.stream, markets: marketsStatus, holdingsMarkets, observations,
+    return { portfolioId, workerRunning: runtime.running, stream: runtime.stream, markets: marketsStatus.map(withCoverage), holdingsMarkets: holdingsMarkets.map(withCoverage), observations: qualified,
+      observationCoverage: observations.length > 500 ? 'truncated' : 'selected',
       accounts: accounts.map((row) => ({ ...row, active: runtime.running && row.scope !== null
         && row.disabledAt === null && runtime.accountIds.includes(row.accountId) })), valuation: { mechanism: 'read_through_accounting' } }
   })

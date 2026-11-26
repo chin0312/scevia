@@ -1,3 +1,6 @@
+import { registerMarketEvidence } from '../tracking/discovery.js'
+import { registerOwnerPreferences } from './simulations.js'
+import { refreshEcb } from '../fx/ecb.js'
 import { startPolymarketStream } from '../tracking/polymarket-stream.js'
 import { setTimeout as delay } from 'node:timers/promises'
 import { initializeTrackedAccounts, registerTrackingRoutes } from '../tracking/routes.js'
@@ -565,7 +568,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     let cursor: string | undefined
     const reconcile = async () => {
       const rows = await options.database.select({ id: portfolios.id }).from(portfolios)
-        .where(and(eq(portfolios.ownerId, options.config.devPrincipalId), cursor ? gt(portfolios.id, cursor) : undefined))
+        .where(and(eq(portfolios.ownerId, options.config.devPrincipalId), eq(portfolios.simulationOnly, false), cursor ? gt(portfolios.id, cursor) : undefined))
         .orderBy(asc(portfolios.id)).limit(10)
       for (const row of rows) {
         if (stopping.signal.aborted) break
@@ -584,6 +587,19 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       loop(() => worker.pruneObservations(tracking.retentionDays), 60_000),
     ]) })
     app.addHook('onClose', async () => { trackingRuntime.running = false; stopping.abort(); await running })
+  }
+  if (options.config.ecbReferenceAuthorized && options.config.nodeEnv === 'development' && ['127.0.0.1', '::1'].includes(options.config.host)) {
+    const stop = new AbortController()
+    let task: Promise<void> | undefined
+    const collect = async () => {
+      while (!stop.signal.aborted) {
+        try { await refreshEcb(options.database, stop.signal) }
+        catch { app.log.warn('ECB reporting reference was unavailable') }
+        await delay(3_600_000, undefined, { signal: stop.signal }).catch(() => undefined)
+      }
+    }
+    app.addHook('onListen', async () => { task = collect() })
+    app.addHook('onClose', async () => { stop.abort(); await task })
   }
   app.get<{ Querystring: { marketTicker?: string; eventTicker?: string; cursor?: string } }>('/v1/market-catalog/kalshi', {
     schema: { tags: ['public market data'], querystring: { type: 'object', additionalProperties: false, properties: {
@@ -655,6 +671,10 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       request.principalId = options.config.devPrincipalId
     })
 
+    registerOwnerPreferences(privateApi, options.database)
+    registerMarketEvidence(privateApi, options.database,
+      options.config.kalshi?.environment === 'production' || options.config.nodeEnv === 'test' ? kalshiMarketData : undefined,
+      liveAllowed || options.marketData ? marketData : undefined)
     registerTrackingRoutes(privateApi, options.database, (portfolioId) => reconcileTracking(portfolioId), () => trackingRuntime)
     registerDemoRoutes(privateApi, options.database, options.config.demoDataset)
     reconcileTracking = registerAccountingRoutes(privateApi, options.database, liveAllowed || options.marketData || kalshiMarketData ? async (url, type, assetId) => {
@@ -698,7 +718,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         name: portfolios.name,
         createdAt: portfolios.createdAt,
         demoKind: sql<string | null>`${portfolios.demo}->'dataset'->>'evidenceKind'`,
-      }).from(portfolios).where(eq(portfolios.ownerId, request.principalId!)).orderBy(portfolios.createdAt)
+      }).from(portfolios).where(and(eq(portfolios.ownerId, request.principalId!), eq(portfolios.simulationOnly, false))).orderBy(portfolios.createdAt)
       const items = await Promise.all(rows.map(async ({ demoKind, ...portfolio }) => {
         const [accountCount] = await options.database.select({ count: sql<number>`count(*)::int`,
           fixtures: sql<boolean>`coalesce(bool_or(${providerAccounts.kind} = 'fixture'), false)` })
@@ -1562,7 +1582,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 async function getOwnedPortfolio(database: Database, portfolioId: string, ownerId: string) {
   const [portfolio] = await database.select({ id: portfolios.id, name: portfolios.name, isDemo: sql<boolean>`${portfolios.demo} is not null` })
     .from(portfolios)
-    .where(and(eq(portfolios.id, portfolioId), eq(portfolios.ownerId, ownerId)))
+    .where(and(eq(portfolios.id, portfolioId), eq(portfolios.ownerId, ownerId), eq(portfolios.simulationOnly, false)))
     .limit(1)
   return portfolio
 }

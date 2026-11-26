@@ -75,9 +75,16 @@ export async function sharedTrackingEvidence(db: Pick<Database, 'select' | 'sele
   }
   const rows = [...new Map([...anchors, ...daily, ...latest].map((entry) => [entry.row.id, entry])).values()]
   const projected: Evidence[] = []
+  const sourceTimes = new Map<string, number>()
+  rows.sort((a, b) => Math.max(a.row.retrievedAt.getTime(), a.row.effectiveAt.getTime())
+    - Math.max(b.row.retrievedAt.getTime(), b.row.effectiveAt.getTime()) || a.row.effectiveAt.getTime() - b.row.effectiveAt.getTime())
   for (const { row } of rows) {
     for (const scope of (scoped.get(row.instrumentId)?.values() ?? [])) {
       if (scope.asset !== row.asset) continue
+      const key = JSON.stringify([scope.venue, scope.account, scope.instrument, scope.asset])
+      const effective = row.effectiveAt.getTime()
+      if (effective < (sourceTimes.get(key) ?? 0)) continue
+      sourceTimes.set(key, effective)
       if (projected.length === 5000) return { evidence: projected, truncated: true, reportedMarks }
       projected.push({ batchId: row.id, row: 0, marketReference: { source: row.source, method: row.method, revision: row.revision,
         retrievedAt: row.retrievedAt.toISOString(), observedAt: row.observedAt?.toISOString() ?? null }, observation: { ...scope, id: 'shared-mark:' + row.id, type: 'mark',

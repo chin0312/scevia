@@ -1,13 +1,13 @@
 import { setTimeout as delay } from 'node:timers/promises'
-import { and, asc, desc, eq, exists, inArray, or } from 'drizzle-orm'
+import { and, asc, desc, eq, exists, gt, inArray, or, sql } from 'drizzle-orm'
 import { Decimal } from 'decimal.js'
 import { z } from 'zod'
 import { digest } from '../accounting/decisions.js'
 import type { Database } from '../db/client.js'
-import { automaticMarketWatches, instruments, markets, marketTracking, marketWatches, sharedMarketObservations } from '../db/schema.js'
+import { automaticMarketWatches, instruments, marketInstrumentMappings, marketResearch, markets, marketTracking, marketWatches, sharedMarketObservations } from '../db/schema.js'
 
 const endpoint = 'wss://ws-subscriptions-clob.polymarket.com/ws/market'
-type Subscription = { id: string; market: string; token: string }
+type Subscription = { id: string; market: string; token: string; asset?: string }
 const numberText = z.string().regex(/^(?:0|1)(?:\.\d{1,18})?$/)
 const edge = z.object({ price: numberText })
 const frame = z.object({ asset_id: z.string(), market: z.string(), timestamp: z.string().regex(/^\d{13}$/),
@@ -28,22 +28,25 @@ export function streamBook(data: unknown, subscriptions: Map<string, Subscriptio
   const ask = row.event_type === 'book' && row.asks?.length ? Decimal.min(...row.asks.map((level) => level.price))
     : row.best_ask !== undefined ? new Decimal(row.best_ask) : null
   if (bid === null || ask === null || bid.gt(ask) || ask.gt(1)) return null
-  return { instrumentId: instrument.id, price: bid.plus(ask).div(2).toFixed(), observedAt: new Date(time), retrievedAt: now }
+  return { instrumentId: instrument.id, asset: instrument.asset ?? 'USDC', price: bid.plus(ask).div(2).toFixed(), observedAt: new Date(time), retrievedAt: now }
 }
 
 export function startPolymarketStream(db: Database, signal: AbortSignal, state: {
   status: string; heartbeatAt: string | null
 }, connect = (url: string) => new WebSocket(url)) {
+  let cursor: string | undefined
   return run()
   async function run() {
     let failures = 0
     while (!signal.aborted) {
       try {
-        const tokens = await loadRoster()
-        if (tokens.size) {
-          const connected = await session(tokens)
+        const page = await loadRoster(cursor)
+        if (page.tokens.size) {
+          const previous = cursor
+          cursor = page.next
+          const connected = await session(page.tokens, previous, page.next !== undefined)
           failures = connected ? 0 : failures + 1
-        } else state.status = 'idle'
+        } else { cursor = page.next; state.status = 'idle' }
       } catch { failures += 1 }
       if (!signal.aborted) {
         state.status = failures ? 'reconnecting' : state.status === 'idle' ? 'idle' : 'reconciling'
@@ -54,21 +57,30 @@ export function startPolymarketStream(db: Database, signal: AbortSignal, state: 
     state.status = 'stopped'
   }
 
-  async function loadRoster() {
-    const roster = await db.select({ id: instruments.id, market: markets.externalId, token: instruments.externalId })
+  async function loadRoster(after?: string) {
+    const roster = await db.select({ id: instruments.id, market: markets.externalId,
+      token: sql<string>`coalesce(${marketInstrumentMappings.subscriptionToken}, ${instruments.externalId})`,
+      asset: instruments.settlementAssetCode })
       .from(instruments).innerJoin(markets, eq(instruments.marketId, markets.id))
       .innerJoin(marketTracking, eq(marketTracking.marketId, markets.id))
-      .where(and(eq(markets.providerCode, 'polymarket'), eq(markets.settlementAssetCode, 'USDC'),
-        eq(instruments.settlementAssetCode, 'USDC'), eq(marketTracking.lifecycle, 'open'),
+      .leftJoin(marketInstrumentMappings, and(eq(marketInstrumentMappings.instrumentId, instruments.id),
+        eq(marketInstrumentMappings.provider, 'polymarket'), eq(marketInstrumentMappings.asset, instruments.settlementAssetCode)))
+      .where(and(eq(markets.providerCode, 'polymarket'), eq(marketTracking.lifecycle, 'open'),
+        eq(instruments.settlementAssetCode, markets.settlementAssetCode),
+        or(eq(instruments.settlementAssetCode, 'USDC'), and(eq(instruments.settlementAssetCode, 'PUSD'),
+          eq(marketInstrumentMappings.generation, 'v2'))), after ? gt(instruments.id, after) : undefined,
         or(exists(db.select({ id: marketWatches.portfolioId }).from(marketWatches).where(eq(marketWatches.marketId, markets.id))),
-          exists(db.select({ id: automaticMarketWatches.portfolioId }).from(automaticMarketWatches).where(eq(automaticMarketWatches.marketId, markets.id))))))
-      .orderBy(asc(markets.id), asc(instruments.id)).limit(100)
-    const eligible = roster.filter((row) => /^\d{1,78}$/.test(row.token) && /^0x[0-9a-f]{64}$/i.test(row.market))
-    return new Map(eligible.filter((row) => eligible.filter((other) => other.token === row.token).length === 1)
-      .map((row) => [row.token, row]))
+          exists(db.select({ id: automaticMarketWatches.portfolioId }).from(automaticMarketWatches).where(eq(automaticMarketWatches.marketId, markets.id))),
+          exists(db.select({ id: marketResearch.ownerId }).from(marketResearch).where(and(eq(marketResearch.marketId, markets.id),
+            gt(marketResearch.expiresAt, new Date())))))))
+      .orderBy(asc(instruments.id)).limit(101)
+    const eligible = roster.slice(0, 100).filter((row) => /^\d{1,78}$/.test(row.token) && /^0x[0-9a-f]{64}$/i.test(row.market))
+    return { next: roster.length > 100 ? roster[99]?.id : undefined,
+      tokens: new Map(eligible.filter((row) => eligible.filter((other) => other.token === row.token).length === 1)
+        .map((row) => [row.token, { ...row, asset: row.asset ?? 'USDC' }])) }
   }
 
-  async function session(tokens: Map<string, Subscription>) {
+  async function session(tokens: Map<string, Subscription>, after: string | undefined, rotate: boolean) {
     const socket = connect(endpoint)
     const pending = new Map<string, NonNullable<ReturnType<typeof streamBook>>>()
     const clocks = new Map<string, number>()
@@ -109,7 +121,8 @@ export function startPolymarketStream(db: Database, signal: AbortSignal, state: 
         if (signal.aborted || closed) break
         if (++tick % 2 === 0 && socket.readyState === WebSocket.OPEN) socket.send('PING')
         if (tick % 12 === 0) {
-          const wanted = await loadRoster()
+          if (rotate || after) return true
+          const wanted = (await loadRoster()).tokens
           if (wanted.size !== tokens.size || [...wanted.keys()].some((key) => wanted.get(key)?.id !== tokens.get(key)?.id)) return true
         }
         const quotes = [...pending.values()]
@@ -120,7 +133,7 @@ export function startPolymarketStream(db: Database, signal: AbortSignal, state: 
             .from(table).where(and(eq(table.source, 'polymarket_clob_ws'), inArray(table.instrumentId, quotes.map((quote) => quote.instrumentId))))
             .orderBy(table.instrumentId, desc(table.effectiveAt))
           const newer = quotes.filter((quote) => !stored.some((row) => row.instrument === quote.instrumentId && row.time >= quote.observedAt))
-          if (newer.length) await db.insert(sharedMarketObservations).values(newer.map((quote) => ({ ...quote, asset: 'USDC',
+          if (newer.length) await db.insert(sharedMarketObservations).values(newer.map((quote) => ({ ...quote,
             source: 'polymarket_clob_ws', method: 'book_midpoint', effectiveAt: quote.observedAt,
             revision: digest(['polymarket_clob_ws', quote.instrumentId, quote.observedAt.toISOString()]) }))).onConflictDoNothing()
           state.status = 'receiving'

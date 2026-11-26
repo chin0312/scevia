@@ -1,3 +1,5 @@
+import { storeReferences } from '../src/fx/reference.js'
+import { refreshEcb } from '../src/fx/ecb.js'
 import { sharedTrackingEvidence } from '../src/tracking/evidence.js'
 import { nextTime, TrackingWorker } from '../src/tracking/worker.js'
 import { initializeTrackedAccounts } from '../src/tracking/routes.js'
@@ -16,7 +18,7 @@ import { Pool } from 'pg'
 import { createDatabase, type Database } from '../src/db/client.js'
 import { runMigrations } from '../src/db/migrate.js'
 import {
-  accountTracking, marketLifecycleEvidence, marketTracking, sharedMarketObservations,
+  accountTracking, marketInstrumentMappings, marketResearch, marketLifecycleEvidence, marketTracking, sharedMarketObservations,
   activityFactOccurrences,
   cashMovements,
   reviewedBinaryRules,
@@ -95,6 +97,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await pool.query(`TRUNCATE TABLE
+    scevia.fx_references,
     scevia.users,
     scevia.portfolios,
     scevia.provider_accounts,
@@ -128,6 +131,79 @@ afterAll(async () => {
 })
 
 describe('migrations and canonical persistence', () => {
+  it('discovers an untracked V2 market and keeps mapped research leases and simulations owner scoped', async () => {
+    const condition = '0x' + 'a'.repeat(64)
+    const transport = vi.fn(async (input: URL | string) => {
+      if (new URL(input).pathname === '/midpoints') return Response.json({ 333: '0.45', 444: '0.55' })
+      return Response.json([{ conditionId: condition, version: 'v2', negRisk: false, active: true,
+        question: 'Untracked market', events: [{ id: 'native-event', title: 'Discovery event' }],
+        clobTokenIds: ['333', '444'], positionIds: ['111', '222'], outcomes: ['Yes', 'No'] }])
+    })
+    const marketData = new PolymarketMarketDataService(new PolymarketHttpClient(transport as typeof fetch))
+    const app = await buildApp({ database, marketData, config: testConfig() })
+    const other = await buildApp({ database, marketData, config: { ...testConfig(), devPrincipalId: OTHER_OWNER_ID } })
+    openApps.push(app, other)
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const register = (server: typeof app) => server.inject({ method: 'POST', url: '/v1/market-evidence', headers,
+      payload: { provider: 'polymarket', market: condition, follow: true } })
+    const first = await register(app)
+    expect(first.json()).toMatchObject({ status: 'identified', quoteAvailability: 'observed' })
+    const shared = first.json()
+    expect((await register(other)).json().marketId).toBe(shared.marketId)
+    expect(await database.select().from(marketResearch)).toHaveLength(2)
+    expect(await database.select().from(marketInstrumentMappings)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ subscriptionToken: '333', asset: 'PUSD', generation: 'v2', instrumentId: shared.outcomes.find((row: { nativePosition: string }) => row.nativePosition === '111').id }),
+    ]))
+    expect((await app.inject({ method: 'DELETE', url: '/v1/market-evidence/' + shared.marketId + '/follow', headers })).statusCode).toBe(204)
+    expect(await database.select().from(marketResearch)).toHaveLength(1)
+    const collection = (await app.inject({ method: 'POST', url: '/v1/simulations', headers })).json().collection.id
+    const root = '/v1/simulations/' + collection + '/scenarios'
+    const source = { mode: 'scratch', asOf: new Date().toISOString(), asset: 'PUSD', catalog: [shared.outcomes[0].id],
+      buckets: [{ id: 'virtual', venue: 'polymarket', account: 'virtual', cash: '50' }] }
+    const preview = await app.inject({ method: 'POST', url: root + '/baseline', headers, payload: source })
+    expect(preview.statusCode, preview.body).toBe(200)
+    expect(preview.json().instruments[0].mark).not.toBeNull()
+    const saved = await app.inject({ method: 'POST', url: root, headers,
+      payload: { name: 'Independent', source, baselineToken: preview.json().baselineToken, input: {} } })
+    expect(saved.statusCode, saved.body).toBe(201)
+    expect((await other.inject({ method: 'GET', url: root + '/' + saved.json().id, headers })).statusCode).toBe(404)
+    expect((await app.inject({ method: 'GET', url: '/v1/portfolios', headers })).json().items.map((row: { id: string }) => row.id)).not.toContain(collection)
+    await database.delete(portfolios).where(eq(portfolios.id, PORTFOLIO_ID))
+    expect((await app.inject({ method: 'GET', url: root + '/' + saved.json().id, headers })).statusCode).toBe(200)
+  })
+
+  it('loads daily FX once and keeps stablecoin assumptions, eligibility and fiat cross rates explicit', async () => {
+    const date = new Date().toISOString().slice(0, 10)
+    await refreshEcb(database, new AbortController().signal, async () => new Response(
+      `<Cube time='${date}'><Cube currency='USD' rate='1.25'/><Cube currency='SGD' rate='1.5'/></Cube>`))
+    const now = new Date().toISOString()
+    await storeReferences(database, [{ base: 'USDC', quote: 'USD', rate: '0.98', source: 'approved_fixture',
+      methodology: 'stablecoin_market_reference', observedAt: now, retrievedAt: now }])
+    const app = await createTestApp()
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const rate = (base: string, currency: string, asOf?: string) => app.inject({ method: 'GET', headers,
+      url: '/v1/fx/reference?' + new URLSearchParams({ base, currency, ...(asOf ? { asOf } : {}) }) })
+    expect((await rate('USD', 'USD')).json()).toMatchObject({ rate: '1', availability: 'identity', legs: [] })
+    expect((await rate('USD', 'SGD')).json()).toMatchObject({ rate: '1.2', legs: [expect.any(Object), expect.any(Object)] })
+    expect((await rate('USDC', 'SGD')).json()).toMatchObject({ rate: '1.176' })
+    expect((await rate('PUSD', 'USD')).json()).toMatchObject({ availability: 'missing', rate: null })
+    expect((await rate('USDC', 'USD', new Date(Date.parse(now) - 1000).toISOString())).json())
+      .toMatchObject({ availability: 'missing', rate: null })
+    const preference = await app.inject({ method: 'PUT', url: '/v1/preferences/reporting', headers, payload: { currency: 'SGD' } })
+    expect(preference.json()).toMatchObject({ currency: 'SGD' })
+    const collection = (await app.inject({ method: 'POST', url: '/v1/simulations', headers })).json().collection.id
+    const root = '/v1/simulations/' + collection + '/scenarios'
+    const preview = await app.inject({ method: 'POST', url: root + '/baseline', headers, payload: {
+      mode: 'scratch', asOf: now, asset: 'USDC', reportingCurrency: 'SGD',
+      buckets: [{ id: 'virtual', venue: 'polymarket', account: 'virtual', cash: '100' }],
+    } })
+    expect(preview.json()).toMatchObject({ reportingBasis: { reference: { rate: '1.176' } } })
+    const saved = await app.inject({ method: 'POST', url: root, headers, payload: { name: 'Frozen FX',
+      source: preview.json().baselineSource, baselineToken: preview.json().baselineToken, input: {} } })
+    expect(saved.statusCode, saved.body).toBe(201)
+    expect(saved.json().baseline.reportingBasis.reference.rate).toBe('1.176')
+  })
+
   it('polls a shared market once and revalues owned mapped portfolios without synchronizing account history', async () => {
     const [event] = await database.insert(events).values({ providerCode: 'kalshi', externalId: 'TRACK-EVENT', name: 'Tracking' }).returning()
     const [market] = await database.insert(markets).values({ providerCode: 'kalshi', externalId: 'TRACK-MARKET',
@@ -228,6 +304,22 @@ describe('migrations and canonical persistence', () => {
     expect(updated.financialRevision).toBe(firstRevision.financialRevision)
     expect(updated.marketRevision).not.toBe(firstRevision.marketRevision)
     expect(updated.cash).toContainEqual(expect.objectContaining({ portfolioValue: '103', balance: '96' }))
+    const fixtureRate = async (rate: string, offset: number) => {
+      const time = new Date(Date.now() - offset).toISOString()
+      await storeReferences(database, [{ base: 'USD', quote: 'SGD', rate, source: 'reference_fixture',
+        methodology: 'fiat_reference', observedAt: time, retrievedAt: time }])
+    }
+    await fixtureRate('1.2', 5000)
+    const convertedUrl = url + '?currency=SGD'
+    const firstFx = (await app.inject({ method: 'GET', url: convertedUrl, headers })).json()
+    expect(firstFx.reporting).toMatchObject({ completeValue: '123.6', fundsTransferable: false })
+    await fixtureRate('1.3', 1000)
+    const secondFx = (await app.inject({ method: 'GET', url: convertedUrl, headers })).json()
+    expect(secondFx).toMatchObject({ reporting: { completeValue: '133.9' }, financialRevision: firstFx.financialRevision,
+      marketRevision: firstFx.marketRevision, cash: firstFx.cash })
+    expect(secondFx.fxRevision).not.toBe(firstFx.fxRevision)
+    expect(secondFx.revision).not.toBe(firstFx.revision)
+
     const replayed = (await app.inject({ method: 'GET', url: roots[0] + '/accounting?view=detail', headers })).json()
     expect(updated.cash).toEqual(replayed.cash)
     expect(updated.holdings).toEqual(replayed.holdings)

@@ -1,3 +1,4 @@
+import { loadFx, reportingCurrency, selectRate } from '../fx/reference.js'
 import { Decimal } from 'decimal.js'
 import { randomBytes } from 'node:crypto'
 import { evaluationResponse, comparisonResponse } from '../scenarios/contracts.js'
@@ -16,6 +17,7 @@ const cashAmount = z.string().regex(/^\d{1,20}(?:\.\d{1,18})?$/)
 const fraction = cashAmount.refine((value) => /^(?:0+(?:\.\d+)?|0*1(?:\.0+)?)$/.test(value))
 const time = z.iso.datetime({ offset: true })
 const sourceCommon = {
+  reportingCurrency: reportingCurrency.optional(),
   asset: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$/), asOf: time,
   catalog: z.array(z.uuid()).max(250).default([]),
   publicOutcomes: z.array(publicSelection).max(6).default([]),
@@ -23,7 +25,7 @@ const sourceCommon = {
 }
 const source = z.discriminatedUnion('mode', [
   z.object({ ...sourceCommon, mode: z.literal('actual'), accounts: z.array(id.refine((value) => !value.includes(','))).min(1).max(100),
-    venue: id.optional(), useReportedKalshiSnapshot: z.boolean().optional() }).strict(),
+    venue: id.optional(), sourcePortfolioId: z.uuid().optional(), useReportedKalshiSnapshot: z.boolean().optional() }).strict(),
   z.object({ ...sourceCommon, mode: z.literal('scratch'), buckets: z.array(z.object({
     id, venue: id, account: id, cash: cashAmount,
   }).strict()).min(1).max(100) }).strict(),
@@ -149,7 +151,11 @@ function run(baseline: ScenarioBaseline, changes: ScenarioInput) {
     'invalid_constraint', 'invalid_quantity', 'invalid_payout_unit', 'invalid_payoff_identity', 'incompatible_settlement_assets'].includes(conditional.reason)) {
     throw new ScenarioError(conditional.reason)
   }
-  return result
+  const basis = baseline.reportingBasis
+  if (!basis) return result
+  const convert = (value: string | null) => value === null || basis.reference.rate === null
+    ? null : new Decimal(value).mul(basis.reference.rate).toFixed()
+  return { ...result, reporting: { ...basis, startingValue: convert(result.bridge.startingValue), endingValue: convert(result.bridge.endingValue) } }
 }
 
 export function registerScenarioRoutes(app: FastifyInstance, db: Database,
@@ -162,11 +168,19 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
   const previewLifetime = 15 * 60_000
   const capture = async (portfolioId: string, value: BaselineSource, frozenPublic?: ScenarioInstrument[]) => {
     validateSource(value)
+    const [collection] = await db.select({ owner: portfolios.ownerId, independent: portfolios.simulationOnly })
+      .from(portfolios).where(eq(portfolios.id, portfolioId)).limit(1)
+    const sourceId = value.mode === 'actual' ? value.sourcePortfolioId ?? portfolioId : portfolioId
+    if (value.mode === 'actual' && (collection?.independent || sourceId !== portfolioId)) {
+      const [eligible] = await db.select({ id: portfolios.id }).from(portfolios)
+        .where(and(eq(portfolios.id, sourceId), eq(portfolios.ownerId, collection!.owner), eq(portfolios.simulationOnly, false))).limit(1)
+      if (!eligible) throw new ScenarioError('scenario_source_unavailable')
+    }
     if (!frozenPublic && value.publicOutcomes.length && !resolvePublic) throw new ScenarioError('provider_live_disabled')
     const pending = new Map<string, Promise<unknown>>()
     const requiresDemoIdentity = !frozenPublic && value.asset === 'PUSD' && value.publicOutcomes.length > 0
     const [demoOwner] = requiresDemoIdentity ? await db.select({ demo: portfolios.demo }).from(portfolios)
-      .where(eq(portfolios.id, portfolioId)).limit(1) : []
+      .where(eq(portfolios.id, sourceId)).limit(1) : []
     const resolved = frozenPublic ?? await Promise.all(value.publicOutcomes.map(async (selection) => {
       const key = selection.assetIdType === 'kalshi_outcome' ? 'kalshi:' + selection.url + ':' + selection.assetId : 'polymarket:' + selection.url
       if (!pending.has(key)) pending.set(key, resolvePublic!(selection.url, selection.assetIdType, selection.assetId))
@@ -184,8 +198,14 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
       return selectPublicOutcome(market, selection, value.asset, asOf)
     }))
     return db.transaction(async (tx) => {
-      const frozen = await baseline(tx, portfolioId, value, resolved)
+      const frozen = await baseline(tx, sourceId, value, resolved)
       validateInstrumentIdentities(frozen.instruments)
+      if (value.reportingCurrency) {
+        const asOf = new Date(value.asOf).toISOString()
+        const rates = await loadFx(tx, asOf, asOf)
+        frozen.reportingBasis = { currency: value.reportingCurrency, asOf,
+          reference: selectRate(rates, value.asset, value.reportingCurrency, asOf) }
+      }
       return frozen
     }, { isolationLevel: 'repeatable read', accessMode: 'read only' })
   }
@@ -201,7 +221,8 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
     })
   function route<S extends z.ZodType>(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', suffix: string, schema: S,
     handler: (scope: Scope, body: z.infer<S>, reply: FastifyReply) => Promise<unknown>, response?: object) {
-    app.route<{ Params: Scope; Body: unknown }>({ method, url: path + suffix, bodyLimit: 196_608,
+    for (const [base, independent] of [[path, false], ['/simulations/:portfolioId/scenarios', true]] as const) {
+    app.route<{ Params: Scope; Body: unknown }>({ method, url: base + suffix, bodyLimit: 196_608,
       // Zod validates the original body in the handler so AJV cannot strip fields from alternate union branches.
       validatorCompiler: ({ httpPart }) => (value) => {
         if (httpPart !== 'params') return { value }
@@ -214,7 +235,11 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
       ...(method === 'GET' || method === 'DELETE' ? {} : { body: z.toJSONSchema(schema, { target: 'draft-7', unrepresentable: 'any', io: 'input', override: ({ jsonSchema }) => { delete jsonSchema.default } }) }) },
       handler: async (request, reply) => {
         const scope = request.params
-        if (!await owned(scope.portfolioId, request.principalId!)) return notFound(reply)
+        if (independent) {
+          const [row] = await db.select({ id: portfolios.id }).from(portfolios).where(and(eq(portfolios.id, scope.portfolioId),
+            eq(portfolios.ownerId, request.principalId!), eq(portfolios.simulationOnly, true))).limit(1)
+          if (!row) return notFound(reply)
+        } else if (!await owned(scope.portfolioId, request.principalId!)) return notFound(reply)
         const parsed = schema.safeParse(request.body)
         if (!parsed.success) return reply.code(422).send({ error: { code: 'invalid_scenario_input' } })
         try {
@@ -225,6 +250,7 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
         }
       },
     })
+    }
   }
   const notFound = (reply: FastifyReply) => reply.code(404).send({ error: { code: 'not_found' } })
   const stale = (reply: FastifyReply) => reply.code(409).send({ error: { code: 'scenario_revision_changed' } })

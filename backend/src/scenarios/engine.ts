@@ -34,6 +34,7 @@ export interface ScenarioBaseline {
   reservedRules?: Array<{ id: string; yes: string; no: string }>
   settlementGraphLimited?: boolean
   revisions: Record<string, string>
+  reportingBasis?: { currency: string; asOf: string; reference: ReturnType<typeof import('../fx/reference.js').selectRate> }
 }
 export type Fee =
   | { mode: 'fixed' | 'rate'; value: string }
