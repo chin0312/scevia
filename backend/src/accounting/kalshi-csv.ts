@@ -46,7 +46,7 @@ export function parseMappedKalshiCsv(text: string, mapping: KalshiCsvMapping) {
       const side = at(selected.side).toLowerCase()
       const action = at(selected.action).toLowerCase()
       if (!id) throw new Error('kalshi_native_id_required')
-      if (fill && (!/^[A-Z0-9][A-Z0-9_-]{0,127}$/.test(ticker) || !['yes', 'no'].includes(side) || !['buy', 'sell'].includes(action))) {
+      if (fill && (!/^[A-Z0-9][A-Z0-9_.-]{0,127}$/.test(ticker) || !['yes', 'no'].includes(side) || !['buy', 'sell'].includes(action))) {
         throw new Error('kalshi_fill_mapping_invalid')
       }
       rows.push(['kalshi', mapping.account, id, at(selected.timestamp), '', fill ? action : mapping.activity,

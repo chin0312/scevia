@@ -23,7 +23,7 @@ const sourceCommon = {
 }
 const source = z.discriminatedUnion('mode', [
   z.object({ ...sourceCommon, mode: z.literal('actual'), accounts: z.array(id.refine((value) => !value.includes(','))).min(1).max(100),
-    venue: id.optional() }).strict(),
+    venue: id.optional(), useReportedKalshiSnapshot: z.boolean().optional() }).strict(),
   z.object({ ...sourceCommon, mode: z.literal('scratch'), buckets: z.array(z.object({
     id, venue: id, account: id, cash: cashAmount,
   }).strict()).min(1).max(100) }).strict(),
@@ -347,7 +347,8 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
       const replacement = candidate.holdings.find((row) => row.bucket === old.bucket
         && (row.originalInstrument ?? row.instrument) === (old.originalInstrument ?? old.instrument))
       const reason = replacement && replacement.instrument !== old.instrument ? 'instrument_association_changed'
-        : !replacement && operation.kind === 'exit' ? 'holding_already_closed' : null
+        : !replacement && old.quantityObservation ? 'holding_no_longer_observed'
+          : !replacement && operation.kind === 'exit' ? 'holding_already_closed' : null
       return reason ? [{ operationIndex, bucket: operation.bucket, instrument: operation.instrument, reason }] : []
     })
     const token = digest([current.id, current.revision, candidate, changes])

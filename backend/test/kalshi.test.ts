@@ -94,6 +94,21 @@ describe('restricted Kalshi contracts', () => {
     expect(calls[4]!.searchParams.get('min_ts')).toBe(String(Math.floor(Date.parse(backfill.checkpoint!) / 1000) - 3600))
   })
 
+  it('resolves a classic event link against its series and preserves dotted demo outcome identity', async () => {
+    const service = new KalshiMarketDataService(new KalshiClient(async (url) => {
+      if (url.pathname.endsWith('/events/KX-WEATHER-26NOV26')) return Response.json({
+        event: { event_ticker: 'KX-WEATHER-26NOV26', series_ticker: 'KX-WEATHER' },
+      })
+      expect(url.searchParams.get('event_ticker')).toBe('KX-WEATHER-26NOV26')
+      return Response.json({ markets: [{ ticker: 'KX-WEATHER-26NOV26-B66.5', event_ticker: 'KX-WEATHER-26NOV26',
+        title: 'Synthetic range', market_type: 'binary', status: 'active' }] })
+    }), 'demo:')
+    const result = await service.resolve('https://kalshi.com/markets/kx-weather/daily-weather/kx-weather-26nov26', signal)
+    expect(result.items[0]?.outcomes[0]?.id).toBe('demo:KX-WEATHER-26NOV26-B66.5:yes')
+    await expect(service.resolve('https://kalshi.com/markets/kx-other/daily-weather/kx-weather-26nov26', signal))
+      .rejects.toThrow('kalshi_invalid_market_link')
+  })
+
   it('requires known public links and explicitly mapped transaction columns', () => {
     expect(parseKalshiLink('https://kalshi.com/events/KX-EXAMPLE')).toEqual({ kind: 'event', ticker: 'KX-EXAMPLE' })
     expect(() => parseKalshiLink('https://kalshi.com.attacker.test/events/KX')).toThrow('kalshi_invalid_market_link')

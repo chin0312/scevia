@@ -4,7 +4,7 @@ import { decimalTextSchema, normalizedRecordSchema, type NormalizedRecord, type 
 import { ProviderAdapterError, type ProviderAdapter, type ProviderPage } from '../adapter.js'
 import { KalshiClient } from './client.js'
 
-const ticker = z.string().regex(/^[A-Z0-9][A-Z0-9_-]{0,127}$/)
+const ticker = z.string().regex(/^[A-Z0-9][A-Z0-9_.-]{0,127}$/)
 const time = z.iso.datetime({ offset: true })
 const side = z.enum(['yes', 'no'])
 const outcome = (market: string, leg: string) => market + ':' + leg

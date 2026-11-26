@@ -57,3 +57,9 @@ Conditional binary payouts retain established provider units. A declaration over
 The scenario settlement result can report `no_open_exposure` with zero gross payout when inventory is established and all open quantities are zero. Eligible cash plus pending entitlements then gives the same modeled minimum and maximum. Incomplete inventory retains unavailable exposure.
 
 Kalshi catalog choices use a provider-native ticker and explicit outcome ID. A scenario can capture a labeled retrieved quote through its frozen preview. Native USD and USDC funding remain isolated and the indicative denomination display rate does not fund trades or rewrite scenario results.
+
+### Connected Kalshi snapshot preview
+
+An actual USD source may explicitly set `useReportedKalshiSnapshot: true`. For the selected authenticated Kalshi accounts, the baseline can freeze recent available cash when reconstructed cash is unavailable, and current observed holdings when reconstructed inventory is incomplete. The baseline and evaluation identify the underlying source records and observation times. Basis is left unknown for snapshot positions, and unobserved inventory remains unknown. A supported sale can produce known cash and position effects while aggregate value, realized P&L and complete settlement stay unavailable. The opt-in leaves Phase 3 accounting and reviewed rules unchanged.
+
+Save and evaluate with the preview token to retain those records. An explicit rebase can report `holding_no_longer_observed`; this is uncertainty, distinct from an established closure. Demo public outcome IDs preserve their `demo:` prefix in `assetId`.

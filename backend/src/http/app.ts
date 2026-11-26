@@ -534,8 +534,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
   const kalshiMarketData = options.config.nodeEnv === 'test' ? options.kalshiMarketData : kalshiLive?.marketData
   app.get<{ Querystring: { marketTicker?: string; eventTicker?: string; cursor?: string } }>('/v1/market-catalog/kalshi', {
     schema: { tags: ['public market data'], querystring: { type: 'object', additionalProperties: false, properties: {
-      marketTicker: { type: 'string', pattern: '^[A-Z0-9][A-Z0-9_-]{0,127}$' },
-      eventTicker: { type: 'string', pattern: '^[A-Z0-9][A-Z0-9_-]{0,127}$' }, cursor: { type: 'string', maxLength: 4000 },
+      marketTicker: { type: 'string', pattern: '^[A-Z0-9][A-Z0-9_.-]{0,127}$' },
+      eventTicker: { type: 'string', pattern: '^[A-Z0-9][A-Z0-9_.-]{0,127}$' }, cursor: { type: 'string', maxLength: 4000 },
     } } },
   }, async (request, reply) => {
     if (!kalshiMarketData) return reply.code(503).send(errorBody(request.id, 'kalshi_live_disabled', 'Kalshi live access is disabled.'))
@@ -547,7 +547,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
   })
   app.get<{ Querystring: { marketTicker: string; side: 'yes' | 'no'; from: number; through: number; minutes: number } }>('/v1/market-catalog/kalshi/history', {
     schema: { tags: ['public market data'], querystring: { type: 'object', required: ['marketTicker', 'side', 'from', 'through', 'minutes'],
-      additionalProperties: false, properties: { marketTicker: { type: 'string', pattern: '^[A-Z0-9][A-Z0-9_-]{0,127}$' },
+      additionalProperties: false, properties: { marketTicker: { type: 'string', pattern: '^[A-Z0-9][A-Z0-9_.-]{0,127}$' },
         side: { enum: ['yes', 'no'] }, from: { type: 'integer' }, through: { type: 'integer' }, minutes: { type: 'integer', enum: [1, 60, 1440] } } } },
   }, async (request, reply) => {
     if (!kalshiMarketData) return reply.code(503).send(errorBody(request.id, 'kalshi_live_disabled', 'Kalshi live access is disabled.'))

@@ -8,7 +8,7 @@ const zero = () => new D(0)
 const sum = (values: Decimal[]) => values.reduce((total, value) => total.plus(value), zero())
 const add = (left: Decimal | null, right: Decimal | null) => left === null || right === null ? null : left.plus(right)
 export const methodology = 'weighted-average-scenario-v1'
-export interface FundingBucket { id: string; venue: string; account: string; cash: string | null; pending: string | null; inventoryComplete?: boolean; inventoryAt?: string | null; tradingVenue?: string }
+export interface FundingBucket { id: string; venue: string; account: string; cash: string | null; pending: string | null; inventoryComplete?: boolean; inventoryAt?: string | null; tradingVenue?: string; cashObservation?: { sourceRecordId: string; asOf: string } }
 export interface ScenarioInstrument {
   id: string; mark: string | null; markAt?: string | null; market?: string; event?: string; resolvesAt?: string | null
   venue?: string; provider?: string; nativeMarket?: string; nativeInstrument?: string; settlementAsset?: string | null; outcome?: string | null; providerMarket?: string; lifecycle?: string
@@ -19,7 +19,7 @@ export interface ScenarioInstrument {
   latestPrice?: string | null; latestPriceAt?: string | null
   feeSchedule?: { version: 'polymarket-price-variance-v1'; rate: string; retrievedAt: string; source: 'gamma_market'; denomination: 'USDC' }
 }
-export interface ScenarioHolding { bucket: string; instrument: string; quantity: string; basis: string | null; quantityKnown?: boolean; mark?: string | null; markAt?: string | null; originalInstrument?: string }
+export interface ScenarioHolding { bucket: string; instrument: string; quantity: string; basis: string | null; quantityKnown?: boolean; mark?: string | null; markAt?: string | null; originalInstrument?: string; quantityObservation?: { sourceRecordId: string; asOf: string } }
 export interface ScenarioBaseline {
   methodology: typeof methodology; mode: 'actual' | 'scratch'; asset: string; asOf: string
   buckets: FundingBucket[]; instruments: ScenarioInstrument[]; holdings: ScenarioHolding[]
@@ -252,6 +252,7 @@ function evaluateInternal(baseline: ScenarioBaseline, changes: ScenarioInput, op
     const ending = add(available?.plus(bucket.added).minus(bucket.withdrawn).plus(bucket.sales).minus(bucket.buys) ?? null, bucket.fees?.neg() ?? null)
     return { bucket: bucket.id, venue: bucket.venue, account: bucket.account, asset: baseline.asset,
       actualOrScratchStartingCash: hypotheticalBuckets.has(bucket.id) ? null : fixed(bucket.cash),
+      cashObservation: bucket.cashObservation ?? null,
       hypotheticalStartingCapital: hypotheticalBuckets.get(bucket.id)?.startingCapital ?? null,
       additionalCapital: fixed(bucket.added.minus(hypotheticalBuckets.get(bucket.id)?.startingCapital ?? 0)), assumedStartingCash: fixed(bucket.assumed), addedCapital: fixed(bucket.added), withdrawnCapital: fixed(bucket.withdrawn),
       grossSales: fixed(bucket.sales), purchases: fixed(bucket.buys), fees: fixed(bucket.fees), endingCash: fixed(ending),
@@ -419,6 +420,7 @@ function evaluateInternal(baseline: ScenarioBaseline, changes: ScenarioInput, op
       const reference = overrides.get(row.instrument) ?? holdingMark(row)
       const value = row.quantityKnown === false ? null : row.quantity.isZero() ? zero() : reference?.mul(row.quantity) ?? null
       return { ...row, quantity: row.quantity.toFixed(), basis: fixed(row.basis), mark: fixed(reference),
+        quantityObservation: before?.quantityObservation ?? null,
         initialQuantity: before?.quantity ?? '0', initialBasis: before ? before.basis : '0',
         initialValue: fixed(initialValue), initialMark: fixed(originalReference),
         value: fixed(value), unrealized: fixed(add(value, row.basis?.neg() ?? null)), resolvesAt: instruments.get(row.instrument)?.resolvesAt ?? null }

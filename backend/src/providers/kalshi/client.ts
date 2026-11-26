@@ -45,7 +45,7 @@ export class KalshiClient {
   async read(operation: KalshiRead, query: URLSearchParams, signal: AbortSignal, ticker?: string): Promise<unknown> {
     let path: string
     if (operation === 'market' || operation === 'historicalMarket' || operation === 'historicalCandles' || operation === 'event') {
-      if (!ticker || !/^[A-Z0-9][A-Z0-9_-]{0,127}$/.test(ticker)) throw new ProviderAdapterError('kalshi_invalid_ticker', false)
+      if (!ticker || !/^[A-Z0-9][A-Z0-9_.-]{0,127}$/.test(ticker)) throw new ProviderAdapterError('kalshi_invalid_ticker', false)
       path = '/' + (operation === 'historicalMarket' || operation === 'historicalCandles' ? 'historical/markets' : operation === 'market' ? 'markets' : 'events') + '/' + ticker + (operation === 'historicalCandles' ? '/candlesticks' : '')
     } else {
       if (!Object.hasOwn(kalshiPaths, operation)) throw new ProviderAdapterError('kalshi_read_not_allowlisted', false)

@@ -178,6 +178,23 @@ describe('migrations and canonical persistence', () => {
       const exposure = await app.inject({ method: 'GET', url: '/v1/portfolios/' + PORTFOLIO_ID + '/analytics/exposure?asset=USD&venue=kalshi&asOf=' + encodeURIComponent(new Date().toISOString()), headers })
       expect(exposure.statusCode, exposure.body).toBe(200)
       expect(exposure.json().reportedExposure.rows).toMatchObject([{ observedMarketValue: '1.5', providerCoverage: 'partial' }])
+      const scenarios = '/v1/portfolios/' + PORTFOLIO_ID + '/scenarios'
+      const preview = await app.inject({ method: 'POST', url: scenarios + '/baseline', headers,
+        payload: { mode: 'actual', accounts: [account!.id], venue: 'kalshi', asset: 'USD', asOf: new Date().toISOString(),
+          useReportedKalshiSnapshot: true } })
+      expect(preview.statusCode, preview.body).toBe(200)
+      const baseline = preview.json()
+      expect(baseline.buckets).toMatchObject([{ cash: '10.5', inventoryComplete: false, cashObservation: { sourceRecordId: expect.any(String) } }])
+      expect(baseline.holdings).toMatchObject([{ quantity: '2.5', basis: null, quantityObservation: { sourceRecordId: expect.any(String) } }])
+      const evaluation = await app.inject({ method: 'POST', url: scenarios + '/evaluate', headers, payload: {
+        baselineToken: baseline.baselineToken, input: { operations: [{ bucket: baseline.buckets[0].id,
+          instrument: baseline.holdings[0].instrument, kind: 'sell', amount: '1', price: '0.6', fee: { mode: 'excluded' } }] },
+      } })
+      expect(evaluation.statusCode, evaluation.body).toBe(200)
+      expect(evaluation.json()).toMatchObject({ status: 'partial', funding: [{ endingCash: '11.1' }],
+        availability: { quantities: 'partial', basis: 'partial', valuation: 'partial' },
+        positions: [{ quantity: '1.5', value: '0.9' }], bridge: { endingValue: null } })
+      expect(await database.select().from(fills).where(eq(fills.providerAccountId, account!.id))).toEqual([])
     } finally {
       await rm(directory, { recursive: true, force: true })
     }

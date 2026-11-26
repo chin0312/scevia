@@ -7,7 +7,7 @@ const publicLink = z.string().min(1).max(2048)
 export const publicSelection = z.union([
   z.object({ url: publicLink, assetId: z.string().regex(/^\d{1,100}$/),
     assetIdType: z.enum(['position_id', 'clob_token_id']), captureCurrentQuote: z.boolean().optional() }).strict(),
-  z.object({ url: publicLink, assetId: z.string().regex(/^[A-Z0-9][A-Z0-9_-]{0,127}:(yes|no)$/),
+  z.object({ url: publicLink, assetId: z.string().regex(/^(?:demo:)?[A-Z0-9][A-Z0-9_.-]{0,127}:(yes|no)$/),
     assetIdType: z.literal('kalshi_outcome'), captureCurrentQuote: z.boolean().optional() }).strict(),
 ])
 export type PublicSelection = z.infer<typeof publicSelection>

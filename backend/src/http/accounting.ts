@@ -1,6 +1,6 @@
 import { kalshiCsvMapping, parseMappedKalshiCsv } from '../accounting/kalshi-csv.js'
 import { registerScenarioRoutes } from './scenarios.js'
-import { methodology, scopedReference, ScenarioError, type ScenarioBaseline } from '../scenarios/engine.js'
+import { methodology, scopedReference, ScenarioError, type ScenarioBaseline, type ScenarioHolding, type FundingBucket } from '../scenarios/engine.js'
 import { canonicalInstrumentKeys, instrumentKey } from '../analytics/scope.js'
 import { Decimal } from 'decimal.js'
 import { createHash, randomUUID } from 'node:crypto'
@@ -772,7 +772,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
           reported: reported.edges.sort(edgeOrder).map((edge) => ({ ...edge, reviewedAt: edge.reviewedAt.toISOString() })) },
       ]),
       ...analyzeExposure(state, asset, accounts, metadata, rules, effective.edges, effective.graph, effective.graphLimit, context.accountIdentities, canonicalKeys) }
-    return { response, state, canonicalKeys, metadata, effective, rules, evidence }
+    return { response, state, canonicalKeys, metadata, effective, rules, evidence, balances: input.balances, coverage: input.coverage, providerAccounts: input.accounts }
   }
 
   registerScenarioRoutes(app, database, owned, async (tx, portfolioId, source, publicInstruments): Promise<ScenarioBaseline> => {
@@ -810,7 +810,16 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const bucketKey = (row: { venue: string; account: string }) => JSON.stringify([row.venue, row.account])
     const cashRows = actual?.state.cash.filter((row) => row.asset === asset) ?? []
     const positions = actual?.state.holdings.filter((row) => row.asset === asset) ?? []
-    const buckets = mode === 'scratch' ? source.buckets.map((row) => ({ ...row, pending: '0' }))
+    const useObserved = mode === 'actual' && source.useReportedKalshiSnapshot === true
+    if (useObserved && asset !== 'USD') throw new ScenarioError('reported_kalshi_baseline_asset_mismatch')
+    const connectedKalshi = new Set(actual?.providerAccounts.filter((row) => row.venue === 'kalshi' && row.kind === 'authenticated_account')
+      .map((row) => row.account))
+    const recent = (at: Date | null) => at !== null && at.toISOString() <= asOf && Date.parse(asOf) - at.getTime() <= 86_400_000
+    const observedBalances = useObserved ? actual!.balances.filter((row) => row.venue === 'kalshi' && row.asset === asset && connectedKalshi.has(row.account)
+      && recent(row.observedAt) && actual!.coverage.some((entry) => entry.venue === row.venue && entry.account === row.account
+        && entry.entity === 'cash_balances' && entry.lastSuccessfulRunId === row.syncRunId
+        && entry.lastAttemptStatus === 'complete' && recent(entry.lastSuccessfulSyncAt) && recent(entry.lastAttemptAt))) : []
+    const buckets: FundingBucket[] = mode === 'scratch' ? source.buckets.map((row) => ({ ...row, pending: '0' }))
       : actual!.response.context.accountIdentities.map((scope) => {
         const cash = cashRows.find((row) => row.venue === scope.venue && row.account === scope.account)
         const scoped = positions.filter((row) => row.venue === scope.venue && row.account === scope.account)
@@ -824,12 +833,15 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
         const inventoryComplete = pendingKnown && !actual!.state.discrepancies.some(({ scope: issue, reason }) =>
           issue.venue === scope.venue && issue.account === scope.account && (issue.asset === asset || issue.asset === 'UNKNOWN')
           && reason !== 'same_time_marks_conflict' && (issue.instrument !== null || issue.type === 'opening_inventory' || issue.type === 'unresolved_activity'))
-        return { id: bucketKey(scope), inventoryComplete, ...(tradingVenue ? { tradingVenue } : {}), venue: scope.venue, account: scope.account, cash: cash?.balance ?? null, pending,
+        const observed = cash?.balance == null ? observedBalances.find((row) => row.account === scope.account && row.venue === scope.venue) : undefined
+        return { id: bucketKey(scope), inventoryComplete, ...(tradingVenue ? { tradingVenue } : {}), venue: scope.venue, account: scope.account,
+          cash: cash?.balance ?? (observed ? new AnalyticalDecimal(observed.balance).toFixed() : null), pending,
+          ...(observed ? { cashObservation: { sourceRecordId: observed.sourceRecordId, asOf: observed.observedAt.toISOString() } } : {}),
           coverage: cash?.historyCoverage ?? 'unverified', inventoryAt: cash?.openingInventoryAt ?? null,
           pendingEntitlements: scoped.flatMap((row) => row.entitlements.map((entitlement) =>
             ({ instrument: row.instrument, ...entitlement }))) }
       })
-    const holdings = positions.filter((row) => new AnalyticalDecimal(row.quantity).gt(0)).map((row) => {
+    const holdings: ScenarioHolding[] = positions.filter((row) => new AnalyticalDecimal(row.quantity).gt(0)).map((row) => {
       const isCanonical = actual!.canonicalKeys.has(instrumentKey(row, row.instrument))
       const identity = isCanonical ? listings.get(row.instrument) : undefined
       const id = identity ? row.instrument : 'holding:' + digest([row.venue, row.account, row.instrument])
@@ -839,6 +851,26 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
         quantityKnown: row.quantityStatus === 'reconstructed_from_declaration', basis: row.basisAvailability === 'selected_events_only' ? row.basis : null,
         originalInstrument: row.instrument, mark: candidateMark, markAt: row.markAt }
     })
+    if (useObserved) {
+      for (const row of actual!.response.reportedExposure.rows) {
+        if (row.venue !== 'kalshi' || !connectedKalshi.has(row.account) || !row.eligibleQuantity || !new AnalyticalDecimal(row.quantity).gt(0)) continue
+        const bucket = buckets.find((entry) => entry.id === bucketKey(row))
+        const identity = listings.get(row.instrument)
+        if (!bucket || bucket.inventoryComplete || !identity) continue
+        const prior = holdings.findIndex((entry) => entry.bucket === bucket.id && entry.originalInstrument === row.instrument)
+        if (prior >= 0 && holdings[prior]?.quantityKnown) continue
+        baselineInstruments.set(row.instrument, { id: row.instrument, mark: null, ...baselineInstruments.get(row.instrument), ...metadataFor(identity) })
+        const holding = { bucket: bucket.id, instrument: row.instrument, originalInstrument: row.instrument,
+          quantity: new AnalyticalDecimal(row.quantity).toFixed(), quantityKnown: true, basis: null, mark: row.referenceMark,
+          markAt: row.referenceMark === null ? null : row.markAt?.toISOString() ?? null,
+          quantityObservation: { sourceRecordId: row.sourceRecordId, asOf: row.observedAt.toISOString() } }
+        if (prior < 0) holdings.push(holding)
+        else holdings[prior] = holding
+      }
+      if (!buckets.some((bucket) => bucket.cashObservation) && !holdings.some((row) => row.quantityObservation)) {
+        throw new ScenarioError('reported_kalshi_baseline_unavailable')
+      }
+    }
     for (const [id, instrument] of baselineInstruments) {
       if (!listings.has(id) || instrument.mark !== null || !actual) continue
       const observations = new Map(holdings.filter((row) => row.instrument === id && row.quantityKnown && row.mark !== null && row.markAt !== null)
@@ -879,7 +911,8 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       settlementGraphLimited: model.effective.graphLimit,
       missingRules: [...model.effective.graph].filter((id) => !rules.some((rule) => rule.id === id)).sort(),
       revisions: actual ? { public: digest(publicInstruments), financial: actual.response.context.evidenceRevision, coverage: actual.response.context.coverageRevision,
-        catalog: actual.response.catalogRevision, snapshots: actual.response.snapshotRevision, settlement: actual.response.settlementEvidenceRevision }
+        catalog: actual.response.catalogRevision, snapshots: useObserved ? digest([actual.response.snapshotRevision, buckets.map((bucket) => bucket.cashObservation ?? null)]) : actual.response.snapshotRevision,
+        settlement: actual.response.settlementEvidenceRevision }
         : { public: digest(publicInstruments), catalog: digest(model.metadata.map((row) => ({ ...row, resolvesAt: row.resolvesAt?.toISOString() ?? null })).sort((a, b) => a.instrument.localeCompare(b.instrument))),
           settlement: digest([rules.sort((a, b) => a.id.localeCompare(b.id)), constraints.sort((a, b) => a.left.localeCompare(b.left) || a.right.localeCompare(b.right))]) } }
   }, resolvePublic)

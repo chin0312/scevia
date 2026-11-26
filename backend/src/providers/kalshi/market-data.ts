@@ -5,19 +5,22 @@ import { ProviderAdapterError } from '../adapter.js'
 import { normalizeKalshiMarket } from './adapter.js'
 import { KalshiClient } from './client.js'
 
-const ticker = z.string().regex(/^[A-Z0-9][A-Z0-9_-]{0,127}$/)
+const ticker = z.string().regex(/^[A-Z0-9][A-Z0-9_.-]{0,127}$/)
 const envelope = z.object({ markets: z.array(z.unknown()).max(100), cursor: z.string().max(4000).optional() })
 const quotes = z.object({ last_price_dollars: decimalTextSchema.optional(), close_time: z.iso.datetime({ offset: true }).optional() })
 
 export function parseKalshiLink(input: string) {
   let url: URL
   try { url = new URL(input) } catch { throw new ProviderAdapterError('kalshi_invalid_market_link', false) }
-  const match = /^\/(markets|events)\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/?$/.exec(url.pathname)
   if (url.protocol !== 'https:' || !['kalshi.com', 'www.kalshi.com'].includes(url.hostname)
-    || url.port || url.search || url.hash || url.username || url.password || !match) {
+    || url.port || url.search || url.hash || url.username || url.password) {
     throw new ProviderAdapterError('kalshi_invalid_market_link', false)
   }
-  return { kind: match[1] === 'events' ? 'event' as const : 'market' as const, ticker: match[2]!.toUpperCase() }
+  const direct = /^\/(markets|events)\/([A-Za-z0-9][A-Za-z0-9_.-]{0,127})\/?$/.exec(url.pathname)
+  if (direct) return { kind: direct[1] === 'events' ? 'event' as const : 'market' as const, ticker: direct[2]!.toUpperCase() }
+  const event = /^\/markets\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/[A-Za-z0-9][A-Za-z0-9_-]{0,199}\/([A-Za-z0-9][A-Za-z0-9_.-]{0,127})\/?$/.exec(url.pathname)
+  if (event) return { kind: 'series_event' as const, series: event[1]!.toUpperCase(), ticker: event[2]!.toUpperCase() }
+  throw new ProviderAdapterError('kalshi_invalid_market_link', false)
 }
 
 export function kalshiMarketChoice(raw: unknown, retrievedAt: string) {
@@ -92,7 +95,14 @@ export class KalshiMarketDataService {
   }
   async resolve(link: string, signal: AbortSignal) {
     const reference = parseKalshiLink(link)
-    if (reference.kind === 'event') return this.list(reference.ticker, undefined, signal)
+    if (reference.kind === 'series_event') {
+      const parsed = z.object({ event: z.object({ event_ticker: ticker, series_ticker: ticker }) }).parse(
+        await this.client.read('event', new URLSearchParams(), signal, reference.ticker))
+      if (parsed.event.event_ticker !== reference.ticker || parsed.event.series_ticker !== reference.series) {
+        throw new ProviderAdapterError('kalshi_invalid_market_link', false)
+      }
+    }
+    if (reference.kind !== 'market') return this.list(reference.ticker, undefined, signal)
     return { provider: 'kalshi', items: [await this.lookup(reference.ticker, signal)], nextCursor: null, partial: false }
   }
 }
