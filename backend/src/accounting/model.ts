@@ -15,6 +15,7 @@ export interface FinancialObservation {
   amount: string | null
   fee: string | null
   feeAsset: string | null
+  terminalMarketReference?: true
   simulatedResolution?: { effect: 'entitlement' | 'payout' | 'unverified_resolution'; timing: 'at_resolution_evidence' | 'declared_simulated_time' }
   coveredThrough?: string
   entitlementId?: string
@@ -36,6 +37,7 @@ export type Evidence = EvidenceReference & {
     externalId: string; market: string | null; instrument: string | null; side: string | null
     largestObservedRunCount: number | null; identityKind: string; reason: string | null
   }
+  marketReference?: { source: string; method: string; revision: string; retrievedAt: string; observedAt: string | null }
   acquisition?: 'manual' | 'demo'
   linkedSourceRecordId?: string
   originalObservation?: FinancialObservation

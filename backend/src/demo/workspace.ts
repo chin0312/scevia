@@ -1,3 +1,5 @@
+import { conflictingResolution } from '../tracking/lifecycle.js'
+import { trackedDemoCapture } from '../tracking/demand.js'
 import { and, desc, eq, isNotNull } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
@@ -18,21 +20,24 @@ export function registerDemoRoutes(app: FastifyInstance, db: Database, settings?
     cache = { value: readDemoDataset(settings.path, settings.allowFixture), expires: Date.now() + settings.cacheMs }
     return cache.value.catch(() => null)
   }
-  const payload = (row: { id: string; demo: NonNullable<typeof portfolios.$inferSelect.demo> }) => ({
-    status: 'available', portfolioId: row.id, mode: row.demo.dataset.evidenceKind === 'fixture' ? 'fixture' : 'demo',
-    revision: row.demo.revision, catalogRevision: row.demo.catalogRevision ?? row.demo.revision, capturedAt: row.demo.dataset.capturedAt,
-    marketEvidence: 'captured', transactions: 'hypothetical', markets: row.demo.dataset.markets.map((market) => ({
-      ...market, latestRetrievedAt: row.demo.marketRetrievedAt?.[marketKey(market)] ?? market.retrievedAt,
-    })),
-    trades: row.demo.dataset.trades.map((trade) => {
-      const quote = row.demo.dataset.quotes[trade.quoteIndex]!
-      const time = executionAt(trade, quote)
-      return { id: trade.id, quoteIndex: trade.quoteIndex, executionAt: time,
-        priceAssumption: time === availableAt(quote) ? 'at_reference_time' : 'prior_observation' }
-    }),
-    quotes: row.demo.dataset.quotes.map((quote) => ({ ...quote, effectiveAt: availableAt(quote),
-      freshness: Date.now() - Date.parse(quote.retrievedAt) > 86_400_000 ? 'stale_capture' : 'recent_capture' })),
-  })
+  const payload = async (row: { id: string; demo: NonNullable<typeof portfolios.$inferSelect.demo> }) => {
+    const current = await trackedDemoCapture(db, row.demo, new Date().toISOString())
+    return {
+      status: 'available', portfolioId: row.id, mode: row.demo.dataset.evidenceKind === 'fixture' ? 'fixture' : 'demo',
+      revision: row.demo.revision, catalogRevision: row.demo.catalogRevision ?? row.demo.revision, capturedAt: row.demo.dataset.capturedAt,
+      marketEvidence: 'captured', transactions: 'hypothetical', trackingCoverage: current.trackingCoverage, markets: current.dataset.markets.map((market) => ({
+        ...market, latestRetrievedAt: row.demo.marketRetrievedAt?.[marketKey(market)] ?? market.retrievedAt,
+      })),
+      trades: row.demo.dataset.trades.map((trade) => {
+        const quote = row.demo.dataset.quotes[trade.quoteIndex]!
+        const time = executionAt(trade, quote)
+        return { id: trade.id, quoteIndex: trade.quoteIndex, executionAt: time,
+          priceAssumption: time === availableAt(quote) ? 'at_reference_time' : 'prior_observation' }
+      }),
+      quotes: row.demo.dataset.quotes.map((quote) => ({ ...quote, effectiveAt: availableAt(quote),
+        freshness: Date.now() - Date.parse(quote.retrievedAt) > 86_400_000 ? 'stale_capture' : 'recent_capture' })),
+    }
+  }
   const unavailable = { status: 'unavailable', reason: 'authorized_demo_dataset_unavailable' }
   const current = async (owner: string) => {
     const [row] = await db.select({ id: portfolios.id, demo: portfolios.demo }).from(portfolios)
@@ -63,6 +68,11 @@ export function registerDemoRoutes(app: FastifyInstance, db: Database, settings?
       const matches = (original: typeof demo.dataset.markets[number], incoming: typeof demo.dataset.markets[number]) =>
         incoming.asset === original.asset && incoming.nativeEvent === original.nativeEvent
         && original.outcomes.every((leg) => incoming.outcomes.some((item) => item.instrument === leg.instrument && item.name === leg.name))
+      const tracked = await trackedDemoCapture(tx, demo, new Date().toISOString())
+      if (tracked.dataset.markets.some((market) => {
+        const incoming = capturedMarkets.get(marketKey(market))
+        return incoming && matches(market, incoming) && conflictingResolution(market.resolution, incoming.resolution)
+      })) return { status: 'resolution_conflict' as const }
       const marketRetrievedAt = { ...demo.marketRetrievedAt }
       for (const original of demo.dataset.markets) {
         const incoming = capturedMarkets.get(marketKey(original))
@@ -193,6 +203,14 @@ export function registerDemoRoutes(app: FastifyInstance, db: Database, settings?
           })
           if (normalized.kind !== 'market') throw new Error('invalid_demo_market')
           await upsertMarket(tx, market.provider, normalized)
+          if (manifest.evidenceKind === 'authorized_capture') {
+            const [existing] = await tx.select({ id: markets.id }).from(markets)
+              .where(and(eq(markets.providerCode, market.provider), eq(markets.externalId, market.nativeMarket))).limit(1)
+            if (!existing) await upsertMarket(tx, market.provider, { ...normalized,
+              externalEventId: market.nativeEvent, externalMarketId: market.nativeMarket,
+              outcomes: normalized.outcomes.map((outcome) => ({ ...outcome, externalId: outcome.externalId.slice(namespace.length) })),
+            })
+          }
           const legs = await tx.select({ id: instruments.id, native: instruments.externalId }).from(instruments)
             .innerJoin(markets, eq(instruments.marketId, markets.id)).where(and(eq(markets.providerCode, market.provider), eq(markets.externalId, externalMarketId)))
           catalog.set(marketKey(market), { market, instruments: new Map(legs.map((row) => [row.native.slice(namespace.length), row.id])) })

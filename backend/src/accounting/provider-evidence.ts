@@ -64,7 +64,7 @@ export async function loadProviderEvidence(db: Pick<Database, 'select' | 'select
       lastSuccessfulRunId: dataCoverage.lastSuccessfulRunId, lastSuccessfulSyncAt: dataCoverage.lastSuccessfulSyncAt,
       lastAttemptAt: dataCoverage.lastAttemptAt, lastAttemptStatus: dataCoverage.lastAttemptStatus })
       .from(dataCoverage).innerJoin(providerAccounts, eq(dataCoverage.providerAccountId, providerAccounts.id)).where(owned).limit(limit)
-  const accounts = await db.select({ ...account, kind: providerAccounts.kind, externalId: providerAccounts.externalAccountId }).from(providerAccounts).where(owned).limit(limit)
+  const accounts = await db.select({ ...account, kind: providerAccounts.kind, externalId: providerAccounts.externalAccountId, disabledAt: providerAccounts.disabledAt }).from(providerAccounts).where(owned).limit(limit)
   const evidence: Evidence[] = []
   const add = (ref: { account: string; venue: string; sourceRecordId: string; payloadSha256: string },
     event: Pick<FinancialObservation, 'id' | 'timestamp' | 'type' | 'asset'> & Partial<FinancialObservation>, unresolvedReason?: string) => {

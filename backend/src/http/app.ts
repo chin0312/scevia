@@ -1,3 +1,13 @@
+import { registerMarketReferences } from '../tracking/market-references.js'
+import { refreshPusd } from '../fx/coingecko.js'
+import { refreshUsdc } from '../fx/kraken.js'
+import { registerMarketEvidence } from '../tracking/discovery.js'
+import { registerOwnerPreferences } from './simulations.js'
+import { refreshEcb } from '../fx/ecb.js'
+import { startPolymarketStream } from '../tracking/polymarket-stream.js'
+import { setTimeout as delay } from 'node:timers/promises'
+import { initializeTrackedAccounts, registerTrackingRoutes } from '../tracking/routes.js'
+import { TrackingWorker } from '../tracking/worker.js'
 import { registerDemoRoutes } from '../demo/workspace.js'
 import { PolymarketAdapter } from '../providers/polymarket/adapter.js'
 import { PolymarketCollateralReader } from '../providers/polymarket/collateral.js'
@@ -9,7 +19,7 @@ import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
 import swagger from '@fastify/swagger'
 import swaggerUi from '@fastify/swagger-ui'
-import { and, desc, eq, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, gt, lt, sql } from 'drizzle-orm'
 import { Decimal } from 'decimal.js'
 import type { ServerConfig } from '../config.js'
 import type { Database } from '../db/client.js'
@@ -20,6 +30,7 @@ import {
   dataCoverage,
   events,
   fills,
+  fxReferences,
   instruments,
   markets,
   portfolios,
@@ -538,6 +549,72 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 
   // Kalshi remains unavailable in production and in the default development server.
   const kalshiMarketData = options.config.nodeEnv === 'test' ? options.kalshiMarketData : kalshiLive?.marketData
+  const trackingRuntime = { running: false, accountIds: [] as string[],
+    stream: { status: 'disabled', heartbeatAt: null as string | null } }
+  let reconcileTracking: ReturnType<typeof registerAccountingRoutes>
+  const tracking = options.config.tracking
+  if (tracking && options.config.nodeEnv === 'development' && ['127.0.0.1', '::1'].includes(options.config.host)) {
+    const accountIds = await initializeTrackedAccounts(options.database, options.config.devPrincipalId,
+      tracking.accountIds, liveAllowed, kalshiLive?.accountId)
+    trackingRuntime.accountIds = accountIds
+    const worker = new TrackingWorker(options.database, { ...tracking, accountIds, ingestion,
+      kalshi: options.config.kalshi?.environment === 'production' ? kalshiMarketData : undefined,
+      polymarket: liveAllowed ? marketData : undefined,
+      ctf: polygonRpc && options.config.polymarketResolutionRpcAuthorized ? new PolymarketCollateralReader(polygonRpc) : undefined })
+    const stopping = new AbortController()
+    const loop = async (run: (signal: AbortSignal) => Promise<unknown>, interval = 5000) => {
+      while (!stopping.signal.aborted) {
+        try { await run(stopping.signal) }
+        catch { app.log.warn('Tracking worker will retry after a local processing failure') }
+        await delay(interval, undefined, { signal: stopping.signal }).catch(() => undefined)
+      }
+    }
+    let cursor: string | undefined
+    const reconcile = async () => {
+      const rows = await options.database.select({ id: portfolios.id }).from(portfolios)
+        .where(and(eq(portfolios.ownerId, options.config.devPrincipalId), eq(portfolios.simulationOnly, false), cursor ? gt(portfolios.id, cursor) : undefined))
+        .orderBy(asc(portfolios.id)).limit(10)
+      for (const row of rows) {
+        if (stopping.signal.aborted) break
+        cursor = row.id
+        await reconcileTracking(row.id)
+      }
+      if (rows.length < 10) cursor = undefined
+    }
+    let running: Promise<unknown> | undefined
+    app.addHook('onListen', async () => { trackingRuntime.running = true; running = Promise.all([
+      loop((signal) => Promise.all(Array.from({ length: 3 }, () => worker.market(signal)))),
+      loop(reconcile, 30_000),
+      ...(liveAllowed && options.config.polymarketStreamAuthorized
+        ? [startPolymarketStream(options.database, stopping.signal, trackingRuntime.stream)] : []),
+      loop((signal) => worker.account(signal)),
+      loop(() => worker.pruneObservations(tracking.retentionDays), 60_000),
+    ]) })
+    app.addHook('onClose', async () => { trackingRuntime.running = false; stopping.abort(); await running })
+  }
+  const pusdKey = options.config.coingeckoPusdKey
+  if ((options.config.ecbReferenceAuthorized || options.config.krakenFxAuthorized || pusdKey) && options.config.nodeEnv === 'development' && ['127.0.0.1', '::1'].includes(options.config.host)) {
+    const stop = new AbortController()
+    let task: Promise<void> | undefined
+    const collect = async () => {
+      while (!stop.signal.aborted) {
+        const updates = await Promise.allSettled([
+          ...(options.config.ecbReferenceAuthorized ? [refreshEcb(options.database, stop.signal)] : []),
+          ...(pusdKey ? [refreshPusd(options.database, pusdKey, stop.signal)] : []),
+          ...(options.config.krakenFxAuthorized ? [refreshUsdc(options.database, stop.signal)] : []),
+        ])
+        if (options.config.fxReferenceRetentionDays) {
+          const cutoff = new Date(Date.now() - options.config.fxReferenceRetentionDays * 86_400_000)
+          try { await options.database.delete(fxReferences).where(lt(fxReferences.observedAt, cutoff)) }
+          catch { app.log.warn('Reporting reference retention sweep was unavailable') }
+        }
+        if (updates.some((result) => result.status === 'rejected')) app.log.warn('A reporting reference source was unavailable')
+        await delay(3_600_000, undefined, { signal: stop.signal }).catch(() => undefined)
+      }
+    }
+    app.addHook('onListen', async () => { task = collect() })
+    app.addHook('onClose', async () => { stop.abort(); await task })
+  }
   app.get<{ Querystring: { marketTicker?: string; eventTicker?: string; cursor?: string } }>('/v1/market-catalog/kalshi', {
     schema: { tags: ['public market data'], querystring: { type: 'object', additionalProperties: false, properties: {
       marketTicker: { type: 'string', pattern: '^[A-Z0-9][A-Z0-9_.-]{0,127}$' },
@@ -608,8 +685,16 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       request.principalId = options.config.devPrincipalId
     })
 
+    registerOwnerPreferences(privateApi, options.database)
+    registerMarketReferences(privateApi, options.database,
+      options.config.kalshi?.environment === 'production' || options.config.nodeEnv === 'test' ? kalshiMarketData : undefined,
+      liveAllowed || options.marketData ? marketData : undefined)
+    registerMarketEvidence(privateApi, options.database,
+      options.config.kalshi?.environment === 'production' || options.config.nodeEnv === 'test' ? kalshiMarketData : undefined,
+      liveAllowed || options.marketData ? marketData : undefined)
+    registerTrackingRoutes(privateApi, options.database, (portfolioId) => reconcileTracking(portfolioId), () => trackingRuntime)
     registerDemoRoutes(privateApi, options.database, options.config.demoDataset)
-    registerAccountingRoutes(privateApi, options.database, liveAllowed || options.marketData || kalshiMarketData ? async (url, type, assetId) => {
+    reconcileTracking = registerAccountingRoutes(privateApi, options.database, liveAllowed || options.marketData || kalshiMarketData ? async (url, type, assetId) => {
       try {
         if (type === 'kalshi_outcome') {
           if (!kalshiMarketData) throw new ScenarioError('kalshi_live_disabled')
@@ -650,7 +735,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         name: portfolios.name,
         createdAt: portfolios.createdAt,
         demoKind: sql<string | null>`${portfolios.demo}->'dataset'->>'evidenceKind'`,
-      }).from(portfolios).where(eq(portfolios.ownerId, request.principalId!)).orderBy(portfolios.createdAt)
+      }).from(portfolios).where(and(eq(portfolios.ownerId, request.principalId!), eq(portfolios.simulationOnly, false))).orderBy(portfolios.createdAt)
       const items = await Promise.all(rows.map(async ({ demoKind, ...portfolio }) => {
         const [accountCount] = await options.database.select({ count: sql<number>`count(*)::int`,
           fixtures: sql<boolean>`coalesce(bool_or(${providerAccounts.kind} = 'fixture'), false)` })
@@ -1514,7 +1599,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 async function getOwnedPortfolio(database: Database, portfolioId: string, ownerId: string) {
   const [portfolio] = await database.select({ id: portfolios.id, name: portfolios.name, isDemo: sql<boolean>`${portfolios.demo} is not null` })
     .from(portfolios)
-    .where(and(eq(portfolios.id, portfolioId), eq(portfolios.ownerId, ownerId)))
+    .where(and(eq(portfolios.id, portfolioId), eq(portfolios.ownerId, ownerId), eq(portfolios.simulationOnly, false)))
     .limit(1)
   return portfolio
 }

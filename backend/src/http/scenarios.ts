@@ -1,3 +1,4 @@
+import { fxReferenceSource, loadFx, reportingCurrency, selectRate } from '../fx/reference.js'
 import { Decimal } from 'decimal.js'
 import { randomBytes } from 'node:crypto'
 import { evaluationResponse, comparisonResponse } from '../scenarios/contracts.js'
@@ -7,7 +8,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify'
 import { z } from 'zod'
 import { digest } from '../accounting/decisions.js'
 import type { Database } from '../db/client.js'
-import { portfolioScenarios as scenarios, portfolioScenarioBundles as bundles, portfolios } from '../db/schema.js'
+import { portfolioScenarios as scenarios, portfolioScenarioBundles as bundles, portfolios, users } from '../db/schema.js'
 import { evaluate, validateScenarioOperations, validateInstrumentIdentities, ScenarioError, type ScenarioBaseline, type ScenarioInput, type ScenarioInstrument } from '../scenarios/engine.js'
 
 const id = z.string().trim().min(1).max(200)
@@ -16,6 +17,7 @@ const cashAmount = z.string().regex(/^\d{1,20}(?:\.\d{1,18})?$/)
 const fraction = cashAmount.refine((value) => /^(?:0+(?:\.\d+)?|0*1(?:\.0+)?)$/.test(value))
 const time = z.iso.datetime({ offset: true })
 const sourceCommon = {
+  reportingCurrency: reportingCurrency.optional(),
   asset: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$/), asOf: time,
   catalog: z.array(z.uuid()).max(250).default([]),
   publicOutcomes: z.array(publicSelection).max(6).default([]),
@@ -23,7 +25,7 @@ const sourceCommon = {
 }
 const source = z.discriminatedUnion('mode', [
   z.object({ ...sourceCommon, mode: z.literal('actual'), accounts: z.array(id.refine((value) => !value.includes(','))).min(1).max(100),
-    venue: id.optional(), useReportedKalshiSnapshot: z.boolean().optional() }).strict(),
+    venue: id.optional(), sourcePortfolioId: z.uuid().optional(), useReportedKalshiSnapshot: z.boolean().optional() }).strict(),
   z.object({ ...sourceCommon, mode: z.literal('scratch'), buckets: z.array(z.object({
     id, venue: id, account: id, cash: cashAmount,
   }).strict()).min(1).max(100) }).strict(),
@@ -68,11 +70,12 @@ const evaluation = z.union([z.object({ source, input }).strict(), z.object({ bas
 const ids = z.object({ scenarioIds: z.array(z.uuid()).min(2).max(8) }).strict()
 export type FrozenDenominationScenario = {
   components: Array<{ source: BaselineSource; baseline: ScenarioBaseline; input: ScenarioInput }>
+  reportingBasis?: { currency: string; asOf: string; references: Record<string, ReturnType<typeof selectRate>> }
   assumedUsdPerUnit?: Partial<Record<'USDC' | 'PUSD', string>> | undefined
 }
 
 type Scope = { portfolioId: string; scenarioId?: string }
-type Read = Pick<Database, 'select' | 'selectDistinctOn'>
+type Read = Pick<Database, 'select' | 'selectDistinctOn' | 'execute'>
 
 const assumptionDigest = ({ operations, ...assumptions }: ScenarioInput) => digest({
   ...assumptions, execution: operations.map(({ bucket, instrument, price, fee }) => ({ bucket, instrument, price, fee }))
@@ -149,7 +152,11 @@ function run(baseline: ScenarioBaseline, changes: ScenarioInput) {
     'invalid_constraint', 'invalid_quantity', 'invalid_payout_unit', 'invalid_payoff_identity', 'incompatible_settlement_assets'].includes(conditional.reason)) {
     throw new ScenarioError(conditional.reason)
   }
-  return result
+  const basis = baseline.reportingBasis
+  if (!basis) return result
+  const convert = (value: string | null) => value === null || basis.reference.rate === null
+    ? null : new Decimal(value).mul(basis.reference.rate).toFixed()
+  return { ...result, reporting: { ...basis, startingValue: convert(result.bridge.startingValue), endingValue: convert(result.bridge.endingValue) } }
 }
 
 export function registerScenarioRoutes(app: FastifyInstance, db: Database,
@@ -162,11 +169,20 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
   const previewLifetime = 15 * 60_000
   const capture = async (portfolioId: string, value: BaselineSource, frozenPublic?: ScenarioInstrument[]) => {
     validateSource(value)
+    const [collection] = await db.select({ owner: portfolios.ownerId, independent: portfolios.simulationOnly })
+      .from(portfolios).where(eq(portfolios.id, portfolioId)).limit(1)
+    if (!collection) throw new ScenarioError('scenario_source_unavailable')
+    const sourceId = value.mode === 'actual' ? value.sourcePortfolioId ?? portfolioId : portfolioId
+    if (value.mode === 'actual' && (collection.independent || sourceId !== portfolioId)) {
+      const [eligible] = await db.select({ id: portfolios.id }).from(portfolios)
+        .where(and(eq(portfolios.id, sourceId), eq(portfolios.ownerId, collection.owner), eq(portfolios.simulationOnly, false))).limit(1)
+      if (!eligible) throw new ScenarioError('scenario_source_unavailable')
+    }
     if (!frozenPublic && value.publicOutcomes.length && !resolvePublic) throw new ScenarioError('provider_live_disabled')
     const pending = new Map<string, Promise<unknown>>()
     const requiresDemoIdentity = !frozenPublic && value.asset === 'PUSD' && value.publicOutcomes.length > 0
     const [demoOwner] = requiresDemoIdentity ? await db.select({ demo: portfolios.demo }).from(portfolios)
-      .where(eq(portfolios.id, portfolioId)).limit(1) : []
+      .where(eq(portfolios.id, sourceId)).limit(1) : []
     const resolved = frozenPublic ?? await Promise.all(value.publicOutcomes.map(async (selection) => {
       const key = selection.assetIdType === 'kalshi_outcome' ? 'kalshi:' + selection.url + ':' + selection.assetId : 'polymarket:' + selection.url
       if (!pending.has(key)) pending.set(key, resolvePublic!(selection.url, selection.assetIdType, selection.assetId))
@@ -184,8 +200,14 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
       return selectPublicOutcome(market, selection, value.asset, asOf)
     }))
     return db.transaction(async (tx) => {
-      const frozen = await baseline(tx, portfolioId, value, resolved)
+      const frozen = await baseline(tx, sourceId, value, resolved)
       validateInstrumentIdentities(frozen.instruments)
+      const [preference] = await tx.select({ currency: users.reportingCurrency, fiatSource: users.fiatReferenceSource,
+        stablecoinSource: users.stablecoinReferenceSource }).from(users).where(eq(users.id, collection.owner)).limit(1)
+      const currency = value.reportingCurrency ?? preference?.currency ?? 'USD'
+      const asOf = new Date(value.asOf).toISOString()
+      const rates = await loadFx(tx, asOf, asOf, { assets: [value.asset], currency })
+      frozen.reportingBasis = { currency, asOf, reference: selectRate(rates, value.asset, currency, asOf, preference) }
       return frozen
     }, { isolationLevel: 'repeatable read', accessMode: 'read only' })
   }
@@ -201,7 +223,8 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
     })
   function route<S extends z.ZodType>(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', suffix: string, schema: S,
     handler: (scope: Scope, body: z.infer<S>, reply: FastifyReply) => Promise<unknown>, response?: object) {
-    app.route<{ Params: Scope; Body: unknown }>({ method, url: path + suffix, bodyLimit: 196_608,
+    for (const [base, independent] of [[path, false], ['/simulations/:portfolioId/scenarios', true]] as const) {
+    app.route<{ Params: Scope; Body: unknown }>({ method, url: base + suffix, bodyLimit: 196_608,
       // Zod validates the original body in the handler so AJV cannot strip fields from alternate union branches.
       validatorCompiler: ({ httpPart }) => (value) => {
         if (httpPart !== 'params') return { value }
@@ -214,7 +237,11 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
       ...(method === 'GET' || method === 'DELETE' ? {} : { body: z.toJSONSchema(schema, { target: 'draft-7', unrepresentable: 'any', io: 'input', override: ({ jsonSchema }) => { delete jsonSchema.default } }) }) },
       handler: async (request, reply) => {
         const scope = request.params
-        if (!await owned(scope.portfolioId, request.principalId!)) return notFound(reply)
+        if (independent) {
+          const [row] = await db.select({ id: portfolios.id }).from(portfolios).where(and(eq(portfolios.id, scope.portfolioId),
+            eq(portfolios.ownerId, request.principalId!), eq(portfolios.simulationOnly, true))).limit(1)
+          if (!row) return notFound(reply)
+        } else if (!await owned(scope.portfolioId, request.principalId!)) return notFound(reply)
         const parsed = schema.safeParse(request.body)
         if (!parsed.success) return reply.code(422).send({ error: { code: 'invalid_scenario_input' } })
         try {
@@ -225,6 +252,7 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
         }
       },
     })
+    }
   }
   const notFound = (reply: FastifyReply) => reply.code(404).send({ error: { code: 'not_found' } })
   const stale = (reply: FastifyReply) => reply.code(409).send({ error: { code: 'scenario_revision_changed' } })
@@ -294,16 +322,27 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
   }, evaluationResponse)
   const denominationEvaluation = z.object({
     components: z.array(z.object({ baselineToken: z.string().length(64), input }).strict()).min(2).max(4),
+    reportingCurrency: reportingCurrency.optional(),
+    reportingSource: fxReferenceSource.optional(),
     assumedUsdPerUnit: z.partialRecord(z.enum(['USDC', 'PUSD']), cashAmount.refine((value) => new Decimal(value).gt(0))).optional(),
   }).strict()
-  function freezeDenominations(portfolioId: string, value: z.infer<typeof denominationEvaluation>): FrozenDenominationScenario {
-    return {
+  async function freezeDenominations(portfolioId: string, value: z.infer<typeof denominationEvaluation>): Promise<FrozenDenominationScenario> {
+    const [preference] = await db.select({ currency: users.reportingCurrency, fiatSource: users.fiatReferenceSource, stablecoinSource: users.stablecoinReferenceSource }).from(portfolios)
+      .innerJoin(users, eq(users.id, portfolios.ownerId)).where(eq(portfolios.id, portfolioId)).limit(1)
+    const currency = value.reportingCurrency ?? preference?.currency ?? 'USD'
+    const frozen: FrozenDenominationScenario = {
       components: value.components.map(({ baselineToken, input: edits }) => {
         const { baseline, source } = readPreview(portfolioId, baselineToken)
         return { source, baseline, input: edits }
       }).sort((left, right) => left.baseline.asset.localeCompare(right.baseline.asset)),
       assumedUsdPerUnit: value.assumedUsdPerUnit,
     }
+    const asOf = frozen.components[0]!.baseline.asOf
+    const assets = [...new Set(['USD', ...frozen.components.map((item) => item.baseline.asset)])]
+    const references = await loadFx(db, asOf, asOf, { assets, currency })
+    frozen.reportingBasis = { currency, asOf,
+      references: Object.fromEntries(assets.map((asset) => [asset, selectRate(references, asset, currency, asOf, { ...preference, source: value.reportingSource })])) }
+    return frozen
   }
   function evaluateDenominations(frozen: FrozenDenominationScenario) {
     const components = frozen.components.map(({ baseline, input: edits }) => run(baseline, edits))
@@ -313,7 +352,39 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
     const rates: Record<string, string> = { ...frozen.assumedUsdPerUnit, USD: '1' }
     const comparable = components.every((row) => row.bridge.endingValue !== null && row.additionalCapitalRequired === '0' && rates[row.asset])
     const Report = Decimal.clone({ precision: 70 })
+    const basis = frozen.reportingBasis
+    const refRate = (asset: string) => {
+      const assumed = frozen.assumedUsdPerUnit?.[asset as 'USDC' | 'PUSD']
+      const usd = basis?.references['USD']?.rate
+      return assumed ? usd ? new Report(assumed).mul(usd).toFixed() : null : basis?.references[asset]?.rate ?? null
+    }
+    const converted = (field: (item: typeof components[number]) => string | null) => {
+      if (!components.every((item) => refRate(item.asset) !== null && field(item) !== null)) return null
+      return components.reduce((sum, item) => sum.plus(new Report(field(item)!).mul(refRate(item.asset)!)), new Report(0)).toFixed()
+    }
+    const endingValue = components.every((item) => item.additionalCapitalRequired === '0') ? converted((item) => item.bridge.endingValue) : null
+    const investmentGain = endingValue === null ? null : converted((item) => {
+      const bridge = item.bridge
+      return bridge.endingValue === null || bridge.startingValue === null || bridge.addedCapital === null || bridge.withdrawnCapital === null
+        ? null : new Report(bridge.endingValue).minus(bridge.startingValue).minus(bridge.addedCapital).plus(bridge.withdrawnCapital).toFixed()
+    })
+    const display = components.map((item) => {
+      const rate = refRate(item.asset)
+      const value = (amount: string | null) => rate === null || amount === null ? null : new Report(amount).mul(rate).toFixed()
+      const events = (allocation: typeof item.allocation.before) => ({
+        denominator: value(allocation.cashInclusiveEvent.denominator),
+        rows: allocation.cashInclusiveEvent.rows.map((row) => ({ ...row, value: value(row.value),
+          weight: rate === null ? null : row.weight })),
+      })
+      return { asset: item.asset, rate, events: { before: events(item.allocation.before), after: events(item.allocation.after) },
+        conditionalCashInclusive: item.settlement.conditional.cashInclusive ? {
+          best: value(item.settlement.conditional.cashInclusive.best), worst: value(item.settlement.conditional.cashInclusive.worst),
+        } : null }
+    })
     return {
+      ...(basis ? { reporting: { ...basis, components: display, hypotheticalUsdOverrides: frozen.assumedUsdPerUnit ?? null,
+        startingValue: converted((item) => item.bridge.startingValue), endingValue, investmentGain,
+        fees: converted((item) => item.bridge.fees), hypotheticalRealized: converted((item) => item.hypotheticalRealized) } } : {}),
       components, indicativeUsd: comparable ? { valuationBasis: 'assumed_reporting_conversion', rates,
         value: components.reduce((sum, row) => sum.plus(new Report(row.bridge.endingValue!).mul(rates[row.asset]!)), new Report(0)).toFixed(),
       } : null,
@@ -321,7 +392,7 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
     }
   }
   route('POST', '/evaluate-denominations', denominationEvaluation, async ({ portfolioId }, value) => {
-    const frozen = freezeDenominations(portfolioId, value)
+    const frozen = await freezeDenominations(portfolioId, value)
     const result = evaluateDenominations(frozen)
     return { ...result, previewDigest: digest(frozen) }
   })
@@ -349,7 +420,7 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
   }).from(bundles).where(eq(bundles.portfolioId, portfolioId)).orderBy(desc(bundles.updatedAt)).limit(50) }))
   route('POST', bundlePath, denominationEvaluation.extend({ name, previewDigest: z.string().length(64) }),
     async ({ portfolioId }, value, reply) => {
-      const frozen = freezeDenominations(portfolioId, value)
+      const frozen = await freezeDenominations(portfolioId, value)
       if (digest(frozen) !== value.previewDigest) return stale(reply)
       return reply.code(201).send(await saveBundle(portfolioId, value.name, frozen))
     })
@@ -403,7 +474,8 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
     const compatibleAssets = ordered.every(({ frozen }) => digest(frozen.components.map((row) => row.baseline.asset))
       === digest(ordered[0]!.frozen.components.map((row) => row.baseline.asset)))
     return { compatibleAssets, sameReportingAssumptions: ordered.every(({ frozen }) =>
-      digest(frozen.assumedUsdPerUnit ?? null) === digest(ordered[0]!.frozen.assumedUsdPerUnit ?? null)),
+      digest([frozen.assumedUsdPerUnit ?? null, frozen.reportingBasis ?? null])
+        === digest([ordered[0]!.frozen.assumedUsdPerUnit ?? null, ordered[0]!.frozen.reportingBasis ?? null])),
     compatibility: compatibleAssets ? ordered[0]!.frozen.components.map(({ baseline }, index) => ({
       asset: baseline.asset, ...comparisonDimensions(ordered.map(({ frozen }) => {
         const row = frozen.components[index]!
@@ -498,6 +570,19 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
       eq(scenarios.id, current.id), eq(scenarios.revision, value.revision))).returning()
     return row ?? stale(reply)
   })
+  route('POST', '/:scenarioId/refresh-references', z.object({ revision, asOf: time }).strict(),
+    async ({ portfolioId, scenarioId }, value, reply) => {
+      const current = await find(portfolioId, scenarioId!)
+      if (!current) return notFound(reply)
+      if (current.revision !== value.revision) return stale(reply)
+      if (current.source.mode !== 'scratch') throw new ScenarioError('reference_refresh_requires_scratch_baseline')
+      const source = { ...current.source, asOf: value.asOf }
+      const baseline = await capture(portfolioId, source)
+      run(baseline, current.input)
+      const [updated] = await db.update(scenarios).set({ source, baseline, revision: value.revision + 1, updatedAt: new Date() })
+        .where(and(eq(scenarios.id, current.id), eq(scenarios.portfolioId, portfolioId), eq(scenarios.revision, value.revision))).returning()
+      return updated ?? stale(reply)
+    })
   route('POST', '/:scenarioId/rebase', rebase, async ({ portfolioId, scenarioId }, value, reply) => {
     const current = await find(portfolioId, scenarioId!)
     if (!current) return notFound(reply)

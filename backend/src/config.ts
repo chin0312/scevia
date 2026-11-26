@@ -35,9 +35,16 @@ export interface KalshiConfig {
 
 export interface ServerConfig extends DatabaseConfig {
   kalshi?: KalshiConfig
+  tracking?: { accountIds: string[]; marketIntervalMs: number; accountIntervalMs: number; retentionDays: number }
   demoDataset?: { path: string; cacheMs: number; allowFixture: boolean }
   polymarketLiveEnabled?: boolean
   polymarketPolygonRpc?: URL
+  ecbReferenceAuthorized?: boolean
+  krakenFxAuthorized?: boolean
+  coingeckoPusdKey?: string
+  fxReferenceRetentionDays?: number
+  polymarketResolutionRpcAuthorized?: boolean
+  polymarketStreamAuthorized?: boolean
   nodeEnv: 'development' | 'test' | 'production'
   host: string
   port: number
@@ -102,8 +109,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   }
   return {
     ...database,
-    ...(polymarketPolygonRpc ? { polymarketPolygonRpc } : {}),
+    ...(polymarketPolygonRpc ? { polymarketPolygonRpc,
+      polymarketResolutionRpcAuthorized: env.POLYMARKET_CTF_RESOLUTION_AUTHORIZED === 'YES' } : {}),
     kalshi,
+    ecbReferenceAuthorized: localDevelopment && env.ECB_FX_REFERENCE_AUTHORIZED === 'YES',
+    ...(localDevelopment && env.FX_REFERENCE_RETENTION_DAYS ? { fxReferenceRetentionDays:
+      z.coerce.number().int().min(1).max(366).parse(env.FX_REFERENCE_RETENTION_DAYS) } : {}),
+    ...(localDevelopment && env.COINGECKO_PUSD_REFERENCE_AUTHORIZED === 'YES' ? {
+      coingeckoPusdKey: z.string().min(1).max(256).parse(env.COINGECKO_DEMO_API_KEY),
+    } : {}),
+    krakenFxAuthorized: localDevelopment && env.KRAKEN_USDC_REFERENCE_AUTHORIZED === 'YES',
+    polymarketStreamAuthorized: localDevelopment && env.POLYMARKET_MARKET_STREAM_AUTHORIZED === 'YES',
+    ...(localDevelopment && env.CONTINUOUS_TRACKING_ENABLED === 'YES' ? { tracking: {
+      accountIds: z.array(z.uuid()).max(20).parse((env.TRACKED_PROVIDER_ACCOUNT_IDS ?? '').split(',').map((id) => id.trim()).filter(Boolean)),
+      retentionDays: z.coerce.number().int().min(1).max(366).parse(env.MARKET_TRACKING_RETENTION_DAYS),
+      marketIntervalMs: z.coerce.number().int().min(60_000).max(3_600_000).parse(env.MARKET_TRACKING_INTERVAL_MS ?? '300000'),
+      accountIntervalMs: z.coerce.number().int().min(300_000).max(3_600_000).parse(env.ACCOUNT_TRACKING_INTERVAL_MS ?? '900000'),
+    } } : {}),
     ...(localDevelopment && env.DEMO_CAPTURE_AUTHORIZED === 'YES' && env.DEMO_DATASET_PATH?.startsWith('/') ? {
       demoDataset: { path: env.DEMO_DATASET_PATH, allowFixture: false,
         cacheMs: z.coerce.number().int().min(1000).max(3_600_000).parse(env.DEMO_DATASET_CACHE_MS ?? '60000') },

@@ -4,7 +4,7 @@ import { normalizedRecordSchema } from '../../domain/model.js'
 
 export const polygonPusd = '0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb'
 // CTF Exchange V2 deployments documented by Polymarket. Other exchange generations use different events.
-const ctfV2 = new Set(['0xe111180000d2663c0091e4f400237545b87b996b', '0xe2222d279d744050d28e00520010520000310f59'])
+export const polygonCtfV2 = new Set(['0xe111180000d2663c0091e4f400237545b87b996b', '0xe2222d279d744050d28e00520010520000310f59'])
 const orderFilled = '0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee'
 const indexedAddress = /^0x0{24}[0-9a-f]{40}$/i
 const word = z.string().regex(/^0x[0-9a-f]{64}$/i)
@@ -84,7 +84,7 @@ export class PolymarketCollateralReader {
     })
     const fills = receipt.logs.flatMap((log) => {
       const exchange = log.address.toLowerCase()
-      if (log.removed || !ctfV2.has(exchange) || log.topics.length !== 4 || log.topics[0]?.toLowerCase() !== orderFilled
+      if (log.removed || !polygonCtfV2.has(exchange) || log.topics.length !== 4 || log.topics[0]?.toLowerCase() !== orderFilled
         || !indexedAddress.test(log.topics[2]!) || '0x' + log.topics[2]!.slice(-40).toLowerCase() !== normalizedWallet
         || !/^0x[0-9a-f]{448}$/i.test(log.data)) return []
       const words = log.data.slice(2).match(/.{64}/g)!.map((value) => BigInt('0x' + value))
@@ -105,6 +105,34 @@ export class PolymarketCollateralReader {
     }
     return { chainId: 137, wallet: normalizedWallet, contract: polygonPusd,
       transactionHash: receipt.transactionHash, blockHash: canonical.hash, blockNumber: canonical.number, observedAt, items, fills }
+  }
+
+  async standardCtfResolution(condition: string, positions: readonly string[], signal: AbortSignal) {
+    if (!word.safeParse(condition).success || positions.length !== 2 || new Set(positions).size !== 2
+      || positions.some((token) => !/^\d{1,78}$/.test(token))) return null
+    const chain = quantity.parse(await this.read('eth_chainId', [], signal))
+    if (BigInt(chain) !== 137n) throw new ProviderAdapterError('polymarket_polygon_chain_mismatch', false)
+    const block = z.object({ hash: word, number: quantity, timestamp: quantity })
+      .parse(await this.read('eth_getBlockByNumber', ['finalized', false], signal))
+    const ctf = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045'
+    const legacyCollateral = '2791bca1f2de4661ed88a30c99a7a9449aa84174'
+    const arg = condition.slice(2)
+    const uint = (value: number) => value.toString(16).padStart(64, '0')
+    const call = async (data: string) => word.parse(await this.read('eth_call',
+      [{ to: ctf, data: '0x' + data }, { blockHash: block.hash, requireCanonical: true }], signal))
+    const [slots, denominator] = await Promise.all([call('d42dc0c2' + arg), call('dd34de67' + arg)])
+    if (BigInt(slots) !== 2n || BigInt(denominator) <= 0n) return null
+    const [first, second] = await Promise.all([call('0504c814' + arg + uint(0)), call('0504c814' + arg + uint(1))])
+    const payout = BigInt(denominator)
+    const winningIndex = BigInt(first) === payout && BigInt(second) === 0n ? 0 : BigInt(first) === 0n && BigInt(second) === payout ? 1 : -1
+    if (winningIndex < 0) return null
+    const ids = await Promise.all([1, 2].map(async (indexSet) => {
+      const collection = await call('856296f7' + uint(0) + arg + uint(indexSet))
+      return BigInt(await call('39dd7530' + legacyCollateral.padStart(64, '0') + collection.slice(2))).toString()
+    }))
+    if (ids.some((id, index) => id !== positions[index])) return null
+    return { knownAt: new Date().toISOString(), winningInstrument: ids[winningIndex]!, unitPayout: '1' as const,
+      source: 'polygon_ctf' as const, finalizedBlockHash: block.hash, finalizedBlockAt: blockTime(block.timestamp), settlementTime: null }
   }
 
   async balance(wallet: string, signal: AbortSignal) {

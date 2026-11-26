@@ -227,6 +227,7 @@ export class IngestionService {
           ? validatedPage.checkpoint
           : durableCheckpoint
         const retrievedAt = new Date().toISOString()
+        await this.loadSyncAccount(account.id)
         const persistedPage = await persistPage({
           database: this.database,
           providerAccountId: account.id,
@@ -402,6 +403,7 @@ export class IngestionService {
     deadline: number
   }): Promise<ProviderPage> {
     for (let attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt += 1) {
+      await this.loadSyncAccount(input.providerAccountId)
       const remaining = input.deadline - Date.now()
       if (remaining <= 0) throw new IngestionError('sync_deadline_exceeded')
       const timeoutMs = Math.min(PAGE_TIMEOUT_MS, remaining)

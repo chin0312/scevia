@@ -113,6 +113,48 @@
       "when": 1795671266602,
       "tag": "0015_sleepy_deathstrike",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1795674806234,
+      "tag": "0016_continuous_tracking",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1795675792284,
+      "tag": "0017_tracking_demand_and_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1795677297381,
+      "tag": "0018_lifecycle_and_receipt_evidence",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1795678427487,
+      "tag": "0019_shared_reporting_and_research",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1795679336998,
+      "tag": "0020_archival_reference_eligibility",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1795681172935,
+      "tag": "0021_multi_source_fx_preferences",
+      "breakpoints": true
     }
   ]
 }

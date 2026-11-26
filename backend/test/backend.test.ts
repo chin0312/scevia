@@ -1,3 +1,12 @@
+import { archivePusd, refreshPusd } from '../src/fx/coingecko.js'
+import { polygonPusd } from '../src/providers/polymarket/collateral.js'
+import { refreshUsdc } from '../src/fx/kraken.js'
+import { loadFx, selectRate, storeReferences } from '../src/fx/reference.js'
+import { refreshEcb } from '../src/fx/ecb.js'
+import { sharedTrackingEvidence } from '../src/tracking/evidence.js'
+import { nextTime, TrackingWorker } from '../src/tracking/worker.js'
+import { initializeTrackedAccounts } from '../src/tracking/routes.js'
+import { kalshiMarketChoice } from '../src/providers/kalshi/market-data.js'
 import { kalshiCredentialSourceId } from '../src/providers/kalshi/live.js'
 import { generateKeyPairSync } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
@@ -12,6 +21,7 @@ import { Pool } from 'pg'
 import { createDatabase, type Database } from '../src/db/client.js'
 import { runMigrations } from '../src/db/migrate.js'
 import {
+  accountTracking, marketInstrumentMappings, marketResearch, marketLifecycleEvidence, marketTracking, sharedMarketObservations,
   activityFactOccurrences,
   cashMovements,
   reviewedBinaryRules,
@@ -21,6 +31,7 @@ import {
   instruments,
   markets,
   portfolios,
+  portfolioAccountingDecisions,
   positionSnapshots,
   priceObservations,
   providerActivityFacts,
@@ -90,6 +101,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await pool.query(`TRUNCATE TABLE
+    scevia.fx_references,
     scevia.users,
     scevia.portfolios,
     scevia.provider_accounts,
@@ -123,6 +135,519 @@ afterAll(async () => {
 })
 
 describe('migrations and canonical persistence', () => {
+  it('discovers an untracked V2 market and keeps mapped research leases and simulations owner scoped', async () => {
+    const condition = '0x' + 'a'.repeat(64)
+    const transport = vi.fn(async (input: URL | string) => {
+      if (new URL(input).pathname.endsWith('/prices-history')) return Response.json({ data: [
+        { timestamp: 1767139200, price: '0.35', resolution_seconds: 86400 },
+        { timestamp: 1767312000, price: '0.4', resolution_seconds: 86400 },
+      ] })
+      if (new URL(input).pathname === '/midpoints') return Response.json({ 333: '0.45', 444: '0.55' })
+      return Response.json([{ conditionId: condition, version: 'v2', negRisk: false, active: true,
+        question: 'Untracked market', events: [{ id: 'native-event', title: 'Discovery event' }],
+        clobTokenIds: ['333', '444'], positionIds: ['111', '222'], outcomes: ['Yes', 'No'] }])
+    })
+    const marketData = new PolymarketMarketDataService(new PolymarketHttpClient(transport as typeof fetch))
+    const app = await buildApp({ database, marketData, config: testConfig() })
+    const other = await buildApp({ database, marketData, config: { ...testConfig(), devPrincipalId: OTHER_OWNER_ID } })
+    openApps.push(app, other)
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const register = (server: typeof app) => server.inject({ method: 'POST', url: '/v1/market-evidence', headers,
+      payload: { provider: 'polymarket', market: condition, follow: true } })
+    const first = await register(app)
+    expect(first.json()).toMatchObject({ status: 'identified', quoteAvailability: 'observed' })
+    const shared = first.json()
+    expect((await register(other)).json().marketId).toBe(shared.marketId)
+    const reference = await app.inject({ method: 'GET', url: '/v1/market-references?instruments=' + shared.outcomes[0].id, headers })
+    expect(reference.json().references[0]).toMatchObject({ asset: 'PUSD', availability: 'recent_reference' })
+    expect((await app.inject({ method: 'GET', url: '/v1/market-references?instruments=' + shared.outcomes[0].id,
+      headers: { ...headers, 'if-none-match': reference.headers.etag! } })).statusCode).toBe(304)
+    const backfill = () => app.inject({ method: 'POST', url: '/v1/market-references/history', headers, payload: {
+      instrumentId: shared.outcomes[0].id, from: '2026-01-01T00:00:00Z', through: '2026-01-04T00:00:00Z',
+    } })
+    expect((await backfill()).json()).toMatchObject({ cached: false, coverage: 'observations_only',
+      openingReference: { observedAt: '2025-12-31T00:00:00.000Z', price: '0.350000000000000000' },
+      observationRange: { earliestReturned: '2026-01-02T00:00:00.000Z', continuityEstablished: false },
+      observations: [{ method: 'historical_sample', observedAt: '2026-01-02T00:00:00.000Z' }] })
+    const requests = transport.mock.calls.length
+    expect((await backfill()).json()).toMatchObject({ cached: true })
+    expect(transport.mock.calls).toHaveLength(requests)
+    expect(await database.select().from(marketResearch)).toHaveLength(2)
+    expect(await database.select().from(marketInstrumentMappings)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ subscriptionToken: '333', asset: 'PUSD', generation: 'v2', instrumentId: shared.outcomes.find((row: { nativePosition: string }) => row.nativePosition === '111').id }),
+    ]))
+    expect((await app.inject({ method: 'DELETE', url: '/v1/market-evidence/' + shared.marketId + '/follow', headers })).statusCode).toBe(204)
+    expect(await database.select().from(marketResearch)).toHaveLength(1)
+    const collection = (await app.inject({ method: 'POST', url: '/v1/simulations', headers })).json().collection.id
+    const root = '/v1/simulations/' + collection + '/scenarios'
+    const source = { mode: 'scratch', asOf: new Date().toISOString(), asset: 'PUSD', catalog: [shared.outcomes[0].id],
+      buckets: [{ id: 'virtual', venue: 'polymarket', account: 'virtual', cash: '50' }] }
+    const preview = await app.inject({ method: 'POST', url: root + '/baseline', headers, payload: source })
+    expect(preview.statusCode, preview.body).toBe(200)
+    expect(preview.json().instruments[0].mark).not.toBeNull()
+    const saved = await app.inject({ method: 'POST', url: root, headers,
+      payload: { name: 'Independent', source, baselineToken: preview.json().baselineToken, input: {} } })
+    expect(saved.statusCode, saved.body).toBe(201)
+    expect((await other.inject({ method: 'GET', url: root + '/' + saved.json().id, headers })).statusCode).toBe(404)
+    expect((await app.inject({ method: 'GET', url: '/v1/portfolios', headers })).json().items.map((row: { id: string }) => row.id)).not.toContain(collection)
+    await database.delete(portfolios).where(eq(portfolios.id, PORTFOLIO_ID))
+    expect((await app.inject({ method: 'GET', url: root + '/' + saved.json().id, headers })).statusCode).toBe(200)
+  })
+
+  it('stores committed Kraken USDC/USD references and excludes the open candle', async () => {
+    const time = Math.floor(Date.now() / 1000 / 3600) * 3600
+    const candle = (at: number, rate: string) => [at, rate, rate, rate, rate, rate, '1', 4]
+    await refreshUsdc(database, new AbortController().signal, async (input) => {
+      expect(new URL(String(input)).searchParams.get('pair')).toBe('USDCUSD')
+      return Response.json({ error: [], result: { USDCUSD: [candle(time - 3600, '0.997'), candle(time, '1.025')], last: time } })
+    })
+    const app = await createTestApp()
+    const response = await app.inject({ method: 'GET', url: '/v1/fx/reference?base=USDC&currency=USD',
+      headers: { authorization: `Bearer ${TOKEN}` } })
+    expect(response.json()).toMatchObject({ rate: '0.997',
+      legs: [{ source: 'kraken_usdc_usd_ohlc', observedAt: new Date(time * 1000).toISOString() }] })
+  })
+
+  it('loads annual FX using selected observations and exact financial cutoffs', async () => {
+    await database.execute(sql`
+      insert into scevia.fx_references (base, quote, rate, source, methodology, observed_at, retrieved_at, revision)
+      select base, quote, rate, 'annual_fixture', methodology, clock, '2026-01-02'::timestamptz, base || quote || clock::text
+      from (values ('USDC', 'USD', 0.99, 'stablecoin_market_reference'), ('EUR', 'USD', 1.25, 'fiat_reference'),
+        ('GBP', 'MYR', 5.8, 'fiat_reference')) as pairs(base, quote, rate, methodology)
+      cross join generate_series('2025-01-01'::timestamptz, '2026-01-01'::timestamptz, '1 hour') as clock
+    `)
+    const from = '2025-01-01T04:30:00.000Z'
+    const through = '2026-01-01T00:00:00.000Z'
+    const flow = '2025-07-04T12:30:00.000Z'
+    const scope = { assets: ['USDC'], currency: 'EUR', cutoffs: [flow] }
+    const rows = await loadFx(database, from, through, { ...scope, mode: 'retrospective' })
+    expect(rows.length).toBeLessThan(740)
+    expect(rows.length).toBeGreaterThan(730)
+    expect(rows.some((row) => row.base === 'GBP')).toBe(false)
+    expect(selectRate(rows, 'USDC', 'EUR', from, { mode: 'retrospective' })).toMatchObject({ rate: '0.792',
+      legs: [expect.objectContaining({ observedAt: '2025-01-01T04:00:00.000Z' }), expect.anything()] })
+    expect(selectRate(rows, 'USDC', 'EUR', flow, { mode: 'retrospective' })).toMatchObject({
+      legs: [expect.objectContaining({ observedAt: '2025-07-04T12:00:00.000Z' }), expect.anything()] })
+    expect(await loadFx(database, from, through, scope)).toHaveLength(0)
+  })
+
+  it('qualifies exact Polygon pUSD quotes and falls back when a preferred source is missing', async () => {
+    const timestamp = Math.floor(Date.now() / 1000) - 10
+    const signal = new AbortController().signal
+    const payload = { usd: 0.97, usd_24h_vol: 20000, last_updated_at: timestamp }
+    await expect(refreshPusd(database, 'fixture', signal, async () => Response.json({ pusd: payload }))).rejects.toThrow()
+    await refreshPusd(database, 'fixture', signal, async (input) => {
+      const url = new URL(String(input))
+      expect(url.pathname).toBe('/api/v3/simple/token_price/polygon-pos')
+      expect(url.searchParams.get('contract_addresses')).toBe(polygonPusd)
+      return Response.json({ [polygonPusd]: payload })
+    })
+    const then = Date.parse('2025-01-01T00:00:00Z')
+    await archivePusd(database, 'fixture', signal, async (input) => {
+      expect(new URL(String(input)).pathname).toBe('/api/v3/coins/polygon-pos/contract/' + polygonPusd + '/market_chart')
+      return Response.json({ prices: [[then, 0.92], [then + 3_600_000, 0.5]], total_volumes: [[then, 5000]] })
+    })
+    const historical = '2025-01-01T04:00:00.000Z'
+    const scope = { assets: ['PUSD'], currency: 'USD', mode: 'retrospective' as const }
+    const archive = await loadFx(database, historical, historical, scope)
+    expect(selectRate(archive, 'PUSD', 'USD', historical, scope)).toMatchObject({ rate: '0.92',
+      legs: [{ source: 'coingecko_polygon_pusd_usd_daily', tokenIdentity: { contract: polygonPusd } }] })
+    expect(selectRate(archive, 'PUSD', 'USD', historical).rate).toBeNull()
+    const app = await createTestApp()
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const set = (stablecoinSource: string) => app.inject({ method: 'PUT', url: '/v1/preferences/reporting', headers,
+      payload: { currency: 'USD', stablecoinSource } })
+    expect((await set('different_source')).statusCode).toBe(422)
+    expect((await set('coingecko_polygon_pusd_usd_daily')).json()).toMatchObject({ stablecoinSource: 'coingecko_polygon_pusd_usd' })
+    expect((await set('kraken_usdc_usd_ohlc')).statusCode).toBe(200)
+    const read = await app.inject({ method: 'GET', url: '/v1/fx/reference?base=PUSD&currency=USD', headers })
+    expect(read.json()).toMatchObject({ rate: '0.97', fallback: true, legs: [{ source: 'coingecko_polygon_pusd_usd',
+      tokenIdentity: { chain: 'polygon-pos', contract: polygonPusd, quoteBasis: 'vendor_aggregated_fiat_usd' } }] })
+  })
+
+  it('uses late historical FX consistently for accounting history and consolidated performance', async () => {
+    const app = await createTestApp()
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const prefix = `/v1/portfolios/${PORTFOLIO_ID}`
+    const csv = [
+      'venue,account,id,timestamp,sequence,type,instrument,asset,quantity,price,amount,fee,fee_asset,coverage_through',
+      'import,annual,cash,2025-01-01T00:00:00Z,,opening_cash,,USD,,,100,,,',
+      'import,annual,inventory,2025-01-01T00:00:00Z,,opening_inventory,,USD,,,,,,',
+      'import,annual,history,2025-01-01T00:00:00Z,,history_complete,,USD,,,,,,2025-01-04T00:00:00Z',
+    ].join('\n')
+    const preview = await app.inject({ method: 'POST', url: prefix + '/imports/preview', headers, payload: { csv } })
+    expect(preview.statusCode, preview.body).toBe(200)
+    const { batchId, reviewRevision } = preview.json()
+    const confirmed = await app.inject({ method: 'POST', url: prefix + '/imports/' + batchId + '/confirm?reviewRevision=' + reviewRevision, headers })
+    expect(confirmed.statusCode, confirmed.body).toBe(200)
+    await storeReferences(database, [{ base: 'USD', quote: 'SGD', rate: '1.3', source: 'historical_fixture',
+      observedAt: '2025-01-01T01:00:00Z', retrievedAt: '2025-07-10T02:00:00Z', methodology: 'fiat_reference' }])
+    const history = await app.inject({ method: 'GET', url: prefix + '/accounting/history?currency=SGD&from=2025-01-01&through=2025-01-02', headers })
+    const query = new URLSearchParams({ currency: 'SGD', from: '2025-01-01T23:59:59.999Z', asOf: '2025-01-02T23:59:59.999Z' })
+    const analytics = await app.inject({ method: 'GET', url: prefix + '/analytics/reporting-performance?' + query, headers })
+    expect(history.statusCode, history.body).toBe(200)
+    expect(analytics.statusCode, analytics.body).toBe(200)
+    expect(history.json().points.at(-1).reporting.completeValue).toBe('130')
+    expect(analytics.json()).toMatchObject({ evidenceMode: 'retrospective', ending: { completeValue: '130' }, twr: '0' })
+    const strict = await app.inject({ method: 'GET', url: prefix + '/analytics/reporting-performance?' + query + '&evidenceMode=knowledge', headers })
+    expect(strict.json()).toMatchObject({ financialKnowledge: 'conservative_current_evidence_only', ending: { completeValue: null }, twr: null })
+    const single = () => app.inject({ method: 'GET', url: prefix + '/analytics/performance?' + query
+      + '&asset=USD&accounts=annual&evidenceMode=knowledge', headers })
+    expect((await single()).json()).toMatchObject({ error: { code: 'financial_knowledge_time_unavailable' } })
+
+    await database.update(financialImportBatches).set({ confirmedAt: new Date('2025-01-01T03:00:00Z') })
+      .where(eq(financialImportBatches.id, batchId))
+    const known = await single()
+    expect(known.statusCode, known.body).toBe(200)
+    const current = await app.inject({ method: 'GET', url: prefix + '/tracking/valuation', headers })
+    await database.insert(providerAccounts).values({ portfolioId: PORTFOLIO_ID, providerCode: 'polymarket', label: 'Unsynchronized',
+      kind: 'public_wallet', externalAccountId: '0x' + 'c'.repeat(40) })
+    const partial = await app.inject({ method: 'GET', url: prefix + '/tracking/valuation', headers })
+    expect(current.json().reporting).toMatchObject({ completeValue: '100' })
+    expect(partial.json().reporting).toMatchObject({ completeValue: null, knownSubtotal: '100', coverage: 'partial_or_unavailable' })
+    await database.insert(portfolioAccountingDecisions).values({ portfolioId: PORTFOLIO_ID,
+      recordKey: 'import:' + batchId + ':2', revision: 1, decision: { membership: 'excluded' } })
+    expect((await single()).json()).toMatchObject({ error: { code: 'financial_knowledge_time_unavailable' } })
+  })
+
+  it('loads daily FX once and keeps stablecoin assumptions, eligibility and fiat cross rates explicit', async () => {
+    const date = new Date().toISOString().slice(0, 10)
+    const ecb = async () => new Response(`<Cube time='${date}'><Cube currency='USD' rate='1.25'/><Cube currency='SGD' rate='1.5'/></Cube>`)
+    await refreshEcb(database, new AbortController().signal, ecb)
+    await refreshEcb(database, new AbortController().signal, ecb)
+    const { rows: [daily] } = await database.execute<{ count: number }>(sql`
+      select count(*)::int from scevia.fx_references where source = 'ecb_euro_reference'
+    `)
+    expect(daily?.count).toBe(2)
+    const now = new Date().toISOString()
+    await storeReferences(database, [{ base: 'USDC', quote: 'USD', rate: '0.98', source: 'approved_fixture',
+      methodology: 'stablecoin_market_reference', observedAt: now, retrievedAt: now }])
+    const app = await createTestApp()
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const rate = (base: string, currency: string, asOf?: string) => app.inject({ method: 'GET', headers,
+      url: '/v1/fx/reference?' + new URLSearchParams({ base, currency, ...(asOf ? { asOf } : {}) }) })
+    expect((await rate('USD', 'USD')).json()).toMatchObject({ rate: '1', availability: 'identity', legs: [] })
+    expect((await rate('USD', 'SGD')).json()).toMatchObject({ rate: '1.2', legs: [expect.any(Object), expect.any(Object)] })
+    expect((await rate('USDC', 'SGD')).json()).toMatchObject({ rate: '1.176' })
+    expect((await rate('PUSD', 'USD')).json()).toMatchObject({ availability: 'missing', rate: null })
+    expect((await rate('USDC', 'USD', new Date(Date.parse(now) - 1000).toISOString())).json())
+      .toMatchObject({ availability: 'missing', rate: null })
+    const preference = await app.inject({ method: 'PUT', url: '/v1/preferences/reporting', headers, payload: { currency: 'SGD' } })
+    expect(preference.json()).toMatchObject({ currency: 'SGD' })
+    const collection = (await app.inject({ method: 'POST', url: '/v1/simulations', headers })).json().collection.id
+    const root = '/v1/simulations/' + collection + '/scenarios'
+    const preview = await app.inject({ method: 'POST', url: root + '/baseline', headers, payload: {
+      mode: 'scratch', asOf: now, asset: 'USDC',
+      buckets: [{ id: 'virtual', venue: 'polymarket', account: 'virtual', cash: '100' }],
+    } })
+    expect(preview.json()).toMatchObject({ reportingBasis: { currency: 'SGD', reference: { rate: '1.176' } } })
+    const saved = await app.inject({ method: 'POST', url: root, headers, payload: { name: 'Frozen FX',
+      source: preview.json().baselineSource, baselineToken: preview.json().baselineToken, input: {} } })
+    expect(saved.statusCode, saved.body).toBe(201)
+    expect(saved.json().baseline.reportingBasis.reference.rate).toBe('1.176')
+    const usd = await app.inject({ method: 'POST', url: root + '/baseline', headers, payload: {
+      mode: 'scratch', asOf: now, asset: 'USD', buckets: [{ id: 'virtual', venue: 'kalshi', account: 'virtual', cash: '100' }],
+    } })
+    const bundle = { reportingCurrency: 'SGD', components: [usd, preview].map((item) => ({
+      baselineToken: item.json().baselineToken, input: {},
+    })) }
+    const evaluation = await app.inject({ method: 'POST', url: root + '/evaluate-denominations', headers, payload: bundle })
+    expect(evaluation.json()).toMatchObject({ reporting: { currency: 'SGD', endingValue: '237.6' },
+      fundingTransfers: false, jointSettlement: { status: 'unavailable' } })
+    const stored = await app.inject({ method: 'POST', url: root + '/denomination-scenarios', headers,
+      payload: { ...bundle, name: 'Frozen mixed', previewDigest: evaluation.json().previewDigest } })
+    expect(stored.statusCode, stored.body).toBe(201)
+    await app.inject({ method: 'PUT', url: '/v1/preferences/reporting', headers, payload: { currency: 'GBP' } })
+    const savedSingle = await app.inject({ method: 'GET', url: root + '/' + saved.json().id, headers })
+    expect(savedSingle.json()).toMatchObject({ baseline: { reportingBasis: { currency: 'SGD', reference: { rate: '1.176' } } } })
+    const read = await app.inject({ method: 'GET', url: root + '/denomination-scenarios/' + stored.json().id, headers })
+    expect(read.json()).toMatchObject({ result: { reporting: { currency: 'SGD', endingValue: '237.6' } } })
+
+  })
+
+  it('polls a shared market once and revalues owned mapped portfolios without synchronizing account history', async () => {
+    const [event] = await database.insert(events).values({ providerCode: 'kalshi', externalId: 'TRACK-EVENT', name: 'Tracking' }).returning()
+    const [market] = await database.insert(markets).values({ providerCode: 'kalshi', externalId: 'TRACK-MARKET',
+      eventId: event!.id, title: 'Tracking', settlementAssetCode: 'USD' }).returning()
+    const [leg] = await database.insert(instruments).values({ marketId: market!.id, externalId: 'TRACK-MARKET:yes',
+      outcomeName: 'Yes', outcomeType: 'yes', settlementAssetCode: 'USD' }).returning()
+    const app = await createTestApp()
+    const other = await buildApp({ database, config: { ...testConfig(), devPrincipalId: OTHER_OWNER_ID } })
+    openApps.push(other)
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const roots = ['/v1/portfolios/' + PORTFOLIO_ID, '/v1/portfolios/' + OTHER_PORTFOLIO_ID]
+    const setup = async (server: typeof app, root: string) => {
+      expect((await server.inject({ method: 'PUT', url: root + '/tracking/markets', headers, payload: { markets: [market!.id] } })).statusCode).toBe(200)
+      const csv = ['venue,account,id,timestamp,sequence,type,instrument,asset,quantity,price,amount,fee,fee_asset,coverage_through,canonical_instrument_id',
+        'kalshi,tracked,opening,2026-01-01T00:00:00Z,,opening_cash,,USD,,,100,,,,',
+        'kalshi,tracked,inventory,2026-01-01T00:00:00Z,,opening_inventory,,USD,,,,,,,',
+        `kalshi,tracked,buy,2026-01-02T00:00:00Z,,buy,${leg!.id},USD,10,0.4,,0,USD,,${leg!.id}`,
+      ].join('\n')
+      const response = await server.inject({ method: 'POST', url: root + '/imports/preview', headers, payload: { csv } })
+      expect(response.statusCode, response.body).toBe(200)
+      const batch = response.json()
+      expect((await server.inject({ method: 'POST', headers,
+        url: root + '/imports/' + batch.batchId + '/confirm?reviewRevision=' + batch.reviewRevision })).statusCode).toBe(200)
+    }
+    await setup(app, roots[0]!)
+    await setup(other, roots[1]!)
+    expect((await app.inject({ method: 'GET', url: roots[1] + '/tracking', headers })).statusCode).toBe(404)
+    for (const [index, server] of [app, other].entries()) {
+      const tracking = roots[index] + '/tracking'
+      expect((await server.inject({ method: 'POST', url: tracking + '/reconcile', headers })).statusCode).toBe(200)
+      expect((await server.inject({ method: 'PUT', url: tracking + '/markets', headers, payload: { markets: [] } })).statusCode).toBe(200)
+      expect((await server.inject({ method: 'GET', url: tracking, headers })).json()).toMatchObject({ markets: [],
+        holdingsMarkets: [{ marketId: market!.id }] })
+    }
+    let quoteAt = '2026-01-03T00:00:00.000Z'
+    let price = '0.6'
+    const lookup = vi.fn(async () => {
+      const item = kalshiMarketChoice({ ticker: 'TRACK-MARKET', event_ticker: 'TRACK-EVENT', title: 'Tracking',
+        status: 'active', market_type: 'binary', notional_value_dollars: '1' }, quoteAt)
+      return { ...item, outcomes: item.outcomes.map((outcome) => ({ ...outcome,
+        quote: { value: price, retrievedAt: quoteAt, observedAt: null, provenance: 'provider_book_midpoint' } })) }
+    })
+    const syncProviderAccount = vi.fn()
+    const workerOptions = { kalshi: { lookup }, accountIds: [], marketIntervalMs: 300_000, accountIntervalMs: 300_000,
+      ingestion: { syncProviderAccount } }
+    const worker = new TrackingWorker(database, workerOptions)
+    const restarted = new TrackingWorker(database, workerOptions)
+    const signal = new AbortController().signal
+    const due = () => database.update(marketTracking).set({ nextAttemptAt: new Date(0) })
+    await due()
+    expect((await Promise.all([worker.market(signal), restarted.market(signal)])).sort()).toEqual([false, true])
+    expect(lookup).toHaveBeenCalledTimes(1)
+    await due()
+    await worker.market(signal)
+    quoteAt = '2026-01-02T23:00:00.000Z'
+    price = '0.5'
+    await due()
+    await restarted.market(signal)
+    expect(await database.select().from(sharedMarketObservations)).toHaveLength(2)
+    for (const [index, server] of [app, other].entries()) {
+      const response = await server.inject({ method: 'GET', url: roots[index] + '/accounting?view=detail&asOf=2026-01-03T01:00:00Z', headers })
+      expect(response.statusCode, response.body).toBe(200)
+      expect(response.json().cash).toContainEqual(expect.objectContaining({ balance: '96', portfolioValue: '102' }))
+    }
+    expect(syncProviderAccount).not.toHaveBeenCalled()
+    lookup.mockRejectedValueOnce(new Error('fixture_outage'))
+    await due()
+    await restarted.market(signal)
+    const [job] = await database.select().from(marketTracking)
+    expect(job).toMatchObject({ failures: 1, leaseToken: null })
+    expect(await restarted.market(signal)).toBe(false)
+    await due()
+    await restarted.market(signal)
+    expect((await database.select().from(marketTracking))[0]?.failures).toBe(0)
+    const url = roots[0] + '/tracking/valuation'
+    const firstValue = await app.inject({ method: 'GET', url, headers })
+    expect(firstValue.statusCode, firstValue.body).toBe(200)
+    const firstRevision = firstValue.json()
+    const timed = performance.now()
+
+    const workspace = await app.inject({ method: 'GET', url: url + '?asset=USD', headers })
+    expect(workspace.statusCode, workspace.body).toBe(200)
+    expect(workspace.json()).toMatchObject({ financialRevision: firstRevision.financialRevision,
+      exposure: { reportedExposure: { portfolioNav: null } } })
+    if (process.env.TRACKING_BENCHMARK === 'YES') process.stdout.write(JSON.stringify({
+      fixtureWorkspaceMs: Math.round(performance.now() - timed),
+    }) + '\n')
+    const coherent304 = await app.inject({ method: 'GET', url: url + '?asset=USD',
+      headers: { ...headers, 'if-none-match': workspace.headers.etag! } })
+    expect(coherent304.statusCode).toBe(304)
+    const conditional = await app.inject({ method: 'GET', url, headers: { ...headers, 'if-none-match': firstValue.headers.etag! } })
+    expect(conditional.statusCode).toBe(304)
+    quoteAt = new Date().toISOString()
+    price = '0.7'
+    await due()
+    await restarted.market(signal)
+    const updated = (await app.inject({ method: 'GET', url, headers })).json()
+    expect(updated.financialRevision).toBe(firstRevision.financialRevision)
+    expect(updated.marketRevision).not.toBe(firstRevision.marketRevision)
+    expect(updated.cash).toContainEqual(expect.objectContaining({ portfolioValue: '103', balance: '96' }))
+    const fixtureRate = async (rate: string, offset: number) => {
+      const time = new Date(Date.now() - offset).toISOString()
+      await storeReferences(database, [{ base: 'USD', quote: 'SGD', rate, source: 'reference_fixture',
+        methodology: 'fiat_reference', observedAt: time, retrievedAt: time }])
+    }
+    await fixtureRate('1.2', 5000)
+    const convertedUrl = url + '?currency=SGD'
+    const firstFx = (await app.inject({ method: 'GET', url: convertedUrl, headers })).json()
+    expect(firstFx.reporting).toMatchObject({ completeValue: '123.6', fundsTransferable: false })
+    await fixtureRate('1.3', 1000)
+    const secondFx = (await app.inject({ method: 'GET', url: convertedUrl, headers })).json()
+    expect(secondFx).toMatchObject({ reporting: { completeValue: '133.9' }, financialRevision: firstFx.financialRevision,
+      marketRevision: firstFx.marketRevision, cash: firstFx.cash })
+    expect(secondFx.fxRevision).not.toBe(firstFx.fxRevision)
+    expect(secondFx.revision).not.toBe(firstFx.revision)
+
+    const replayed = (await app.inject({ method: 'GET', url: roots[0] + '/accounting?view=detail', headers })).json()
+    expect(updated.cash).toEqual(replayed.cash)
+    expect(updated.holdings).toEqual(replayed.holdings)
+    const open = (await app.inject({ method: 'GET', url: roots[0] + '/accounting/records', headers })).json()
+    const trade = open.items.find((row: { original: { id: string } }) => row.original.id === 'buy')
+    const changes = { changes: [{ key: trade.key, action: 'exclude' }] }
+    const proposal = await app.inject({ method: 'POST', url: roots[0] + '/accounting/adjustments/preview', headers, payload: changes })
+    expect(proposal.statusCode, proposal.body).toBe(200)
+    expect((await app.inject({ method: 'POST', url: roots[0] + '/accounting/adjustments/confirm', headers,
+      payload: { ...changes, revision: proposal.json().revision } })).statusCode).toBe(200)
+    const corrected = (await app.inject({ method: 'GET', url, headers })).json()
+    expect(corrected.financialRevision).not.toBe(updated.financialRevision)
+    expect(corrected.cash).toContainEqual(expect.objectContaining({ balance: '100' }))
+    expect((await app.inject({ method: 'POST', url: roots[0] + '/tracking/reconcile', headers })).statusCode).toBe(200)
+    expect((await app.inject({ method: 'GET', url: roots[0] + '/tracking', headers })).json().holdingsMarkets).toEqual([])
+    const storedAt = '2026-01-01T00:00:00Z'
+    await pool.query(`insert into scevia.shared_market_observations
+      (instrument_id, asset, method, price, retrieved_at, effective_at, source, revision)
+      select $1, 'USD', 'book_midpoint', 0.5, tick, tick, 'fixture', 'fixture:' || tick::text
+      from generate_series($2::timestamptz, '2026-04-01T00:00:00Z'::timestamptz, interval '5 minutes') tick`, [leg!.id, storedAt])
+    const batch = { batchId: 'fixture', row: 1, observation: { venue: 'kalshi', account: 'fixture', id: 'buy', asset: 'USD',
+      type: 'buy' as const, instrument: leg!.id, canonicalInstrumentId: leg!.id, timestamp: storedAt.replace('Z', '.000Z'),
+      sequence: null, quantity: '1', amount: null, fee: '0', feeAsset: 'USD', price: '0.4' } }
+    const flows = Array.from({ length: 42 }, (_, index) => ({ ...batch, row: 2 + index, observation: {
+      ...batch.observation, id: 'flow:' + index, type: 'deposit' as const,
+      timestamp: new Date(Date.UTC(2026, 2, 3 + Math.floor(index / 2), index % 2 ? 12 : 13, 3)).toISOString(),
+      instrument: null, amount: '1',
+    } }))
+    for (const [days, from] of [[30, '2026-03-02'], [90, '2026-01-01'], [180, '2025-10-03'], [365, '2025-04-01']] as const) {
+      const started = performance.now()
+      const history = await sharedTrackingEvidence(database, [batch, ...flows], '2026-04-01T00:00:00.000Z', from + 'T00:00:00.000Z')
+      if (process.env.TRACKING_BENCHMARK === 'YES') process.stdout.write(JSON.stringify({
+        fixtureObservations: 25921, days, projected: history.evidence.length, queryMs: Math.round(performance.now() - started),
+      }) + '\n')
+      expect(history.truncated).toBe(false)
+      expect(history.evidence.length).toBeLessThan(150)
+      const fullStart = performance.now()
+      const analytics = await other.inject({ method: 'GET', headers, url: roots[1] + '/analytics/performance?'
+        + new URLSearchParams({ asset: 'USD', accounts: 'tracked', from: from + 'T00:00:00Z', asOf: '2026-04-01T00:00:00Z' }) })
+      expect(analytics.statusCode, analytics.body).toBe(200)
+      if (process.env.TRACKING_BENCHMARK === 'YES') process.stdout.write(JSON.stringify({
+        fixtureAnalyticsDays: days, responseMs: Math.round(performance.now() - fullStart),
+      }) + '\n')
+      expect(history.evidence).toContainEqual(expect.objectContaining({ observation: expect.objectContaining({
+        timestamp: (from < '2026-01-01' ? '2026-01-01T23:55:00.000Z' : from + 'T00:00:00.000Z'),
+      }) }))
+    }
+
+  })
+
+  it('builds a scratch scenario in an empty workspace with independent virtual capital', async () => {
+    const [workspace] = await database.insert(portfolios).values({ ownerId: OWNER_ID, name: 'Empty user workspace' }).returning()
+    const app = await createTestApp()
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const root = '/v1/portfolios/' + workspace!.id + '/scenarios'
+    const preview = await app.inject({ method: 'POST', url: root + '/baseline', headers, payload: {
+      mode: 'scratch', asset: 'USD', asOf: '2026-01-01T00:00:00Z',
+      buckets: [{ id: 'virtual', account: 'virtual', venue: 'kalshi', cash: '50' }],
+      local: [{ id: 'local:test-outcome', mark: '0.4' }],
+    } })
+    expect(preview.statusCode, preview.body).toBe(200)
+    const evaluated = await app.inject({ method: 'POST', url: root + '/evaluate', headers, payload: {
+      baselineToken: preview.json().baselineToken, input: { operations: [{ bucket: 'virtual', instrument: 'local:test-outcome',
+        kind: 'buy', amount: '10', price: '0.4', fee: { mode: 'fixed', value: '0' } }] },
+    } })
+    expect(evaluated.statusCode, evaluated.body).toBe(200)
+    expect(evaluated.json()).toMatchObject({ funding: [{ endingCash: '46' }] })
+    expect(await database.select().from(providerAccounts).where(eq(providerAccounts.portfolioId, workspace!.id))).toEqual([])
+  })
+
+  it('keeps a healthy account-history interval separate from the retry ceiling', () => {
+    const now = new Date(0)
+    expect(nextTime(now, 4 * 3_600_000, 0, 0).getTime()).toBe(4 * 3_600_000)
+    expect(nextTime(now, 4 * 3_600_000, 1, 0.9).getTime()).toBe(3_600_000)
+  })
+
+  it('schedules only locally approved, enabled account sources and resumes an expired job lease', async () => {
+    const [first, foreign] = await database.insert(providerAccounts).values([
+      { portfolioId: PORTFOLIO_ID, providerCode: 'polymarket', kind: 'public_wallet', label: 'Approved', externalAccountId: 'wallet-a' },
+      { portfolioId: OTHER_PORTFOLIO_ID, providerCode: 'polymarket', kind: 'public_wallet', label: 'Other', externalAccountId: 'wallet-b' },
+    ]).returning()
+    expect(await initializeTrackedAccounts(database, OWNER_ID, [first!.id, foreign!.id], true)).toEqual([first!.id])
+    const syncProviderAccount = vi.fn(async () => ({ status: 'complete' as const, providerAccountId: first!.id,
+      streams: [], startedAt: new Date().toISOString(), finishedAt: new Date().toISOString() }))
+    const opts = { accountIds: [first!.id], marketIntervalMs: 300_000, accountIntervalMs: 300_000, ingestion: { syncProviderAccount } }
+    const signal = new AbortController().signal
+    const worker = new TrackingWorker(database, opts)
+    await database.update(accountTracking).set({ nextAttemptAt: new Date(0), leaseUntil: new Date(1) })
+    expect(await worker.account(signal)).toBe(true)
+    expect(await new TrackingWorker(database, opts).account(signal)).toBe(true)
+    expect(syncProviderAccount.mock.calls).toEqual([[first!.id, 'current'], [first!.id, 'history']])
+    await database.update(providerAccounts).set({ disabledAt: new Date() }).where(eq(providerAccounts.id, first!.id))
+    await database.update(accountTracking).set({ nextAttemptAt: new Date(0) })
+    expect(await worker.account(signal)).toBe(false)
+  })
+
+  it('settles an owned captured demo from shared verified lifecycle evidence', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'scevia-tracked-demo-'))
+    try {
+      const path = join(directory, 'fixture-capture.json')
+      const capturedAt = '2026-01-03T00:00:00.000Z'
+      const tradeAt = '2026-01-02T00:00:00.000Z'
+      const closedAt = '2026-01-04T00:00:00.000Z'
+      const resolvedAt = '2026-01-05T00:00:00.000Z'
+      const verifiedAt = '2026-01-06T00:00:00.000Z'
+      const market = { provider: 'kalshi', asset: 'USD', nativeMarket: 'FIXTURE-TRACK', nativeEvent: 'FIXTURE-EVENT',
+        title: 'Fixture tracked market', eventTitle: 'Fixture event', category: null, lifecycle: 'open', resolvesAt: null,
+        retrievedAt: capturedAt, source: 'authorized_capture',
+        outcomes: [{ instrument: 'FIXTURE-TRACK:yes', name: 'YES' }, { instrument: 'FIXTURE-TRACK:no', name: 'NO' }] }
+      await writeFile(path, JSON.stringify({ evidenceKind: 'authorized_capture', capturedAt, markets: [market, { ...market, nativeMarket: 'FIXTURE-STALE',
+        outcomes: [{ instrument: 'FIXTURE-STALE:yes', name: 'YES' }, { instrument: 'FIXTURE-STALE:no', name: 'NO' }] }],
+        capital: [{ provider: 'kalshi', asset: 'USD', amount: '100', openedAt: '2026-01-01T00:00:00.000Z' }],
+        quotes: [{ provider: 'kalshi', nativeMarket: market.nativeMarket, instrument: 'FIXTURE-TRACK:yes', price: '0.4',
+          method: 'historical_close', source: 'authorized_capture', observedAt: tradeAt, retrievedAt: capturedAt },
+        { provider: 'kalshi', nativeMarket: 'FIXTURE-STALE', instrument: 'FIXTURE-STALE:yes', price: '0.4',
+          method: 'historical_close', source: 'authorized_capture', observedAt: tradeAt, retrievedAt: capturedAt }],
+        trades: [{ id: 'buy', quoteIndex: 0, quantity: '10', direction: 'buy', assumedFee: '0' }, { id: 'stale', quoteIndex: 1, quantity: '5', direction: 'buy', assumedFee: '0' }],
+      }))
+      const app = await buildApp({ database, config: { ...testConfig(), demoDataset: { path, cacheMs: 1000, allowFixture: true } } })
+      openApps.push(app)
+      const headers = { authorization: `Bearer ${TOKEN}` }
+      const created = await app.inject({ method: 'POST', url: '/v1/demo', headers, payload: {} })
+      expect(created.statusCode, created.body).toBe(200)
+      const root = '/v1/portfolios/' + created.json().portfolioId
+      expect((await app.inject({ method: 'POST', url: root + '/tracking/reconcile', headers })).statusCode).toBe(200)
+      expect((await app.inject({ method: 'GET', url: root + '/tracking', headers })).json().holdingsMarkets)
+        .toContainEqual(expect.objectContaining({ nativeMarket: market.nativeMarket }))
+      const lookup = vi.fn().mockResolvedValueOnce({ marketTicker: market.nativeMarket, eventTicker: market.nativeEvent,
+        establishedPayoutUnit: '1', lifecycle: 'closed', retrievedAt: closedAt, resolution: null })
+        .mockResolvedValueOnce({ marketTicker: market.nativeMarket, eventTicker: market.nativeEvent,
+          establishedPayoutUnit: '1', lifecycle: 'resolved', retrievedAt: resolvedAt, resolution: null })
+        .mockResolvedValueOnce({ marketTicker: market.nativeMarket, eventTicker: market.nativeEvent,
+          establishedPayoutUnit: '1', lifecycle: 'resolved', retrievedAt: verifiedAt,
+          resolution: { knownAt: resolvedAt, winningInstrument: 'FIXTURE-TRACK:yes', unitPayout: '1' } })
+      const worker = new TrackingWorker(database, { kalshi: { lookup }, accountIds: [], marketIntervalMs: 300_000, accountIntervalMs: 300_000,
+        ingestion: { syncProviderAccount: vi.fn() } })
+      const [watched] = await database.select({ id: markets.id }).from(markets)
+        .where(eq(markets.externalId, market.nativeMarket))
+      await database.update(marketTracking).set({ nextAttemptAt: new Date('2099-01-01T00:00:00Z') })
+      const poll = async () => {
+        await database.update(marketTracking).set({ nextAttemptAt: new Date(0) }).where(eq(marketTracking.marketId, watched!.id))
+        expect(await worker.market(new AbortController().signal)).toBe(true)
+      }
+      const state = async (asOf: string) => (await app.inject({ method: 'GET', url: root + '/accounting?view=detail&asOf=' + asOf, headers })).json()
+      await poll()
+      expect((await state(closedAt)).cash[0].balance).toBe('94')
+      await poll()
+      expect((await state(resolvedAt)).cash[0]).toMatchObject({ balance: null, historyCoverage: 'outside_declared_interval' })
+      await poll()
+      expect((await state(resolvedAt)).cash[0]).toMatchObject({ balance: null, historyCoverage: 'outside_declared_interval' })
+      expect((await state(verifiedAt)).cash[0]).toMatchObject({ balance: '104', realized: '6', historyCoverage: 'outside_declared_interval' })
+      const journal = await database.select().from(marketLifecycleEvidence).where(eq(marketLifecycleEvidence.marketId, watched!.id))
+      expect(journal).toHaveLength(3)
+      const demo = (await app.inject({ method: 'GET', url: '/v1/demo', headers })).json()
+      expect(demo.trackingCoverage).toEqual(expect.arrayContaining([
+        expect.objectContaining({ nativeMarket: 'FIXTURE-TRACK', lifecycleThrough: verifiedAt, resolutionObservedAt: verifiedAt }),
+        expect.objectContaining({ nativeMarket: 'FIXTURE-STALE', lifecycleThrough: capturedAt, resolutionStatus: 'pending' }),
+      ]))
+      await database.insert(marketLifecycleEvidence).values({ marketId: watched!.id, revision: 'manual-fixture-conflict',
+        lifecycle: 'resolved', retrievedAt: new Date('2026-01-07T00:00:00Z'), conflict: true,
+        resolution: { knownAt: verifiedAt, winningInstrument: 'FIXTURE-TRACK:no', unitPayout: '1' } })
+      expect((await app.inject({ method: 'GET', url: '/v1/demo', headers })).json().trackingCoverage)
+        .toContainEqual(expect.objectContaining({ nativeMarket: 'FIXTURE-TRACK', resolutionStatus: 'conflict' }))
+      expect((await state(closedAt)).cash[0].balance).toBe('94')
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
   it('replays a versioned demo capture and isolates user corrections, scenarios and resets', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'scevia-demo-'))
     try {
@@ -484,6 +1009,15 @@ describe('migrations and canonical persistence', () => {
         return Object.fromEntries(data.map((row) => [row.id.split(':').at(-1), Number(row.quantity)]))
       }
       expect(await currentLegs()).toEqual({ yes: 0, no: 2.5 })
+      const held = (await database.select().from(positionSnapshots).where(eq(positionSnapshots.providerAccountId, account!.id)))
+        .find((row) => Number(row.quantity) === 2.5)!
+      const mark = new Date(Date.now() + 1000)
+      await database.insert(sharedMarketObservations).values({ instrumentId: held.instrumentId, asset: 'USD', method: 'book_midpoint',
+        price: '0.8', effectiveAt: mark, retrievedAt: mark, source: 'kalshi_book', revision: 'shared-reported' })
+      const repriced = await app.inject({ method: 'GET',
+        url: '/v1/portfolios/' + PORTFOLIO_ID + '/analytics/exposure?asset=USD&venue=kalshi&asOf=' + encodeURIComponent(mark.toISOString()), headers })
+      expect(repriced.json().reportedExposure).toMatchObject({ knownPositionSubtotal: '2', portfolioNav: null })
+
       const prior = revision
       revision = new Date(Date.parse(revision) + 1000).toISOString()
       quantity = '3'

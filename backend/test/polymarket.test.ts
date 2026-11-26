@@ -1,3 +1,5 @@
+import { streamBook } from '../src/tracking/polymarket-stream.js'
+import { indexedCandidates, proposeReceiptLinks } from '../src/providers/polymarket/receipt-review.js'
 import { PolymarketCollateralReader, polygonPusd } from '../src/providers/polymarket/collateral.js'
 import { describe, expect, it } from 'vitest'
 import { PolymarketAdapter } from '../src/providers/polymarket/adapter.js'
@@ -306,6 +308,30 @@ describe('Polymarket provider adapter', () => {
 })
 
 describe('Polymarket public market data', () => {
+  it('uses exact condition, exchange token and position identities for a tracked midpoint', async () => {
+    const conditionId = '0x' + 'a'.repeat(64)
+    const requests: URL[] = []
+    let closed = false
+    const source = new PolymarketMarketDataService(new PolymarketHttpClient(async (input, init) => {
+      const url = new URL(String(input))
+      requests.push(url)
+      if (url.pathname === '/markets') {
+        expect(url.searchParams.get('condition_ids')).toBe(conditionId)
+        expect(url.searchParams.get('closed')).toBe('any')
+        return Response.json([{ conditionId, active: !closed, closed, version: 'v2',
+          clobTokenIds: ['1234', '5678'], positionIds: ['9876', '5432'] }])
+      }
+      expect(JSON.parse(String(init?.body))).toEqual([{ token_id: '1234' }, { token_id: '5678' }])
+      return Response.json({ 1234: '0.65', 5678: '0.35' })
+    }))
+    const signal = new AbortController().signal
+    expect(await source.trackingSnapshot(conditionId, signal)).toMatchObject({ lifecycle: 'open',
+      quotes: [{ id: '9876', asset: 'PUSD', price: '0.65' }, { id: '5432', asset: 'PUSD', price: '0.35' }] })
+    closed = true
+    expect(await source.trackingSnapshot(conditionId, signal)).toEqual({ lifecycle: 'closed', quotes: [] })
+    expect(requests).toHaveLength(3)
+  })
+
   it('searches events, preserves multi-outcome identities and distinguishes missing batch prices', async () => {
     const calls: Array<{ url: URL; init: RequestInit | undefined }> = []
     const marketRows = Array.from({ length: 50 }, (_, marketIndex) => ({
@@ -418,5 +444,72 @@ describe('Polymarket public market data', () => {
       throw new TypeError('redirect rejected')
     })
     await expect(redirectingClient.getData('positions', new URLSearchParams())).rejects.toMatchObject({ code: 'polymarket_upstream_unavailable' })
+  })
+})
+
+describe('standard Polygon resolution and stream contracts', () => {
+  it('requires exact standard CTF position identities and a finalized binary unit payout', async () => {
+    const condition = '0x' + 'a'.repeat(64)
+    const hash = '0x' + 'b'.repeat(64)
+    const word = (value: number) => '0x' + value.toString(16).padStart(64, '0')
+    let mode = 'binary'
+    const reader = new PolymarketCollateralReader(new URL('https://fixture.invalid'), async (_url, init) => {
+      const request = JSON.parse(String(init?.body))
+      let result: unknown
+      if (request.method === 'eth_chainId') result = '0x89'
+      else if (request.method === 'eth_getBlockByNumber') result = { hash, number: '0x100', timestamp: '0x6955b900' }
+      else {
+        expect(request.params[1]).toEqual({ blockHash: hash, requireCanonical: true })
+        const data = request.params[0].data as string
+        const index = Number.parseInt(data.slice(-2), 16)
+        switch (data.slice(2, 10)) {
+          case 'd42dc0c2': result = word(2); break
+          case 'dd34de67': result = word(2); break
+          case '0504c814': result = word(mode === 'binary' ? index === 0 ? 0 : 2 : 1); break
+          case '856296f7': result = word(index); break
+          case '39dd7530': result = word(100 + index); break
+          default: throw new Error('unexpected read')
+        }
+      }
+      return jsonResponse({ jsonrpc: '2.0', id: 1, result })
+    })
+    expect(await reader.standardCtfResolution(condition, ['101', '102'], NO_ABORT)).toMatchObject({
+      source: 'polygon_ctf', winningInstrument: '102', unitPayout: '1', finalizedBlockHash: hash, settlementTime: null,
+    })
+    expect(await reader.standardCtfResolution(condition, ['102', '101'], NO_ABORT)).toBeNull()
+    mode = 'nonstandard'
+    expect(await reader.standardCtfResolution(condition, ['101', '102'], NO_ABORT)).toBeNull()
+  })
+
+  it('accepts only scoped and timely two-sided stream frames', () => {
+    const now = new Date('2026-01-02T00:00:00Z')
+    const tokens = new Map([['123', { id: 'instrument', token: '123', market: 'condition' }]])
+    const quote = { asset_id: '123', market: 'condition', timestamp: String(now.getTime()),
+      event_type: 'book', bids: [{ price: '0.3' }, { price: '0.5' }], asks: [{ price: '0.7' }] }
+    expect(streamBook(quote, tokens, now)).toMatchObject({ price: '0.6', instrumentId: 'instrument', observedAt: now })
+    expect(streamBook({ ...quote, market: 'other' }, tokens, now)).toBeNull()
+    expect(streamBook({ ...quote, timestamp: String(now.getTime() - 121_000) }, tokens, now)).toBeNull()
+  })
+
+  it('deduplicates indexed evidence without conflating fills in the same transaction', () => {
+    const start = new Date('2026-01-01T00:00:00Z')
+    const end = new Date('2026-01-02T00:00:00Z')
+    const row = { chainId: 137, exchange: '0xe111180000d2663c0091e4f400237545b87b996b', wallet: '0x' + '3'.repeat(40),
+      transactionHash: '0x' + '4'.repeat(64), logIndex: 2, occurredAt: start.toISOString(), provider: 'fixture' }
+    expect(indexedCandidates([row, row, { ...row, logIndex: 3 }], row.wallet, start, end).map((entry) => entry.logIndex)).toEqual([2, 3])
+    expect(() => indexedCandidates([row], '0x' + '9'.repeat(40), start, end)).toThrow('indexed_candidate_outside_approved_account_window')
+    expect(() => indexedCandidates([row, { ...row, occurredAt: end.toISOString() }], row.wallet, start, end))
+      .toThrow('indexed_candidate_timestamp_conflict')
+  })
+
+  it('leaves identical multiple executions unresolved during native receipt review', () => {
+    const result = { fills: [{ id: '137:exchange:tx:1', exchange: 'exchange', logIndex: '1', instrument: '123',
+      side: 'buy', grossCollateral: '2', quantity: '5', asset: 'PUSD' }] } as unknown as
+      Awaited<ReturnType<PolymarketCollateralReader['transferEvidence']>>
+    const row = { id: 'source', instrument: '123', side: 'BUY', quantity: '5', price: '0.4', asset: 'PUSD' }
+    expect(proposeReceiptLinks(result, [row])).toMatchObject([{ sourceRecordId: 'source', status: 'exact_review_candidate' }])
+    expect(proposeReceiptLinks(result, [{ ...row, asset: 'USDC' }])).toMatchObject([{ status: 'unresolved' }])
+    expect(proposeReceiptLinks({ ...result, fills: [...result.fills, { ...result.fills[0]!, id: '137:exchange:tx:2', logIndex: '2' }] }, [row]))
+      .toMatchObject([{ status: 'unresolved' }, { status: 'unresolved' }])
   })
 })

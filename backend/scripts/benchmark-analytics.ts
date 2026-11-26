@@ -1,3 +1,4 @@
+import { consolidatePerformance } from '../src/fx/consolidated.js'
 import { analyzePerformance } from '../src/analytics/performance.js'
 import { applyDecisions, recordKey } from '../src/accounting/decisions.js'
 import type { Evidence, FinancialObservation, PortfolioDecision } from '../src/accounting/model.js'
@@ -42,3 +43,22 @@ console.log(JSON.stringify({ horizon, sourceRows: rows.length, effectiveRowsThro
   accountInstrumentCount: 180, valuationPoints: result.history.length, cashFlowBoundaries: result.cashFlowBoundaries.length,
   ...result.work, elapsedMs: Math.round(performance.now() - start), rssDeltaMiB: Math.round((process.memoryUsage().rss - initialRss) / 2 ** 20),
   closingValue: result.ending.value, twrAvailable: result.returns.twr.value !== null }))
+
+if (process.argv.includes('--reporting')) {
+  const mixed = effective.concat(effective.map((row) => ({ ...row, observation: { ...row.observation,
+    id: 'usdc:' + row.observation.id, account: 'usdc:' + row.observation.account, asset: 'USDC',
+    feeAsset: row.observation.feeAsset === 'USD' ? 'USDC' : row.observation.feeAsset } })))
+  const rates = Array.from({ length: horizon + 3 }, (_, index) => {
+    const time = new Date(date(index))
+    return [{ revision: 'usdc-' + index, base: 'USDC', quote: 'USD', rate: index % 2 ? '0.999' : '0.995',
+      source: 'fixture', methodology: 'stablecoin_market_reference', observedAt: time, retrievedAt: time },
+    { revision: 'sgd-' + index, base: 'USD', quote: 'SGD', rate: '1.3', source: 'fixture',
+      methodology: 'fiat_reference', observedAt: time, retrievedAt: time }]
+  }).flat()
+  const begin = performance.now()
+  const reporting = consolidatePerformance(mixed, rates, ['USD', 'USDC'], 'SGD', date(1, 2), end, 'retrospective')
+  console.log(JSON.stringify({ horizon, evidenceRows: mixed.length, accountInstrumentCount: 360,
+    valuationPoints: reporting.history.length, cashFlowBoundaries: reporting.cashFlowBoundaries.length,
+    elapsedMs: Math.round(performance.now() - begin), closingValue: reporting.ending?.completeValue,
+    twrAvailable: reporting.twr !== null }))
+}

@@ -65,6 +65,9 @@ export const relationshipReviewEnum = scevia.enum('relationship_review', [
 export const users = scevia.table('users', {
   id: uuid('id').defaultRandom().primaryKey(),
   authSubject: text('auth_subject').notNull().unique(),
+  reportingCurrency: text('reporting_currency').default('USD').notNull(),
+  fiatReferenceSource: text('fiat_reference_source'),
+  stablecoinReferenceSource: text('stablecoin_reference_source'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 })
 
@@ -74,10 +77,12 @@ export const portfolios = scevia.table(
     id: uuid('id').defaultRandom().primaryKey(),
     ownerId: uuid('owner_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
     name: text('name').notNull(),
+    simulationOnly: boolean('simulation_only').default(false).notNull(),
     demo: jsonb('demo').$type<{ revision: string; catalogRevision?: string; marketRetrievedAt?: Record<string, string>; dataset: import('../demo/dataset.js').DemoDataset; priorMarkets?: import('../demo/dataset.js').DemoDataset['markets'] }>(),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
-  (table) => [index('portfolios_owner_id_idx').on(table.ownerId)],
+  (table) => [index('portfolios_owner_id_idx').on(table.ownerId),
+    uniqueIndex('simulation_collection_owner_unique').on(table.ownerId).where(sql`${table.simulationOnly}`)],
 )
 
 export const providerAccounts = scevia.table(
@@ -624,3 +629,139 @@ export const portfolioScenarioBundles = scevia.table('portfolio_scenario_bundles
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [index('portfolio_scenario_bundles_portfolio_idx').on(table.portfolioId)])
+
+export type TrackedResolution = {
+  knownAt: string
+  winningInstrument: string
+  unitPayout: '1'
+  source?: 'kalshi_trade_api' | 'polygon_ctf'
+  finalizedBlockHash?: string
+  finalizedBlockAt?: string
+  settlementTime?: string | null
+}
+
+export const marketLifecycleEvidence = scevia.table('market_lifecycle_evidence', {
+  marketId: uuid('market_id').notNull().references(() => markets.id, { onDelete: 'cascade' }),
+  revision: text('revision').primaryKey(),
+  retrievedAt: timestamp('retrieved_at', { withTimezone: true }).notNull(),
+  lifecycle: text('lifecycle').notNull(),
+  tradingOpensAt: timestamp('trading_opens_at', { withTimezone: true }),
+  tradingClosesAt: timestamp('trading_closes_at', { withTimezone: true }),
+  expectedResolutionAt: timestamp('expected_resolution_at', { withTimezone: true }),
+  resolution: jsonb('resolution').$type<TrackedResolution>(),
+  conflict: boolean('conflict').default(false).notNull(),
+}, (table) => [index('market_lifecycle_cutoff_idx').on(table.marketId, table.retrievedAt)])
+
+export const marketTracking = scevia.table('market_tracking', {
+  marketId: uuid('market_id').primaryKey().references(() => markets.id, { onDelete: 'cascade' }),
+  nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).defaultNow().notNull(),
+  leaseUntil: timestamp('lease_until', { withTimezone: true }),
+  leaseToken: uuid('lease_token'),
+  lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true }),
+  lastSuccessAt: timestamp('last_success_at', { withTimezone: true }),
+  failures: integer('failures').default(0).notNull(),
+  lifecycle: text('lifecycle'),
+  closedAt: timestamp('closed_at', { withTimezone: true }),
+  lifecycleAt: timestamp('lifecycle_at', { withTimezone: true }),
+  metadataAt: timestamp('metadata_at', { withTimezone: true }),
+  quoteAt: timestamp('quote_at', { withTimezone: true }),
+  quoteStatus: text('quote_status'),
+  resolution: jsonb('resolution').$type<TrackedResolution>(),
+}, (table) => [index('market_tracking_due_idx').on(table.nextAttemptAt)])
+
+export const marketWatches = scevia.table('market_watches', {
+  portfolioId: uuid('portfolio_id').notNull().references(() => portfolios.id, { onDelete: 'cascade' }),
+  marketId: uuid('market_id').notNull().references(() => marketTracking.marketId, { onDelete: 'cascade' }),
+}, (table) => [
+  uniqueIndex('market_watches_portfolio_market_unique').on(table.portfolioId, table.marketId),
+  index('market_watches_market_idx').on(table.marketId),
+])
+
+export const automaticMarketWatches = scevia.table('automatic_market_watches', {
+  portfolioId: uuid('portfolio_id').notNull().references(() => portfolios.id, { onDelete: 'cascade' }),
+  marketId: uuid('market_id').notNull().references(() => marketTracking.marketId, { onDelete: 'cascade' }),
+}, (table) => [
+  uniqueIndex('automatic_market_watches_portfolio_market_unique').on(table.portfolioId, table.marketId),
+  index('automatic_market_watches_market_idx').on(table.marketId),
+])
+
+export const sharedMarketObservations = scevia.table('shared_market_observations', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  instrumentId: uuid('instrument_id').notNull().references(() => instruments.id, { onDelete: 'cascade' }),
+  asset: text('asset').notNull(),
+  method: text('method').notNull(),
+  price: numeric('price', { precision: 38, scale: 18 }).notNull(),
+  observedAt: timestamp('observed_at', { withTimezone: true }),
+  retrievedAt: timestamp('retrieved_at', { withTimezone: true }).notNull(),
+  effectiveAt: timestamp('effective_at', { withTimezone: true }).notNull(),
+  source: text('source').notNull(),
+  revision: text('revision').notNull(),
+}, (table) => [
+  uniqueIndex('shared_market_observations_revision_unique').on(table.revision),
+  index('shared_market_observations_retention_idx').on(table.retrievedAt, table.id),
+  index('shared_market_observations_lookup_idx').on(table.instrumentId, table.asset, table.effectiveAt),
+  check('shared_market_observations_binary_price', sql`${table.price} >= 0 and ${table.price} <= 1`),
+])
+
+export const accountTracking = scevia.table('account_tracking', {
+  accountId: uuid('account_id').notNull().references(() => providerAccounts.id, { onDelete: 'cascade' }),
+  scope: text('scope').notNull(),
+  nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).defaultNow().notNull(),
+  leaseUntil: timestamp('lease_until', { withTimezone: true }),
+  leaseToken: uuid('lease_token'),
+  lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true }),
+  lastSuccessAt: timestamp('last_success_at', { withTimezone: true }),
+  failures: integer('failures').default(0).notNull(),
+}, (table) => [
+  uniqueIndex('account_tracking_source_scope_unique').on(table.accountId, table.scope),
+  index('account_tracking_due_idx').on(table.nextAttemptAt),
+])
+
+export const polymarketReceiptReviews = scevia.table('polymarket_receipt_reviews', {
+  accountId: uuid('account_id').notNull().references(() => providerAccounts.id, { onDelete: 'cascade' }),
+  transactionHash: text('transaction_hash').notNull(),
+  evidence: jsonb('evidence').$type<Awaited<ReturnType<import('../providers/polymarket/collateral.js').PolymarketCollateralReader['transferEvidence']>>>().notNull(),
+  retrievedAt: timestamp('retrieved_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [uniqueIndex('polymarket_receipt_reviews_scope_unique').on(table.accountId, table.transactionHash)])
+
+export const marketResearch = scevia.table('market_research', {
+  ownerId: uuid('owner_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  marketId: uuid('market_id').notNull().references(() => marketTracking.marketId, { onDelete: 'cascade' }),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+}, (table) => [
+  uniqueIndex('market_research_owner_market_unique').on(table.ownerId, table.marketId),
+  index('market_research_active_idx').on(table.marketId, table.expiresAt),
+])
+
+export const marketInstrumentMappings = scevia.table('market_instrument_mappings', {
+  instrumentId: uuid('instrument_id').primaryKey().references(() => instruments.id, { onDelete: 'cascade' }),
+  provider: text('provider').notNull(),
+  generation: text('generation').notNull(),
+  subscriptionToken: text('subscription_token').notNull(),
+  asset: text('asset').notNull(),
+  retrievedAt: timestamp('retrieved_at', { withTimezone: true }).notNull(),
+  provenance: text('provenance').notNull(),
+})
+
+export const fxReferences = scevia.table('fx_references', {
+  revision: text('revision').primaryKey(),
+  base: text('base').notNull(),
+  quote: text('quote').notNull(),
+  rate: numeric('rate', { precision: 38, scale: 18 }).notNull(),
+  source: text('source').notNull(),
+  methodology: text('methodology').notNull(),
+  tokenIdentity: jsonb('token_identity').$type<{ chain: string; contract: string; quoteBasis: string }>(),
+  publishedAt: timestamp('published_at', { withTimezone: true }),
+  observedAt: timestamp('observed_at', { withTimezone: true }).notNull(),
+  retrievedAt: timestamp('retrieved_at', { withTimezone: true }).notNull(),
+}, (table) => [index('fx_references_pair_idx').on(table.base, table.quote, table.observedAt),
+  index('fx_references_retention_idx').on(table.retrievedAt),
+  index('fx_references_selection_idx').on(table.base, table.quote, table.source, table.methodology, table.observedAt),
+  check('fx_references_positive', sql`${table.rate} > 0`)])
+
+export const marketHistoryWindows = scevia.table('market_history_windows', {
+  revision: text('revision').primaryKey(),
+  instrumentId: uuid('instrument_id').notNull().references(() => instruments.id, { onDelete: 'cascade' }),
+  retrievedAt: timestamp('retrieved_at', { withTimezone: true }).notNull(),
+  nextCursor: text('next_cursor'),
+}, (table) => [index('market_history_windows_retrieval_idx').on(table.retrievedAt)])
