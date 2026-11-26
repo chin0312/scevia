@@ -1,4 +1,5 @@
-import { proposeReceiptLinks } from '../src/providers/polymarket/receipt-review.js'
+import { open } from 'node:fs/promises'
+import { indexedCandidates, proposeReceiptLinks } from '../src/providers/polymarket/receipt-review.js'
 import { and, asc, eq, gte, inArray, isNull, lte, sql } from 'drizzle-orm'
 import { z } from 'zod'
 import { loadConfig } from '../src/config.js'
@@ -6,8 +7,8 @@ import { createDatabase } from '../src/db/client.js'
 import { fills, instruments, portfolios, polymarketReceiptReviews, providerAccounts, providerActivityFacts, sourceRecords } from '../src/db/schema.js'
 import { PolymarketCollateralReader } from '../src/providers/polymarket/collateral.js'
 
-const [, , accountId, from, through] = process.argv
-const scope = z.tuple([z.uuid(), z.iso.datetime({ offset: true }), z.iso.datetime({ offset: true })]).parse([accountId, from, through])
+const [, , accountId, from, through, candidatePath] = process.argv
+const scope = z.tuple([z.uuid(), z.iso.datetime({ offset: true }), z.iso.datetime({ offset: true })]).parse([accountId, from, through, candidatePath])
 const start = new Date(scope[1])
 const end = new Date(scope[2])
 if (end <= start || end.getTime() - start.getTime() > 7 * 86_400_000) throw new Error('Select an approved window of up to seven days')
@@ -23,6 +24,25 @@ try {
       eq(providerAccounts.providerCode, 'polymarket'), eq(providerAccounts.kind, 'public_wallet'), isNull(providerAccounts.disabledAt), isNull(portfolios.demo)))
     .limit(1)
   if (!account) throw new Error('Select an enabled, owned Polymarket wallet')
+  const indexed = new Map<string, ReturnType<typeof indexedCandidates>>()
+  if (candidatePath) {
+    const file = await open(candidatePath, 'r')
+    try {
+      const buffer = Buffer.alloc(512_001)
+      let bytes = 0
+      while (bytes < buffer.length) {
+        const result = await file.read(buffer, bytes, buffer.length - bytes)
+        if (result.bytesRead === 0) break
+        bytes += result.bytesRead
+      }
+      if (bytes === buffer.length) throw new Error('indexed_candidate_file_limit')
+      for (const row of indexedCandidates(JSON.parse(buffer.toString('utf8', 0, bytes)), account.wallet, start, end)) {
+        const group = indexed.get(row.transactionHash) ?? []
+        group.push(row)
+        indexed.set(row.transactionHash, group)
+      }
+    } finally { await file.close() }
+  }
   const hash = sql<string | null>`lower(${sourceRecords.payload}->>'transaction_hash')`
   const trades = await database.select({ hash, id: fills.sourceRecordId, instrument: instruments.externalId, side: fills.direction,
     quantity: fills.quantity, price: fills.price, asset: fills.settlementAssetCode }).from(fills)
@@ -44,6 +64,9 @@ try {
     ids.add(row.id)
     candidates.set(key, ids)
   }
+  for (const transactionHash of indexed.keys()) {
+    if (!candidates.has(transactionHash)) candidates.set(transactionHash, new Set())
+  }
   const known = candidates.size ? await database.select().from(polymarketReceiptReviews).where(and(
     eq(polymarketReceiptReviews.accountId, scope[0]), inArray(polymarketReceiptReviews.transactionHash, [...candidates.keys()]))) : []
   const previous = new Map(known.map((row) => [row.transactionHash, row.evidence]))
@@ -60,12 +83,15 @@ try {
       await database.insert(polymarketReceiptReviews).values({ accountId: scope[0], transactionHash, evidence }).onConflictDoNothing()
       previous.set(transactionHash, evidence)
     } catch {
-      receipts.push({ transactionHash, sourceCandidates: [...sources], status: 'receipt_unavailable' })
+      receipts.push({ transactionHash, sourceCandidates: [...sources], indexedCandidates: indexed.get(transactionHash) ?? [], status: 'receipt_unavailable' })
     }
   }
   for (const [transactionHash, evidence] of previous) {
     const sourceRows = [...trades, ...activities].filter((row) => row.hash?.toLowerCase() === transactionHash)
     receipts.push({ transactionHash, sourceCandidates: [...candidates.get(transactionHash)!], status: 'review_required',
+      indexedCandidates: (indexed.get(transactionHash) ?? []).map((row) => ({ ...row,
+        verifiedInFinalizedReceipt: evidence.fills.some((execution) => execution.exchange === row.exchange
+          && execution.logIndex === String(row.logIndex)) })),
       evidence, proposals: proposeReceiptLinks(evidence, sourceRows) })
   }
   process.stdout.write(JSON.stringify({ scope: 'authorized_local_review', truncated: pending.length > 12

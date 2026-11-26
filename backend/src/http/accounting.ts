@@ -1,6 +1,6 @@
 import { consolidatePerformance } from '../fx/consolidated.js'
 import { reportingPerformance } from '../fx/performance.js'
-import { fxEvidenceMode, loadFx, reportingCurrency, reportAmounts } from '../fx/reference.js'
+import { fxAnchors, fxEvidenceMode, loadFx, reportingCurrency, reportAmounts } from '../fx/reference.js'
 import { lifecycleAt } from '../tracking/lifecycle.js'
 import { reconcileHoldingDemand, trackedDemoCapture } from '../tracking/demand.js'
 import { sharedTrackingEvidence } from '../tracking/evidence.js'
@@ -646,7 +646,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     asOf: z.iso.datetime({ offset: true }),
     accounts: z.string().max(4000).optional(), venue: z.string().min(1).max(160).optional(),
   })
-  const performanceQuery = analyticsQuery.extend({ currency: reportingCurrency.optional(), evidenceMode: fxEvidenceMode.default('knowledge'), from: z.iso.datetime({ offset: true }),
+  const performanceQuery = analyticsQuery.extend({ currency: reportingCurrency.optional(), evidenceMode: fxEvidenceMode.default('retrospective'), from: z.iso.datetime({ offset: true }),
     sampling: z.enum(['daily', 'weekly', 'monthly']).optional() })
   function selectAccounts(input: Awaited<ReturnType<typeof loadEvidence>>, requested?: string, venue?: string) {
     const available = new Set([...input.accounts.filter((account) => !venue || account.venue === venue).map((account) => account.account),
@@ -706,9 +706,12 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       const { context, evidence } = analyticalContext(input, accounts, asOf, query.data.asset, query.data.venue)
       try {
         const data = analyzePerformance(evidence, accounts, query.data.asset, from, asOf, context.accountIdentities)
+        const [preference] = query.data.currency ? await tx.select({ fiatSource: users.fiatReferenceSource, stablecoinSource: users.stablecoinReferenceSource })
+          .from(users).where(eq(users.id, request.principalId!)).limit(1) : []
         const currency = query.data.currency
-        const reporting = currency ? reportingPerformance(await loadFx(tx, from, asOf, { assets: [query.data.asset], currency }), data,
-          query.data.asset, currency, query.data.evidenceMode) : null
+        const reporting = currency ? reportingPerformance(await loadFx(tx, from, asOf, { assets: [query.data.asset], currency, mode: query.data.evidenceMode,
+          cutoffs: fxAnchors(data.cashFlowBoundaries.map((row) => row.timestamp)) }), data,
+          query.data.asset, currency, query.data.evidenceMode, preference) : null
         const canonicalKeys = canonicalInstrumentKeys(evidence, asOf)
         const identified = [...new Set(data.attribution.instruments
           .filter((row) => canonicalKeys.has(instrumentKey(row, row.instrument)) && z.uuid().safeParse(row.instrument).success)
@@ -834,7 +837,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
         const input = await loadEvidence(portfolioId, asOf, undefined, tx, undefined, undefined, from,
           query.data.evidenceMode === 'retrospective')
         if (input.truncated || input.tracking.truncated) return reply.code(422).send({ error: { code: 'analytics_replay_limit' } })
-        const [preference] = await tx.select({ currency: users.reportingCurrency }).from(users)
+        const [preference] = await tx.select({ currency: users.reportingCurrency, fiatSource: users.fiatReferenceSource, stablecoinSource: users.stablecoinReferenceSource }).from(users)
           .where(eq(users.id, request.principalId!)).limit(1)
         const currency = query.data.currency ?? preference?.currency ?? 'USD'
         const assetScope = (row: { venue: string; account: string; asset: string | null }) => JSON.stringify([row.venue, row.account, row.asset])
@@ -868,8 +871,11 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
         }
         const financialKnown = (point: string) => !knowledge.some((row) => row.effective <= point && row.known > point)
         try {
-          return consolidatePerformance(input.evidence, await loadFx(tx, from, asOf, { assets, currency }),
-            assets.filter((asset) => supported.includes(asset)), currency, from, asOf, query.data.evidenceMode, unsupported, financialKnown)
+          return consolidatePerformance(input.evidence, await loadFx(tx, from, asOf, { assets, currency, mode: query.data.evidenceMode,
+            cutoffs: fxAnchors(input.evidence.map(({ observation }) => observation)
+              .filter((row) => ['deposit', 'withdrawal'].includes(row.type) && row.timestamp > from && row.timestamp <= asOf)
+              .map((row) => row.timestamp)) }),
+            assets.filter((asset) => supported.includes(asset)), currency, from, asOf, query.data.evidenceMode, unsupported, financialKnown, preference)
         } catch (error) {
           if (error instanceof Error && error.message === 'analytics_replay_limit') {
             return reply.code(422).send({ error: { code: error.message } })
@@ -1315,18 +1321,20 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     if (!Number.isInteger(days) || days < 1 || days > 31) {
       return reply.code(422).send({ error: { code: 'valuation_range_limit' } })
     }
-    const input = await loadEvidence(portfolioId, new Date(end + day - 1).toISOString(), undefined, undefined, undefined, undefined, new Date(start).toISOString())
+    const input = await loadEvidence(portfolioId, new Date(end + day - 1).toISOString(), undefined, undefined, undefined, undefined, new Date(start).toISOString(), true)
     if (input.truncated || input.tracking.truncated || input.evidence.length * days > 100_000) return reply.code(422).send({ error: { code: 'valuation_work_limit' } })
     const selectedCurrency = reportingCurrency.optional().safeParse(request.query.currency)
     if (!selectedCurrency.success) return reply.code(422).send({ error: { code: 'invalid_reporting_currency' } })
+    const [preference] = selectedCurrency.data ? await database.select({ fiatSource: users.fiatReferenceSource, stablecoinSource: users.stablecoinReferenceSource })
+      .from(users).where(eq(users.id, request.principalId!)).limit(1) : []
     const rates = selectedCurrency.data ? await loadFx(database, new Date(start).toISOString(), new Date(end + day - 1).toISOString(),
-      { assets: [...new Set(input.evidence.map(({ observation }) => observation.asset))], currency: selectedCurrency.data }) : []
+      { assets: [...new Set(input.evidence.map(({ observation }) => observation.asset))], currency: selectedCurrency.data, mode: 'retrospective' }) : []
     const points = Array.from({ length: days }, (_, index) => {
       const asOf = new Date(start + (index + 1) * day - 1).toISOString()
       const state = replay(input, asOf)
       return { asOf, status: state.status, portfolioScope: state.portfolioScope, discrepancyCount: state.discrepancies.length, balances: state.cash,
         ...(selectedCurrency.data ? { reporting: reportAmounts(rates,
-          state.cash.map((row) => ({ asset: row.asset, value: row.referencePortfolioValue })), selectedCurrency.data, asOf) } : {}) }
+          state.cash.map((row) => ({ asset: row.asset, value: row.referencePortfolioValue })), selectedCurrency.data, asOf, { ...preference, mode: 'retrospective' }) } : {}) }
     })
     return { method: 'weighted_average', points }
 
@@ -1357,7 +1365,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       if (valuationCache.size > 10) valuationCache.delete(valuationCache.keys().next().value!)
       const state = prepared(asOf, overlays) ?? replayAccounting(input.evidence, asOf)
       const exposure = query.data.asset ? (await loadExposureInputs(tx, portfolioId, asOf, query.data.asset, {}, [], { input, state })).response : null
-      const [preference] = await tx.select({ currency: users.reportingCurrency }).from(users)
+      const [preference] = await tx.select({ currency: users.reportingCurrency, fiatSource: users.fiatReferenceSource, stablecoinSource: users.stablecoinReferenceSource }).from(users)
         .where(eq(users.id, request.principalId!)).limit(1)
       const currency = query.data.currency ?? preference?.currency ?? 'USD'
       const rates = await loadFx(tx, asOf, asOf, { assets: state.cash.map((row) => row.asset).concat(query.data.asset ?? []), currency })
@@ -1365,14 +1373,14 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       const selected = new Set(state.cash.map(scope))
       const missingObserved = [...input.positions, ...input.balances].some((row) => !row.asset
         || !selected.has(scope({ ...row, asset: row.asset })))
-      const reporting = reportAmounts(rates, state.cash.map((row) => ({ asset: row.asset, value: row.portfolioValue })), currency, asOf)
+      const reporting = reportAmounts(rates, state.cash.map((row) => ({ asset: row.asset, value: row.portfolioValue })), currency, asOf, preference)
       const qualified = { ...reporting, completeValue: missingObserved ? null : reporting.completeValue,
         coverage: missingObserved || reporting.completeValue === null ? 'partial_or_unavailable' : 'selected_reconstructed_buckets' }
       const known = reportAmounts(rates, state.cash.map((row) => ({ asset: row.asset, value: row.balance }))
         .concat(state.holdings.filter((row) => new Decimal(row.quantity).gt(0)).map((row) => ({ asset: row.asset, value: row.marketValue }))),
-        currency, asOf)
+        currency, asOf, preference)
       const independentlyObserved = exposure && query.data.asset ? reportAmounts(rates,
-        [{ asset: query.data.asset, value: exposure.reportedExposure.knownCombinedSubtotal }], currency, asOf) : null
+        [{ asset: query.data.asset, value: exposure.reportedExposure.knownCombinedSubtotal }], currency, asOf, preference) : null
       const result = { status: state.status, cash: state.cash, holdings: state.holdings,
         reporting: { ...qualified, reconstructedKnownSubtotal: known.knownSubtotal,
           observedSelectedAssetSubtotal: independentlyObserved?.knownSubtotal ?? null },

@@ -1,5 +1,7 @@
+import { archivePusd, refreshPusd } from '../src/fx/coingecko.js'
+import { polygonPusd } from '../src/providers/polymarket/collateral.js'
 import { refreshUsdc } from '../src/fx/kraken.js'
-import { storeReferences } from '../src/fx/reference.js'
+import { loadFx, selectRate, storeReferences } from '../src/fx/reference.js'
 import { refreshEcb } from '../src/fx/ecb.js'
 import { sharedTrackingEvidence } from '../src/tracking/evidence.js'
 import { nextTime, TrackingWorker } from '../src/tracking/worker.js'
@@ -136,6 +138,7 @@ describe('migrations and canonical persistence', () => {
     const condition = '0x' + 'a'.repeat(64)
     const transport = vi.fn(async (input: URL | string) => {
       if (new URL(input).pathname.endsWith('/prices-history')) return Response.json({ data: [
+        { timestamp: 1767139200, price: '0.35', resolution_seconds: 86400 },
         { timestamp: 1767312000, price: '0.4', resolution_seconds: 86400 },
       ] })
       if (new URL(input).pathname === '/midpoints') return Response.json({ 333: '0.45', 444: '0.55' })
@@ -162,6 +165,8 @@ describe('migrations and canonical persistence', () => {
       instrumentId: shared.outcomes[0].id, from: '2026-01-01T00:00:00Z', through: '2026-01-04T00:00:00Z',
     } })
     expect((await backfill()).json()).toMatchObject({ cached: false, coverage: 'observations_only',
+      openingReference: { observedAt: '2025-12-31T00:00:00.000Z', price: '0.350000000000000000' },
+      observationRange: { earliestReturned: '2026-01-02T00:00:00.000Z', continuityEstablished: false },
       observations: [{ method: 'historical_sample', observedAt: '2026-01-02T00:00:00.000Z' }] })
     const requests = transport.mock.calls.length
     expect((await backfill()).json()).toMatchObject({ cached: true })
@@ -202,10 +207,97 @@ describe('migrations and canonical persistence', () => {
       legs: [{ source: 'kraken_usdc_usd_ohlc', observedAt: new Date(time * 1000).toISOString() }] })
   })
 
+  it('loads annual FX using selected observations and exact financial cutoffs', async () => {
+    await database.execute(sql`
+      insert into scevia.fx_references (base, quote, rate, source, methodology, observed_at, retrieved_at, revision)
+      select base, quote, rate, 'annual_fixture', methodology, clock, '2026-01-02'::timestamptz, base || quote || clock::text
+      from (values ('USDC', 'USD', 0.99, 'stablecoin_market_reference'), ('EUR', 'USD', 1.25, 'fiat_reference'),
+        ('GBP', 'MYR', 5.8, 'fiat_reference')) as pairs(base, quote, rate, methodology)
+      cross join generate_series('2025-01-01'::timestamptz, '2026-01-01'::timestamptz, '1 hour') as clock
+    `)
+    const from = '2025-01-01T04:30:00.000Z'
+    const through = '2026-01-01T00:00:00.000Z'
+    const flow = '2025-07-04T12:30:00.000Z'
+    const scope = { assets: ['USDC'], currency: 'EUR', cutoffs: [flow] }
+    const rows = await loadFx(database, from, through, { ...scope, mode: 'retrospective' })
+    expect(rows.length).toBeLessThan(740)
+    expect(rows.length).toBeGreaterThan(730)
+    expect(rows.some((row) => row.base === 'GBP')).toBe(false)
+    expect(selectRate(rows, 'USDC', 'EUR', from, { mode: 'retrospective' })).toMatchObject({ rate: '0.792',
+      legs: [expect.objectContaining({ observedAt: '2025-01-01T04:00:00.000Z' }), expect.anything()] })
+    expect(selectRate(rows, 'USDC', 'EUR', flow, { mode: 'retrospective' })).toMatchObject({
+      legs: [expect.objectContaining({ observedAt: '2025-07-04T12:00:00.000Z' }), expect.anything()] })
+    expect(await loadFx(database, from, through, scope)).toHaveLength(0)
+  })
+
+  it('qualifies exact Polygon pUSD quotes and falls back when a preferred source is missing', async () => {
+    const timestamp = Math.floor(Date.now() / 1000) - 10
+    const signal = new AbortController().signal
+    const payload = { usd: 0.97, usd_24h_vol: 20000, last_updated_at: timestamp }
+    await expect(refreshPusd(database, 'fixture', signal, async () => Response.json({ pusd: payload }))).rejects.toThrow()
+    await refreshPusd(database, 'fixture', signal, async (input) => {
+      const url = new URL(String(input))
+      expect(url.pathname).toBe('/api/v3/simple/token_price/polygon-pos')
+      expect(url.searchParams.get('contract_addresses')).toBe(polygonPusd)
+      return Response.json({ [polygonPusd]: payload })
+    })
+    const then = Date.parse('2025-01-01T00:00:00Z')
+    await archivePusd(database, 'fixture', signal, async (input) => {
+      expect(new URL(String(input)).pathname).toBe('/api/v3/coins/polygon-pos/contract/' + polygonPusd + '/market_chart')
+      return Response.json({ prices: [[then, 0.92], [then + 3_600_000, 0.5]], total_volumes: [[then, 5000]] })
+    })
+    const historical = '2025-01-01T04:00:00.000Z'
+    const scope = { assets: ['PUSD'], currency: 'USD', mode: 'retrospective' as const }
+    const archive = await loadFx(database, historical, historical, scope)
+    expect(selectRate(archive, 'PUSD', 'USD', historical, scope)).toMatchObject({ rate: '0.92',
+      legs: [{ source: 'coingecko_polygon_pusd_usd_daily', tokenIdentity: { contract: polygonPusd } }] })
+    expect(selectRate(archive, 'PUSD', 'USD', historical).rate).toBeNull()
+    const app = await createTestApp()
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    await app.inject({ method: 'PUT', url: '/v1/preferences/reporting', headers,
+      payload: { currency: 'USD', stablecoinSource: 'different_source' } })
+    const read = await app.inject({ method: 'GET', url: '/v1/fx/reference?base=PUSD&currency=USD', headers })
+    expect(read.json()).toMatchObject({ rate: '0.97', fallback: true, legs: [{ source: 'coingecko_polygon_pusd_usd',
+      tokenIdentity: { chain: 'polygon-pos', contract: polygonPusd, quoteBasis: 'vendor_aggregated_fiat_usd' } }] })
+  })
+
+  it('uses late historical FX consistently for accounting history and consolidated performance', async () => {
+    const app = await createTestApp()
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const prefix = `/v1/portfolios/${PORTFOLIO_ID}`
+    const csv = [
+      'venue,account,id,timestamp,sequence,type,instrument,asset,quantity,price,amount,fee,fee_asset,coverage_through',
+      'import,annual,cash,2025-01-01T00:00:00Z,,opening_cash,,USD,,,100,,,',
+      'import,annual,inventory,2025-01-01T00:00:00Z,,opening_inventory,,USD,,,,,,',
+      'import,annual,history,2025-01-01T00:00:00Z,,history_complete,,USD,,,,,,2025-01-04T00:00:00Z',
+    ].join('\n')
+    const preview = await app.inject({ method: 'POST', url: prefix + '/imports/preview', headers, payload: { csv } })
+    expect(preview.statusCode, preview.body).toBe(200)
+    const { batchId, reviewRevision } = preview.json()
+    const confirmed = await app.inject({ method: 'POST', url: prefix + '/imports/' + batchId + '/confirm?reviewRevision=' + reviewRevision, headers })
+    expect(confirmed.statusCode, confirmed.body).toBe(200)
+    await storeReferences(database, [{ base: 'USD', quote: 'SGD', rate: '1.3', source: 'historical_fixture',
+      observedAt: '2025-01-01T01:00:00Z', retrievedAt: '2025-07-10T02:00:00Z', methodology: 'fiat_reference' }])
+    const history = await app.inject({ method: 'GET', url: prefix + '/accounting/history?currency=SGD&from=2025-01-01&through=2025-01-02', headers })
+    const query = new URLSearchParams({ currency: 'SGD', from: '2025-01-01T23:59:59.999Z', asOf: '2025-01-02T23:59:59.999Z' })
+    const analytics = await app.inject({ method: 'GET', url: prefix + '/analytics/reporting-performance?' + query, headers })
+    expect(history.statusCode, history.body).toBe(200)
+    expect(analytics.statusCode, analytics.body).toBe(200)
+    expect(history.json().points.at(-1).reporting.completeValue).toBe('130')
+    expect(analytics.json()).toMatchObject({ evidenceMode: 'retrospective', ending: { completeValue: '130' }, twr: '0' })
+    const strict = await app.inject({ method: 'GET', url: prefix + '/analytics/reporting-performance?' + query + '&evidenceMode=knowledge', headers })
+    expect(strict.json()).toMatchObject({ ending: { completeValue: null }, twr: null })
+  })
+
   it('loads daily FX once and keeps stablecoin assumptions, eligibility and fiat cross rates explicit', async () => {
     const date = new Date().toISOString().slice(0, 10)
-    await refreshEcb(database, new AbortController().signal, async () => new Response(
-      `<Cube time='${date}'><Cube currency='USD' rate='1.25'/><Cube currency='SGD' rate='1.5'/></Cube>`))
+    const ecb = async () => new Response(`<Cube time='${date}'><Cube currency='USD' rate='1.25'/><Cube currency='SGD' rate='1.5'/></Cube>`)
+    await refreshEcb(database, new AbortController().signal, ecb)
+    await refreshEcb(database, new AbortController().signal, ecb)
+    const { rows: [daily] } = await database.execute<{ count: number }>(sql`
+      select count(*)::int from scevia.fx_references where source = 'ecb_euro_reference'
+    `)
+    expect(daily?.count).toBe(2)
     const now = new Date().toISOString()
     await storeReferences(database, [{ base: 'USDC', quote: 'USD', rate: '0.98', source: 'approved_fixture',
       methodology: 'stablecoin_market_reference', observedAt: now, retrievedAt: now }])

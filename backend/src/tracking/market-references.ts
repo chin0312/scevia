@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, lte, notLike } from 'drizzle-orm'
+import { and, desc, eq, gte, inArray, lt, lte, notLike } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { Database } from '../db/client.js'
@@ -63,6 +63,7 @@ export function registerMarketReferences(app: FastifyInstance, db: Database,
     }
     const revision = digest([instrumentId, from, through, cursor ?? null])
     const [cached] = await db.select().from(marketHistoryWindows).where(eq(marketHistoryWindows.revision, revision)).limit(1)
+    const openingFloor = new Date(Date.parse(from) - 7 * 86_400_000)
     let nextCursor = cached?.nextCursor ?? null
     if (!cached || Date.now() - cached.retrievedAt.getTime() > 3_600_000) {
       let points: Array<{ at: string; price: string }>
@@ -72,7 +73,7 @@ export function registerMarketReferences(app: FastifyInstance, db: Database,
           && (selected.leg.outcomeType === 'yes' || selected.leg.outcomeType === 'no')) {
           const side = selected.leg.outcomeType
           const result = await kalshi.historicalPrices({ marketTicker: selected.market.externalId, side, minutes: 1440,
-            from: Math.floor(Date.parse(from) / 1000), through: Math.floor(Date.parse(through) / 1000) }, signal)
+            from: Math.floor(openingFloor.getTime() / 1000), through: Math.floor(Date.parse(through) / 1000) }, signal)
           points = result.items.flatMap((row) => row.price === null ? [] : [{ at: row.timestamp, price: row.price }])
         } else if (selected.market.providerCode === 'polymarket' && polymarket && selected.mapping?.asset === asset) {
           const response = await polymarket.priceHistory({ tokenId: selected.leg.externalId, interval: 'max',
@@ -87,7 +88,7 @@ export function registerMarketReferences(app: FastifyInstance, db: Database,
       const method = selected.market.providerCode === 'kalshi' ? 'historical_close' : 'historical_sample'
       const retrievedAt = new Date()
       await db.transaction(async (tx) => {
-        const rows = points.filter((row) => row.at >= from && row.at <= through)
+        const rows = points.filter((row) => Date.parse(row.at) >= openingFloor.getTime() && row.at <= through)
           .map((row) => ({ instrumentId, asset, price: row.price, observedAt: new Date(row.at), effectiveAt: new Date(row.at),
             retrievedAt, method, source: selected.market.providerCode + '_historical_reference',
             revision: digest([instrumentId, method, row.at, row.price]) }))
@@ -96,11 +97,20 @@ export function registerMarketReferences(app: FastifyInstance, db: Database,
           .onConflictDoUpdate({ target: marketHistoryWindows.revision, set: { retrievedAt, nextCursor } })
       })
     }
-    const observations = await db.select().from(quotes).where(and(eq(quotes.instrumentId, instrumentId),
-      inArray(quotes.method, ['historical_close', 'historical_sample']), gte(quotes.effectiveAt, new Date(from)), lte(quotes.effectiveAt, new Date(through))))
-      .orderBy(desc(quotes.effectiveAt)).limit(501)
-    return { instrumentId, coverage: observations.length ? 'observations_only' : 'unavailable',
-      cached: Boolean(cached && Date.now() - cached.retrievedAt.getTime() <= 3_600_000), nextCursor, observations: observations.slice(0, 500),
+    const historical = and(eq(quotes.instrumentId, instrumentId), eq(quotes.asset, asset),
+      inArray(quotes.method, ['historical_close', 'historical_sample']))
+    const [observations, opening] = await Promise.all([
+      db.select().from(quotes).where(and(historical, gte(quotes.effectiveAt, new Date(from)), lte(quotes.effectiveAt, new Date(through))))
+        .orderBy(desc(quotes.effectiveAt), desc(quotes.retrievedAt), desc(quotes.revision)).limit(501),
+      db.select().from(quotes).where(and(historical, gte(quotes.effectiveAt, openingFloor), lt(quotes.effectiveAt, new Date(from))))
+        .orderBy(desc(quotes.effectiveAt), desc(quotes.retrievedAt), desc(quotes.revision)).limit(1),
+    ])
+    const page = observations.slice(0, 500)
+    return { instrumentId, coverage: observations.length || opening.length ? 'observations_only' : 'unavailable',
+      openingReference: page.find((row) => row.effectiveAt.toISOString() === from) ?? opening[0] ?? null,
+      observationRange: { earliestReturned: page.at(-1)?.effectiveAt ?? null, latestReturned: page[0]?.effectiveAt ?? null,
+        continuityEstablished: false },
+      cached: Boolean(cached && Date.now() - cached.retrievedAt.getTime() <= 3_600_000), nextCursor, observations: page,
       truncated: observations.length > 500 || nextCursor !== null }
   })
 }

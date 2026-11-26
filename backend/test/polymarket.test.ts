@@ -1,5 +1,5 @@
 import { streamBook } from '../src/tracking/polymarket-stream.js'
-import { proposeReceiptLinks } from '../src/providers/polymarket/receipt-review.js'
+import { indexedCandidates, proposeReceiptLinks } from '../src/providers/polymarket/receipt-review.js'
 import { PolymarketCollateralReader, polygonPusd } from '../src/providers/polymarket/collateral.js'
 import { describe, expect, it } from 'vitest'
 import { PolymarketAdapter } from '../src/providers/polymarket/adapter.js'
@@ -489,6 +489,17 @@ describe('standard Polygon resolution and stream contracts', () => {
     expect(streamBook(quote, tokens, now)).toMatchObject({ price: '0.6', instrumentId: 'instrument', observedAt: now })
     expect(streamBook({ ...quote, market: 'other' }, tokens, now)).toBeNull()
     expect(streamBook({ ...quote, timestamp: String(now.getTime() - 121_000) }, tokens, now)).toBeNull()
+  })
+
+  it('deduplicates indexed evidence without conflating fills in the same transaction', () => {
+    const start = new Date('2026-01-01T00:00:00Z')
+    const end = new Date('2026-01-02T00:00:00Z')
+    const row = { chainId: 137, exchange: '0xe111180000d2663c0091e4f400237545b87b996b', wallet: '0x' + '3'.repeat(40),
+      transactionHash: '0x' + '4'.repeat(64), logIndex: 2, occurredAt: start.toISOString(), provider: 'fixture' }
+    expect(indexedCandidates([row, row, { ...row, logIndex: 3 }], row.wallet, start, end).map((entry) => entry.logIndex)).toEqual([2, 3])
+    expect(() => indexedCandidates([row], '0x' + '9'.repeat(40), start, end)).toThrow('indexed_candidate_outside_approved_account_window')
+    expect(() => indexedCandidates([row, { ...row, occurredAt: end.toISOString() }], row.wallet, start, end))
+      .toThrow('indexed_candidate_timestamp_conflict')
   })
 
   it('leaves identical multiple executions unresolved during native receipt review', () => {

@@ -66,6 +66,8 @@ export const users = scevia.table('users', {
   id: uuid('id').defaultRandom().primaryKey(),
   authSubject: text('auth_subject').notNull().unique(),
   reportingCurrency: text('reporting_currency').default('USD').notNull(),
+  fiatReferenceSource: text('fiat_reference_source'),
+  stablecoinReferenceSource: text('stablecoin_reference_source'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 })
 
@@ -748,11 +750,13 @@ export const fxReferences = scevia.table('fx_references', {
   rate: numeric('rate', { precision: 38, scale: 18 }).notNull(),
   source: text('source').notNull(),
   methodology: text('methodology').notNull(),
+  tokenIdentity: jsonb('token_identity').$type<{ chain: string; contract: string; quoteBasis: string }>(),
   publishedAt: timestamp('published_at', { withTimezone: true }),
   observedAt: timestamp('observed_at', { withTimezone: true }).notNull(),
   retrievedAt: timestamp('retrieved_at', { withTimezone: true }).notNull(),
 }, (table) => [index('fx_references_pair_idx').on(table.base, table.quote, table.observedAt),
   index('fx_references_retention_idx').on(table.retrievedAt),
+  index('fx_references_selection_idx').on(table.base, table.quote, table.source, table.methodology, table.observedAt),
   check('fx_references_positive', sql`${table.rate} > 0`)])
 
 export const marketHistoryWindows = scevia.table('market_history_windows', {

@@ -204,8 +204,10 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
       if (value.reportingCurrency) {
         const asOf = new Date(value.asOf).toISOString()
         const rates = await loadFx(tx, asOf, asOf, { assets: [value.asset], currency: value.reportingCurrency })
+        const [preference] = await tx.select({ fiatSource: users.fiatReferenceSource, stablecoinSource: users.stablecoinReferenceSource })
+          .from(portfolios).innerJoin(users, eq(users.id, portfolios.ownerId)).where(eq(portfolios.id, sourceId)).limit(1)
         frozen.reportingBasis = { currency: value.reportingCurrency, asOf,
-          reference: selectRate(rates, value.asset, value.reportingCurrency, asOf) }
+          reference: selectRate(rates, value.asset, value.reportingCurrency, asOf, preference) }
       }
       return frozen
     }, { isolationLevel: 'repeatable read', accessMode: 'read only' })
@@ -326,7 +328,7 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
     assumedUsdPerUnit: z.partialRecord(z.enum(['USDC', 'PUSD']), cashAmount.refine((value) => new Decimal(value).gt(0))).optional(),
   }).strict()
   async function freezeDenominations(portfolioId: string, value: z.infer<typeof denominationEvaluation>): Promise<FrozenDenominationScenario> {
-    const [preference] = await db.select({ currency: users.reportingCurrency }).from(portfolios)
+    const [preference] = await db.select({ currency: users.reportingCurrency, fiatSource: users.fiatReferenceSource, stablecoinSource: users.stablecoinReferenceSource }).from(portfolios)
       .innerJoin(users, eq(users.id, portfolios.ownerId)).where(eq(portfolios.id, portfolioId)).limit(1)
     const currency = value.reportingCurrency ?? preference?.currency ?? 'USD'
     const frozen: FrozenDenominationScenario = {
@@ -340,7 +342,7 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
     const assets = [...new Set(['USD', ...frozen.components.map((item) => item.baseline.asset)])]
     const references = await loadFx(db, asOf, asOf, { assets, currency })
     frozen.reportingBasis = { currency, asOf,
-      references: Object.fromEntries(assets.map((asset) => [asset, selectRate(references, asset, currency, asOf, { source: value.reportingSource })])) }
+      references: Object.fromEntries(assets.map((asset) => [asset, selectRate(references, asset, currency, asOf, { ...preference, source: value.reportingSource })])) }
     return frozen
   }
   function evaluateDenominations(frozen: FrozenDenominationScenario) {

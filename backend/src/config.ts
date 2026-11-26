@@ -41,6 +41,7 @@ export interface ServerConfig extends DatabaseConfig {
   polymarketPolygonRpc?: URL
   ecbReferenceAuthorized?: boolean
   krakenFxAuthorized?: boolean
+  coingeckoPusdKey?: string
   fxReferenceRetentionDays?: number
   polymarketResolutionRpcAuthorized?: boolean
   polymarketStreamAuthorized?: boolean
@@ -114,6 +115,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     ecbReferenceAuthorized: localDevelopment && env.ECB_FX_REFERENCE_AUTHORIZED === 'YES',
     ...(localDevelopment && env.FX_REFERENCE_RETENTION_DAYS ? { fxReferenceRetentionDays:
       z.coerce.number().int().min(1).max(366).parse(env.FX_REFERENCE_RETENTION_DAYS) } : {}),
+    ...(localDevelopment && env.COINGECKO_PUSD_REFERENCE_AUTHORIZED === 'YES' ? {
+      coingeckoPusdKey: z.string().min(1).max(256).parse(env.COINGECKO_DEMO_API_KEY),
+    } : {}),
     krakenFxAuthorized: localDevelopment && env.KRAKEN_USDC_REFERENCE_AUTHORIZED === 'YES',
     polymarketStreamAuthorized: localDevelopment && env.POLYMARKET_MARKET_STREAM_AUTHORIZED === 'YES',
     ...(localDevelopment && env.CONTINUOUS_TRACKING_ENABLED === 'YES' ? { tracking: {

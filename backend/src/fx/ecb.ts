@@ -26,8 +26,9 @@ export async function refreshEcb(db: Pick<Database, 'insert'>, signal: AbortSign
     const date = dates[index]!
     for (const match of dates[index + 1]!.matchAll(/<Cube currency=['"]([A-Z]{3})['"] rate=['"]([\d.]+)['"]\s*\/>/g)) {
       if (!reportingCurrency.safeParse(match[1]).success) continue
+      if (date + 'T00:00:00.000Z' > retrievedAt) continue
       rows.push({ base: 'EUR', quote: match[1], rate: match[2], source: 'ecb_euro_reference', methodology: 'fiat_reference',
-        observedAt: (date + 'T23:59:59.999Z') < retrievedAt ? date + 'T23:59:59.999Z' : retrievedAt, retrievedAt })
+        observedAt: date + 'T00:00:00.000Z', retrievedAt })
     }
   }
   await storeReferences(db, rows)

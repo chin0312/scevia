@@ -4,7 +4,7 @@ import { normalizedRecordSchema } from '../../domain/model.js'
 
 export const polygonPusd = '0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb'
 // CTF Exchange V2 deployments documented by Polymarket. Other exchange generations use different events.
-const ctfV2 = new Set(['0xe111180000d2663c0091e4f400237545b87b996b', '0xe2222d279d744050d28e00520010520000310f59'])
+export const polygonCtfV2 = new Set(['0xe111180000d2663c0091e4f400237545b87b996b', '0xe2222d279d744050d28e00520010520000310f59'])
 const orderFilled = '0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee'
 const indexedAddress = /^0x0{24}[0-9a-f]{40}$/i
 const word = z.string().regex(/^0x[0-9a-f]{64}$/i)
@@ -84,7 +84,7 @@ export class PolymarketCollateralReader {
     })
     const fills = receipt.logs.flatMap((log) => {
       const exchange = log.address.toLowerCase()
-      if (log.removed || !ctfV2.has(exchange) || log.topics.length !== 4 || log.topics[0]?.toLowerCase() !== orderFilled
+      if (log.removed || !polygonCtfV2.has(exchange) || log.topics.length !== 4 || log.topics[0]?.toLowerCase() !== orderFilled
         || !indexedAddress.test(log.topics[2]!) || '0x' + log.topics[2]!.slice(-40).toLowerCase() !== normalizedWallet
         || !/^0x[0-9a-f]{448}$/i.test(log.data)) return []
       const words = log.data.slice(2).match(/.{64}/g)!.map((value) => BigInt('0x' + value))

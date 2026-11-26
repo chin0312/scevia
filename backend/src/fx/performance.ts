@@ -1,13 +1,13 @@
 import { Decimal } from 'decimal.js'
 import { drawdowns, linkedReturn, type analyzePerformance } from '../analytics/performance.js'
-import { selectRate, type FxMode, type loadFx } from './reference.js'
+import { selectRate, type FxOptions, type FxMode, type loadFx } from './reference.js'
 
 type Data = ReturnType<typeof analyzePerformance>
 
-export function reportingPerformance(rows: Awaited<ReturnType<typeof loadFx>>, data: Data, asset: string, currency: string, mode: FxMode = 'knowledge') {
+export function reportingPerformance(rows: Awaited<ReturnType<typeof loadFx>>, data: Data, asset: string, currency: string, mode: FxMode = 'knowledge', preference: FxOptions = {}) {
   const d = Decimal.clone({ precision: 60 })
   const convert = (value: string | null, at: string) => {
-    const reference = selectRate(rows, asset, currency, at, { mode })
+    const reference = selectRate(rows, asset, currency, at, { ...preference, mode })
     return { reference, value: value === null || reference.rate === null ? null : new d(value).mul(reference.rate).toFixed() }
   }
   const opening = convert(data.opening.value, data.opening.asOf)
@@ -43,6 +43,6 @@ export function reportingPerformance(rows: Awaited<ReturnType<typeof loadFx>>, d
     ? flows.reduce((sum, flow) => sum.plus(flow.flow.value!), new d(0)) : null
   const gain = data.bridge.netInvestmentGain.value !== null && opening.value !== null && last?.value != null && netFlows !== null
     ? new d(last.value).minus(opening.value).minus(netFlows).toFixed() : null
-  return { asset, currency, evidenceMode: mode, methodology: 'point_in_time_reference', opening, ending: last ?? null, cashFlowBoundaries: flows,
+  return { asset, currency, evidenceMode: mode, methodology: mode === 'retrospective' ? 'retrospective_reference' : 'point_in_time_reference', opening, ending: last ?? null, cashFlowBoundaries: flows,
     netInvestmentGain: gain, twr: last?.twr ?? null, maximumDrawdown: drawdown?.maximum ?? null, history }
 }

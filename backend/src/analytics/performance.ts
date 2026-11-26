@@ -390,7 +390,7 @@ export function analyzePerformance(evidence: Evidence[], accounts: string[], ass
   const wins = exits.filter((entry) => decimal(entry.realized!).gt(0)).length
   return {
     methodology: { valuation: 'selected_accounting_evidence', return: 'cash_flow_boundary_twr', time: 'UTC', drawdown: 'flow_adjusted_sampled_index' },
-    opening, ending, anchors: requestedCutoffs.map(at), cashFlowBoundaries: boundaries, work: { replays: replayCount, inputRowsReplayed: replayWork },
+    opening, ending, unclassifiedFlowTimes, anchors: requestedCutoffs.map(at), cashFlowBoundaries: boundaries, work: { replays: replayCount, inputRowsReplayed: replayWork },
     bridge: {
       valueChange: qualityMetric(opening.value !== null && ending.value !== null ? decimal(ending.value).minus(opening.value) : null, 'valuation_missing', qualityFor(opening, ending, false)),
       knownNetContributions: netFlows.toFixed(),

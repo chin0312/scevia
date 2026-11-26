@@ -1,4 +1,5 @@
 import { registerMarketReferences } from '../tracking/market-references.js'
+import { refreshPusd } from '../fx/coingecko.js'
 import { refreshUsdc } from '../fx/kraken.js'
 import { registerMarketEvidence } from '../tracking/discovery.js'
 import { registerOwnerPreferences } from './simulations.js'
@@ -591,13 +592,15 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     ]) })
     app.addHook('onClose', async () => { trackingRuntime.running = false; stopping.abort(); await running })
   }
-  if ((options.config.ecbReferenceAuthorized || options.config.krakenFxAuthorized) && options.config.nodeEnv === 'development' && ['127.0.0.1', '::1'].includes(options.config.host)) {
+  const pusdKey = options.config.coingeckoPusdKey
+  if ((options.config.ecbReferenceAuthorized || options.config.krakenFxAuthorized || pusdKey) && options.config.nodeEnv === 'development' && ['127.0.0.1', '::1'].includes(options.config.host)) {
     const stop = new AbortController()
     let task: Promise<void> | undefined
     const collect = async () => {
       while (!stop.signal.aborted) {
         const updates = await Promise.allSettled([
           ...(options.config.ecbReferenceAuthorized ? [refreshEcb(options.database, stop.signal)] : []),
+          ...(pusdKey ? [refreshPusd(options.database, pusdKey, stop.signal)] : []),
           ...(options.config.krakenFxAuthorized ? [refreshUsdc(options.database, stop.signal)] : []),
         ])
         if (options.config.fxReferenceRetentionDays) {

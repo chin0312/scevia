@@ -69,6 +69,20 @@ describe('reporting performance', () => {
     expect(Number(result.twr)).toBeCloseTo(-1 / 11)
     expect(Math.abs(Number(result.maximumDrawdown))).toBeCloseTo(1 / 11)
     expect(consolidatePerformance(evidence, rates, ['USD', 'USDC'], 'USD', opened, through, 'knowledge').twr).toBeNull()
+
+    const initiallyEmpty = evidence.map((item) => item.observation.asset === 'USDC' && item.observation.type === 'opening_cash'
+      ? { ...item, observation: { ...item.observation, amount: '0' } } : item)
+    const deposit = initiallyEmpty.find((item) => item.observation.type === 'deposit')!
+    const stablecoinDeposit = { ...deposit, observation: { ...deposit.observation, id: 'stablecoin deposit', account: 'USDC',
+      venue: 'USDC', asset: 'USDC', feeAsset: 'USDC' } }
+    const funded = [...initiallyEmpty, stablecoinDeposit]
+    const consolidated = consolidatePerformance(funded, rates, ['USD', 'USDC'], 'USD', opened, through, 'retrospective')
+    expect(consolidated.native.find((row) => row.asset === 'USDC')?.returns.twr.value).toBeNull()
+    expect(consolidated.opening.completeValue).toBe('100')
+    expect(consolidated.ending?.completeValue).toBe('136')
+    expect(Number(consolidated.twr)).toBeCloseTo(-4 / 140)
+    const incomplete = funded.filter((row) => row.observation.asset !== 'USDC' || row.observation.type !== 'opening_inventory')
+    expect(consolidatePerformance(incomplete, rates, ['USD', 'USDC'], 'USD', opened, through, 'retrospective').twr).toBeNull()
   })
 
 })
