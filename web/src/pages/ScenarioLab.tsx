@@ -51,7 +51,9 @@ const RAILS: Record<View | 'home', RailSection[]> = {
 }
 const LEGACY_KEYS = ['scevia-scenarios-v4', 'scevia-scenarios-v3']
 const NO_ADJ: Adjustment[] = []
-const knownIn = (id: string, frozen: PortfolioData | null) => !!frozen?.openPositions.some((p) => p.id === id)
+// Held rows are checked against the scenario's own starting portfolio; without one (an unrecorded legacy baseline)
+// they're kept as configured until a starting portfolio is set.
+const knownIn = (id: string, frozen: PortfolioData | null) => (frozen ? frozen.openPositions.some((p) => p.id === id) : true)
 
 export default function ScenarioLab() {
   const { F, workspaceId: wsId, hasPortfolio } = useFinanceCtx()
@@ -70,7 +72,9 @@ export default function ScenarioLab() {
       const k = scopedKey(base, wsId)
       const legacy = readStored<Scenario[] | null>(k, null, (raw) => SC.sanitize(raw, (id) => !!POS_BY_ID[id])?.scenarios ?? null)
       if (!legacy) continue
-      const migrated = legacy.map((x) => (x.baseline === 'portfolio' && !x.frozen ? { ...x, frozen: hasPortfolio ? freezeBaseline(F) : null, source: { workspaceId: wsId, name: wsName }, baseAsOf: x.baseAsOf ?? TODAY } : x))
+      // Their original starting portfolio was never recorded: keep the configuration and its source, but don't pass
+      // today's portfolio off as that baseline. The user sets a new one explicitly (marked as new).
+      const migrated = legacy.map((x) => (x.baseline === 'portfolio' && !x.frozen ? { ...x, frozen: null, source: { workspaceId: wsId, name: wsName } } : x))
       all = mergeByKey(all, migrated)
       if (writeStored(LAB_SCENARIOS_KEY, all)) removeStored(k)
     }
@@ -278,12 +282,13 @@ export default function ScenarioLab() {
             <AssumptionsBar s={active} E={E} onEdit={() => setAssumptions(true)} onCheckPrices={() => setPriceCheck(true)} />
           </div>
           {active.baseline === 'portfolio' && (!active.frozen
-            ? <Callout tone="warn" icon="alert">This scenario’s starting portfolio wasn’t recorded, so it starts empty. {fromHere ? <button type="button" className="link" onClick={() => rebase(false)}>Start from {wsName} now</button> : `Select ${active.source?.name ?? 'its portfolio'} to rebase it.`}</Callout>
+            ? <Callout tone="warn" icon="alert"><b>Original starting portfolio unavailable.</b> This scenario was saved by an earlier version that didn’t record its starting portfolio. Its positions and assumptions are kept, but results aren’t shown until a starting portfolio is set. {fromHere ? <button type="button" className="link" onClick={() => { update((s) => ({ ...s, ...frozenFor(), baselineNote: 'replaced' })); toast('New starting portfolio set. It isn’t the original one.', 'info') }}>Set a new starting portfolio from {wsName} ({fmtDate(TODAY)})</button> : `Select ${active.source?.name ?? 'its portfolio'} to set a new one.`}</Callout>
+            : active.baselineNote === 'replaced' && fromHere && diff?.same ? <Callout icon="info">New starting portfolio from {active.source?.name} as of {fmtDate(active.frozen.asOf)}; the original wasn’t recorded.</Callout>
             : !fromHere ? <Callout icon="info">Starts from {active.source?.name ?? 'a portfolio'} as of {fmtDate(active.frozen.asOf)}, frozen. That portfolio isn’t the one selected now (or has no data), so its latest state isn’t compared; the saved starting point and results are kept.</Callout>
             : diff && !diff.same ? <Callout icon="info">{wsName} has changed since this scenario’s starting point ({fmtDate(diff.asOf.frozen)}). The scenario keeps its frozen start until you rebase. <button type="button" className="link" onClick={() => setRebasing(true)}>Review rebase…</button></Callout>
             : null)}
 
-          {view === 'Build' && (
+          {active.baseline === 'portfolio' && !active.frozen ? null : view === 'Build' && (
             <div className="build-grid">
               <div className="build-main">
                 <StartSetup s={active} E={E} canPortfolio={hasPortfolio} onChange={(patch) => update((s) => SC.configure(s, patch))} onBaseline={requestBaseline} />
@@ -294,8 +299,8 @@ export default function ScenarioLab() {
               <BuildSummary E={E} onAnalyze={() => { setView('Analyze'); window.scrollTo(0, 0) }} onCover={(p, amount) => { update((s) => SC.configure(s, { funding: { ...s.funding, [p]: (s.funding[p] ?? 0) + amount } })); toast('Virtual capital added. No real funds are involved.') }} />
             </div>
           )}
-          {view === 'Analyze' && <AnalyzeView E={E} onEdit={editRow} />}
-          {view === 'Compare' && <CompareView key={activeKey} scenarios={scenarios} evals={evals} actual={actual} activeKey={activeKey} onOpen={(k) => open(k, 'Compare')} />}
+          {(active.baseline !== 'portfolio' || !!active.frozen) && view === 'Analyze' && <AnalyzeView E={E} onEdit={editRow} />}
+          {(active.baseline !== 'portfolio' || !!active.frozen) && view === 'Compare' && <CompareView key={activeKey} scenarios={scenarios} evals={evals} actual={actual} activeKey={activeKey} onOpen={(k) => open(k, 'Compare')} />}
           <div className="footer-note"><span>Scenario results show what happens under the outcomes and prices you choose. They aren’t forecasts or recommendations.</span><span><WorkspaceLabel suffix="sample market data" /></span></div>
         </>)}
       </main>

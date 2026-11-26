@@ -122,8 +122,8 @@ test('historical replay: virtual funding, trading-close validation, funding stat
   await page.getByRole('button', { name: 'Add markets…' }).first().click()
   const dlg = page.getByRole('dialog', { name: 'Add markets' })
   await expect(dlg).toContainText('Sample market data (fictional, not live)')
-  await dlg.getByRole('checkbox', { name: /Incumbent wins Springfield/ }).check()
-  await dlg.getByRole('checkbox', { name: /Fed cuts rates at Jan 2027 FOMC/ }).check()
+  await dlg.getByRole('button', { name: 'Select Incumbent wins Springfield mayoral election YES' }).click()
+  await dlg.getByRole('button', { name: 'Select Fed cuts rates at Jan 2027 FOMC YES' }).click()
   await dlg.getByRole('button', { name: 'Add 2 positions' }).click()
   // Virtual funding for each venue is offered automatically; no account is involved.
   await expect(page.getByLabel('Starting capital, Polymarket · USDC')).toBeVisible()
@@ -141,7 +141,7 @@ test('historical replay: virtual funding, trading-close validation, funding stat
   await expect(mayor.getByRole('alert')).toHaveText('Trading closed on 2026-11-04; it resolved later, on 2026-11-05. Hold to settlement instead.')
   await mayor.getByRole('radiogroup', { name: /Exit for/ }).getByRole('radio', { name: 'Hold to settlement' }).click()
 
-  const fed = page.getByRole('group', { name: /^Position 1: Fed cuts rates/ })
+  const fed = page.getByRole('group', { name: /^Position 2: Fed cuts rates/ })
   await fed.getByRole('radiogroup', { name: /Outcome for/ }).getByRole('radio', { name: 'NO' }).click()
   await fed.getByLabel('Entry date').fill('2026-04-01')
   await fed.getByLabel('Execution price').fill('0.5')
@@ -202,7 +202,7 @@ test('simulation without any portfolio: scratch and replay work with virtual cap
   await page.goto('/scenario-lab/replay?new=1')
   await expect(page.getByRole('heading', { level: 1 })).toContainText('Historical replay')
   await page.getByRole('button', { name: 'Add markets…' }).first().click()
-  await page.getByRole('dialog', { name: 'Add markets' }).getByRole('checkbox', { name: /Fed cuts rates at Jan 2027 FOMC/ }).check()
+  await page.getByRole('dialog', { name: 'Add markets' }).getByRole('button', { name: 'Select Fed cuts rates at Jan 2027 FOMC YES' }).click()
   await page.getByRole('dialog', { name: 'Add markets' }).getByRole('button', { name: 'Add 1 position' }).click()
   await expect(page.getByLabel('Starting capital, Kalshi · USD')).toBeVisible()
 })

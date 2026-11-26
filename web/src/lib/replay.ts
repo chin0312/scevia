@@ -33,6 +33,11 @@ export interface ReplayMarket {
   fee: FeeSchedule | null
   /** Recorded price observations per outcome. Empty when the source has none for this market. */
   observations: Record<Outcome, PriceObs[]>
+  /** Native settlement asset as established by the market service; null = not established (can't be funded). */
+  denomination: Denomination | null
+  /** Provider-native outcome ids when known (null for fixture data; never invented). */
+  nativeOutcomeIds: Record<Outcome, string | null>
+  identity: 'fixture' | 'provider'
 }
 export type ReplaySize = { mode: 'shares' | 'amount' | 'weight'; value: number | null }
 export type ReplayExit = { kind: 'settle' } | { kind: 'date'; date: string; price: number | null }
@@ -43,6 +48,7 @@ export interface ReplayPosition {
 }
 /** Virtual funding: simulated starting capital in one native asset at one venue. Not a real account. */
 export interface FundingBucket { id: string; venue: Platform; denomination: Denomination; capital: number }
+export interface FrozenRates { USDC: number | null; PUSD: number | null; sources: Partial<Record<'USDC' | 'PUSD', string>>; capturedAt: string }
 /** Reporting-only USD rates, frozen with the replay. They never move funds between buckets. */
 export interface ReportingRates { USDC: number | null; PUSD: number | null }
 export interface Replay {
@@ -51,15 +57,21 @@ export interface Replay {
   buckets: FundingBucket[]
   fees: FeeAssumption
   rates: ReportingRates
+  /** Reference rates captured for this replay (frozen). Combined reporting uses these, not whatever references are
+   *  latest; using newer ones is an explicit action. Null for replays saved before capture (combined unavailable
+   *  until references are captured). The Phase 8 backend freezes per-date historical evidence instead. */
+  refRates?: FrozenRates | null
   positions: ReplayPosition[]
   /** Only retrospective (hindsight) selection is supported. */
   basis: 'retrospective'
   createdAt: string
 }
 
+const PLATFORM_LABEL: Record<Platform, string> = { pm: 'Polymarket', ks: 'Kalshi' }
 export const MAX_REPLAY_POSITIONS = 20
 export const MAX_BUCKET_CAPITAL = 100_000_000
-/** The native asset a new virtual bucket uses on each venue (editable per bucket). */
+/** Default asset offered when the user adds virtual funding by hand. Never used to decide a market's settlement asset:
+ *  a position is funded from a bucket with the market's own established denomination. */
 export const DEFAULT_ASSET: Record<Platform, Denomination> = { pm: 'USDC', ks: 'USD' }
 export const bucketId = (venue: Platform, d: Denomination) => `virtual:${venue}:${d}`
 export const instrumentKeyOf = (p: Pick<ReplayPosition, 'market' | 'outcome'>) => `${p.market.provider}:${p.market.marketId}:${p.outcome}`
@@ -70,6 +82,8 @@ export function replayMarketFrom(ev: CatalogEvent, m: CatalogMarket): ReplayMark
   return {
     provider: m.provider, marketId: m.marketId, title: m.marketTitle, eventTitle: ev.eventTitle, category: m.category,
     listedAt: m.listedAt ?? null, closesAt: m.closesAt ?? null, expectedResolution: m.resolves || null, resolution: m.resolution ?? null, fee: m.fee, observations: { YES: obs('YES'), NO: obs('NO') },
+    denomination: m.denomination ?? null, identity: m.identity ?? 'provider',
+    nativeOutcomeIds: { YES: m.outcomes.find((o) => o.outcome === 'YES')?.nativeId ?? null, NO: m.outcomes.find((o) => o.outcome === 'NO')?.nativeId ?? null },
   }
 }
 
@@ -103,8 +117,10 @@ export function validateReplay(r: Replay, today: string): ReplayIssues {
     const m = p.market, b = r.buckets.find((x) => x.id === p.bucketId)
     const entry = isDate(p.entryDate) ? tradingWindow(m, p.entryDate) : null
     const exit = p.exit.kind === 'date' && isDate(p.exit.date) ? tradingWindow(m, p.exit.date) : null
-    const e = !b ? 'Choose virtual funding for this position.'
+    const e = !m.denomination ? 'This market’s settlement asset isn’t established, so it can’t be funded or valued.'
+      : !b ? `Choose ${PLATFORM_LABEL[m.provider]} ${m.denomination} virtual funding for this position.`
       : b.venue !== m.provider ? 'This market trades on another venue than this funding.'
+      : b.denomination !== m.denomination ? `This market settles in ${m.denomination}; its funding must be ${m.denomination}, not ${b.denomination}.`
       : !isDate(p.entryDate) ? 'Enter an entry date.'
       : !period && (p.entryDate < r.start || p.entryDate > r.end) ? 'The entry date must fall inside the replay period.'
       : entry && !entry.ok ? entry.reason
@@ -202,8 +218,9 @@ export type RateAt = (asset: Denomination, date: string) => number | null
 /** Where a replay's rates come from: reference evidence (per date, from the exchange-rate service), the replay's own
  *  hypothetical overrides, or both. */
 export type RateBasis = 'reference' | 'hypothetical' | 'mixed'
-/** Rates for a replay: its explicit hypothetical overrides first, otherwise the supplied reference (per date). */
-export function replayRates(r: Replay, reference: RateAt = () => null): RateAt {
+/** Rates for a replay: its explicit hypothetical overrides first, then its frozen captured references, otherwise the
+ *  supplied reference (per date; the backend's per-date evidence at integration). */
+export function replayRates(r: Replay, reference: RateAt = (a) => (a === 'USD' ? 1 : r.refRates?.[a] ?? null)): RateAt {
   return (asset, date) => (asset === 'USD' ? 1 : r.rates[asset] ?? reference(asset, date))
 }
 export function rateBasis(r: Replay, assets: Denomination[]): RateBasis {
@@ -326,6 +343,13 @@ export function runReplay(r: Replay, today: string, rateAt: RateAt = replayRates
   }
 }
 
+/** The bucket a market's positions use: same venue AND the market's own denomination (created empty if missing).
+ *  Returns null when the market's denomination isn't established — no bucket is guessed. */
+export function bucketFor(buckets: FundingBucket[], m: Pick<ReplayMarket, 'provider' | 'denomination'>): FundingBucket | null {
+  if (!m.denomination) return null
+  return buckets.find((b) => b.venue === m.provider && b.denomination === m.denomination) ?? { id: bucketId(m.provider, m.denomination), venue: m.provider, denomination: m.denomination, capital: 0 }
+}
+
 /** Raise a bucket's capital to cover its shortfall (rounded up to a whole unit). Never borrows; it's simulated cash. */
 export function coverShortfall(r: Replay, bucketIdToCover: string, shortfall: number): Replay {
   return { ...r, buckets: r.buckets.map((b) => (b.id === bucketIdToCover ? { ...b, capital: Math.ceil(b.capital + shortfall) } : b)) }
@@ -390,6 +414,11 @@ function readMarket(v: unknown): ReplayMarket | null {
     provider: v.provider, marketId: v.marketId, title: v.title, eventTitle: typeof v.eventTitle === 'string' ? v.eventTitle : v.title, category: typeof v.category === 'string' ? v.category : '',
     listedAt: isDate(v.listedAt) ? v.listedAt : null, closesAt: close, expectedResolution: isDate(v.expectedResolution) ? v.expectedResolution : null, resolution: res,
     fee: isObj(v.fee) ? (v.fee as unknown as FeeSchedule) : null, observations: { YES: readObs(obs.YES), NO: readObs(obs.NO) },
+    // Replays saved before denominations were stored used the fictional sample catalog, whose fixture rule is
+    // Polymarket → USDC, Kalshi → USD. Anything else without a stored denomination stays unestablished.
+    denomination: isDenom(v.denomination) ? v.denomination : !('identity' in v) ? (v.provider === 'pm' ? 'USDC' : 'USD') : null,
+    identity: v.identity === 'provider' ? 'provider' : 'fixture',
+    nativeOutcomeIds: { YES: isObj(v.nativeOutcomeIds) && typeof v.nativeOutcomeIds.YES === 'string' ? v.nativeOutcomeIds.YES : null, NO: isObj(v.nativeOutcomeIds) && typeof v.nativeOutcomeIds.NO === 'string' ? v.nativeOutcomeIds.NO : null },
   }
 }
 function readPosition(v: unknown): ReplayPosition | null {
@@ -409,6 +438,12 @@ function readBuckets(v: Record<string, unknown>, positions: ReplayPosition[]): F
   const venues = new Set<Platform>([...positions.map((p) => p.market.provider), ...Object.keys(legacy).flatMap((k) => (k.startsWith('pm') ? ['pm' as const] : k.startsWith('ks') ? ['ks' as const] : []))])
   return [...venues].map((venue) => ({ id: bucketId(venue, DEFAULT_ASSET[venue]), venue, denomination: DEFAULT_ASSET[venue], capital: Object.entries(legacy).filter(([k]) => k.startsWith(venue)).reduce((s, [, x]) => s + (num(x) ?? 0), 0) }))
 }
+const readFrozenRates = (v: unknown): FrozenRates | null => {
+  if (!isObj(v) || typeof v.capturedAt !== 'string') return null
+  const ok = (x: unknown) => { const n = num(x); return n != null && n > 0 && n < 10 ? n : null }
+  const src = isObj(v.sources) ? v.sources : {}
+  return { USDC: ok(v.USDC), PUSD: ok(v.PUSD), capturedAt: v.capturedAt, sources: { ...(typeof src.USDC === 'string' ? { USDC: src.USDC } : {}), ...(typeof src.PUSD === 'string' ? { PUSD: src.PUSD } : {}) } }
+}
 const readRates = (v: unknown): ReportingRates => { const o = isObj(v) ? v : {}; const ok = (x: unknown) => { const n = num(x); return n != null && n > 0 && n < 10 ? n : null }; return { USDC: ok(o.USDC), PUSD: ok(o.PUSD) } }
 /** Validate stored replays. Invalid replays are dropped; invalid positions inside a replay are dropped. */
 export function sanitizeReplays(raw: unknown): Replay[] | null {
@@ -417,6 +452,6 @@ export function sanitizeReplays(raw: unknown): Replay[] | null {
     if (!isObj(v) || typeof v.key !== 'string' || typeof v.name !== 'string' || typeof v.start !== 'string' || typeof v.end !== 'string') return []
     const positions = Array.isArray(v.positions) ? v.positions.map(readPosition).filter((p): p is ReplayPosition => !!p).slice(0, MAX_REPLAY_POSITIONS) : []
     const buckets = readBuckets(v, positions)
-    return [{ key: v.key, name: v.name.slice(0, 80), color: typeof v.color === 'string' ? v.color : '', start: v.start, end: v.end, buckets, fees: readFeeAssumption(v.fees), rates: readRates(v.rates), positions, basis: 'retrospective', createdAt: typeof v.createdAt === 'string' ? v.createdAt : '' }]
+    return [{ key: v.key, name: v.name.slice(0, 80), color: typeof v.color === 'string' ? v.color : '', start: v.start, end: v.end, buckets, fees: readFeeAssumption(v.fees), rates: readRates(v.rates), refRates: readFrozenRates(v.refRates), positions, basis: 'retrospective', createdAt: typeof v.createdAt === 'string' ? v.createdAt : '' }]
   })
 }

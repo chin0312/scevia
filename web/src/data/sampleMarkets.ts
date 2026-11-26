@@ -14,6 +14,9 @@ const m = (p: Omit<CatalogMarket, 'outcomes' | 'refAsOf' | 'status' | 'rules' | 
   outcomes: yesNo(p.yes), refAsOf: p.yes == null ? null : TODAY,
   fee: p.fee === undefined ? sampleFeeSchedule(p.provider, p.category, { election: p.election }) : p.fee,
   listedAt: p.listed, closesAt: p.closes ?? null, resolution: p.resolution ?? null,
+  // Fixture rule: the fictional sample's Polymarket markets settle in legacy USDC, Kalshi in USD. Real markets carry the
+  // denomination the market service establishes.
+  denomination: p.provider === 'pm' ? 'USDC' : 'USD', identity: 'fixture',
 })
 
 export const SAMPLE_MARKET_EVENTS: CatalogEvent[] = [

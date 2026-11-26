@@ -6,7 +6,7 @@ import { PERIODS, type Period, type PlatformFilter } from '../lib/finance'
 import { DEFAULT_SETTINGS, GUARDRAIL_RANGE, SECTION_FIELDS, resetSection, useSettings, type SettingsTab } from '../lib/settings'
 import { Modal, useToast } from './overlays'
 import { Button, Seg, Tabs, cx } from './ui'
-import { CURRENCIES, FRESHNESS_LABEL, fixtureFx, type ReportingCurrency } from '../lib/fx'
+import { CURRENCIES, FIAT_SOURCES, FRESHNESS_LABEL, SOURCE_LABEL, STABLECOIN_SOURCES, fixtureFx, type FxPreferences, type ReportingCurrency } from '../lib/fx'
 
 const SCOPE: Record<string, PlatformFilter> = { All: 'all', Polymarket: 'pm', Kalshi: 'ks' }
 const SIZE = { Shares: 'shares', '$ Amount': 'amount', '% of start': 'weight' } as const
@@ -23,8 +23,19 @@ function Toggle({ label, on, set }: { label: string; on: boolean; set: (v: boole
 }
 
 /** The reference behind the selected reporting currency, with its source and age. Not a live quote. */
-function RateLine({ currency }: { currency: ReportingCurrency }) {
-  const fx = fixtureFx()
+/** The effective source of each conversion leg under the current preferences (fixture values, labelled). */
+function EffectiveSources({ currency, prefs }: { currency: ReportingCurrency; prefs: FxPreferences }) {
+  const fx = fixtureFx(undefined, prefs)
+  const legs = [['USDC', 'USD'], ['PUSD', 'USD'], ...(currency === 'USD' ? [] : [['USD', currency]])].map(([b, q]) => fx.reference(b, q))
+  return (
+    <ul className="fx-legs" aria-label="Effective reference sources">
+      {legs.map((r) => <li key={`${r.base}${r.quote}`}><span>{r.base} → {r.quote}</span><span>{r.rate == null ? FRESHNESS_LABEL[r.freshness] : r.rate.toFixed(4)} · {r.source.split(' + ').map((x) => SOURCE_LABEL[x as keyof typeof SOURCE_LABEL] ?? x).join(' + ')}{r.fallback ? ' · fallback' : ''} · {FRESHNESS_LABEL[r.freshness].toLowerCase()}{r.observedAt ? ` · ${r.observedAt}` : ''} · development fixture</span></li>)}
+    </ul>
+  )
+}
+
+function RateLine({ currency, prefs }: { currency: ReportingCurrency; prefs: FxPreferences }) {
+  const fx = fixtureFx(undefined, prefs)
   const r = fx.reference('USD', currency)
   if (currency === 'USD') return <small className="t3">No conversion needed. Stablecoin balances use their own USD references.</small>
   return <small className={r.freshness === 'stale' ? 'stale' : 't3'}>{r.rate == null ? FRESHNESS_LABEL[r.freshness] : `1 USD = ${r.rate.toFixed(4)} ${currency}`} · {FRESHNESS_LABEL[r.freshness].toLowerCase()} · {fx.label.toLowerCase()}{r.observedAt ? `, as of ${r.observedAt}` : ''}. Not a live rate.</small>
@@ -49,8 +60,21 @@ export function SettingsModal({ tab: initial, onClose }: { tab: SettingsTab; onC
               <select className="select" aria-label="Reporting currency" value={s.reportingCurrency} onChange={(e) => update({ reportingCurrency: e.target.value as ReportingCurrency })}>
                 {CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.code} · {c.name}</option>)}
               </select>
-              <RateLine currency={s.reportingCurrency} />
+              <RateLine currency={s.reportingCurrency} prefs={s.fx} />
             </span></Row>
+          <details className="adv set-adv">
+            <summary>Reference sources (advanced)</summary>
+            <p className="t3">Automatic picks an eligible reference for each conversion. A preferred source is used where it supports that conversion; otherwise another eligible source is used and marked as a fallback. Sources don’t all cover every asset.</p>
+            <Row label="Fiat reference" help="Used for USD ↔ SGD, EUR, GBP and MYR.">
+              <select className="select" aria-label="Fiat reference source" value={s.fx.fiatSource} onChange={(e) => update({ fx: { ...s.fx, fiatSource: e.target.value as FxPreferences['fiatSource'] } })}>
+                <option value="auto">Automatic</option>{FIAT_SOURCES.map((x) => <option key={x} value={x}>{SOURCE_LABEL[x]}</option>)}
+              </select></Row>
+            <Row label="Stablecoin reference" help="Used for USDC and PUSD in USD. Kraken covers USDC; CoinGecko covers PUSD.">
+              <select className="select" aria-label="Stablecoin reference source" value={s.fx.stablecoinSource} onChange={(e) => update({ fx: { ...s.fx, stablecoinSource: e.target.value as FxPreferences['stablecoinSource'] } })}>
+                <option value="auto">Automatic</option>{STABLECOIN_SOURCES.map((x) => <option key={x} value={x}>{SOURCE_LABEL[x]}</option>)}
+              </select></Row>
+            <EffectiveSources currency={s.reportingCurrency} prefs={s.fx} />
+          </details>
           <Row label="Default platform scope" help="Overview opens in this scope. Switching on the page is a view filter: it never changes the portfolio.">
             <Seg label="Default platform scope" options={['All', 'Polymarket', 'Kalshi'] as const} value={(key(SCOPE, s.defaultScope) ?? 'All') as 'All'} onChange={(v) => update({ defaultScope: SCOPE[v] })} /></Row>
           <Row label="Automatic refresh" help="How often Scevia checks the selected portfolio’s sources while it’s open. Figures change only when a source has new data; scenarios, filters and inputs are never changed.">

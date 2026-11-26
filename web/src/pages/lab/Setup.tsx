@@ -49,7 +49,7 @@ export function StartSetup({ s, E, canPortfolio = true, onChange, onBaseline }: 
           <div className="row" style={{ gap: 'var(--space-2)', flexWrap: 'wrap' }}>
             {(['pm', 'ks'] as Platform[]).map((p) => <FundingInput key={p} p={p} value={s.funding[p]} onChange={(v) => onChange({ funding: { ...s.funding, [p]: v } })} />)}
           </div>
-          <small className="t3">Simulated capital in each venue’s virtual funding{s.baseline === 'portfolio' ? <> ({(['pm', 'ks'] as Platform[]).map((p) => `${PLATFORM_NAME[p]} · ${accountsOn(p)[0] ? accountName(accountsOn(p)[0].id, accountsOn(p)) : `virtual ${DEFAULT_ASSET[p]}`}`).join(' and ')})</> : ''}. No account or deposit is needed. It raises cash and the starting value, is never a gain, and isn’t moved between venues.</small>
+          <small className="t3">Simulated capital in each venue’s virtual funding{s.baseline === 'portfolio' ? <> ({(['pm', 'ks'] as Platform[]).map((p) => `${PLATFORM_NAME[p]} · ${accountsOn(p)[0] ? accountName(accountsOn(p)[0].id, accountsOn(p)) : `virtual ${DEFAULT_ASSET[p]}`}`).join(' and ')})</> : ''}. No account or deposit is needed. It raises cash and the starting value, is never a gain, and isn’t moved between venues. Each venue’s virtual cash is one pool here; with the integrated service it is held per native asset (USD, USDC, PUSD), and different assets never fund each other.</small>
         </fieldset>
       </div>
     </Card>

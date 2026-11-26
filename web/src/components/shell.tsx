@@ -175,7 +175,7 @@ function CommandPalette({ onClose, open }: { onClose: () => void; open: Overlays
 function WorkspaceFromSettings({ children }: { children: ReactNode }) {
   const { settings } = useSettings()
   // Keyed by reporting currency so every figure is shown again in the new currency (presentation only).
-  return <ReportingProvider currency={settings.reportingCurrency} key={settings.reportingCurrency}><WorkspaceProvider autoRefreshMin={settings.autoRefresh} service={devService()}><ActiveFinance><MarketCatalogProvider catalog={devCatalog()}>{children}</MarketCatalogProvider></ActiveFinance></WorkspaceProvider></ReportingProvider>
+  return <ReportingProvider currency={settings.reportingCurrency} prefs={settings.fx} key={settings.reportingCurrency}><WorkspaceProvider autoRefreshMin={settings.autoRefresh} service={devService()}><ActiveFinance><MarketCatalogProvider catalog={devCatalog()}>{children}</MarketCatalogProvider></ActiveFinance></WorkspaceProvider></ReportingProvider>
 }
 /* Binds the read model to the selected workspace. A workspace without data (loading, unavailable, failed) gets an
    empty portfolio, never another workspace's data. Detail panels are reset when the workspace changes. */

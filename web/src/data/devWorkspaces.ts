@@ -69,10 +69,18 @@ let cached: WorkspaceService | undefined
    - Links: kalshi.com/markets/kxscalar → unsupported market type; kalshi.com/markets/kxdown → temporarily unavailable. */
 const EXTRA: CatalogEvent[] = [
   { provider: 'ks', eventId: 'ks-ev-ecb-jan', eventTitle: 'ECB rate decision (Jan 2027)', url: 'https://kalshi.com/markets/kxecb-27jan', available: true, markets: [
-    { provider: 'ks', marketId: 'KXECB-27JAN-CUT', marketTitle: 'ECB cuts rates in Jan 2027', settlementGroup: 'ks-ecb-cut', category: 'Economics', status: 'open', resolves: '2027-01-29', rules: 'Development fixture.', outcomes: [{ outcome: 'YES', refPrice: 0.38 }, { outcome: 'NO', refPrice: 0.63 }], refAsOf: '2026-11-24', fee: null, listedAt: '2026-10-01', closesAt: null, resolution: null, denomination: 'USD',
+    { provider: 'ks', marketId: 'KXECB-27JAN-CUT', marketTitle: 'ECB cuts rates in Jan 2027', settlementGroup: 'ks-ecb-cut', category: 'Economics', status: 'open', resolves: '2027-01-29', rules: 'Development fixture.', outcomes: [{ outcome: 'YES', refPrice: 0.38 }, { outcome: 'NO', refPrice: 0.63 }], refAsOf: '2026-11-24', fee: null, listedAt: '2026-10-01', closesAt: null, resolution: null, denomination: 'USD', identity: 'fixture',
       evidence: { price: 'available', history: 'unavailable', fee: 'unavailable', resolution: 'not-resolved' } },
-    { provider: 'ks', marketId: 'KXECB-27JAN-HOLD', marketTitle: 'ECB holds rates in Jan 2027', settlementGroup: 'ks-ecb-hold', category: 'Economics', status: 'open', resolves: '2027-01-29', rules: 'Development fixture.', outcomes: [{ outcome: 'YES', refPrice: null }, { outcome: 'NO', refPrice: null }], refAsOf: null, fee: null, listedAt: '2026-10-01', closesAt: null, resolution: null, denomination: 'USD',
+    { provider: 'ks', marketId: 'KXECB-27JAN-HOLD', marketTitle: 'ECB holds rates in Jan 2027', settlementGroup: 'ks-ecb-hold', category: 'Economics', status: 'open', resolves: '2027-01-29', rules: 'Development fixture.', outcomes: [{ outcome: 'YES', refPrice: null }, { outcome: 'NO', refPrice: null }], refAsOf: null, fee: null, listedAt: '2026-10-01', closesAt: null, resolution: null, denomination: 'USD', identity: 'fixture',
       evidence: { price: 'unavailable', history: 'unavailable', fee: 'unavailable', resolution: 'not-resolved' } },
+  ] },
+  { provider: 'pm', eventId: 'pm-ev-pusd', eventTitle: 'Brent above $90 on Mar 31 (PUSD)', url: 'https://polymarket.com/event/brent-above-90-mar-31', available: true, markets: [
+    { provider: 'pm', marketId: 'pm-brent-90-mar', marketTitle: 'Brent above $90 on Mar 31', settlementGroup: 'pm-brent-90', category: 'Economics', status: 'open', resolves: '2027-03-31', rules: 'Development fixture.', outcomes: [{ outcome: 'YES', refPrice: 0.22 }, { outcome: 'NO', refPrice: 0.79 }], refAsOf: '2026-11-24', fee: null, listedAt: '2026-06-01', closesAt: null, resolution: null, denomination: 'PUSD', identity: 'fixture',
+      evidence: { price: 'available', history: 'unavailable', fee: 'unavailable', resolution: 'not-resolved' } },
+  ] },
+  { provider: 'pm', eventId: 'pm-ev-unknown', eventTitle: 'Copper above $5 on Dec 31 (asset unknown)', url: 'https://polymarket.com/event/copper-above-5', available: true, markets: [
+    { provider: 'pm', marketId: 'pm-copper-5', marketTitle: 'Copper above $5 on Dec 31', settlementGroup: 'pm-copper-5', category: 'Economics', status: 'open', resolves: '2026-12-31', rules: 'Development fixture.', outcomes: [{ outcome: 'YES', refPrice: 0.4 }, { outcome: 'NO', refPrice: 0.61 }], refAsOf: '2026-11-24', fee: null, listedAt: '2026-04-01', closesAt: null, resolution: null, denomination: null, identity: 'fixture',
+      evidence: { price: 'available', history: 'unavailable', fee: 'unavailable', resolution: 'not-resolved' } },
   ] },
 ]
 export function devDiscovery(): MarketCatalog {

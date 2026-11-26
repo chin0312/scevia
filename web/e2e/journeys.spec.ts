@@ -462,6 +462,9 @@ test('stored state: invalid data falls back safely; clearing removes only Scevia
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('What do you want to explore?') // unknown active → entry page
   await expect(page.locator('#saved')).toContainText('Restored') // older scenario migrated, not discarded
   await page.getByRole('option', { name: /Restored/ }).click()
+  // Its original starting portfolio was never recorded: a new one is set explicitly, and marked as new.
+  await expect(page.getByText('Original starting portfolio unavailable.')).toBeVisible()
+  await page.getByRole('button', { name: /Set a new starting portfolio from Sample portfolio/ }).click()
   await expect(rows(page)).toHaveCount(1) // dangling "ghost" reference dropped
   await page.getByRole('button', { name: 'Account' }).click()
   await page.getByRole('menuitem', { name: 'Data & privacy' }).click()
@@ -613,6 +616,7 @@ test('unavailable values stay unavailable: beyond the event limit and without a 
     sessionStorage.setItem('scevia-active-v4', JSON.stringify('big'))
   }, markets)
   await page.reload()
+  await page.getByRole('button', { name: /Set a new starting portfolio from Sample portfolio/ }).click()
   await expect(summary(page, 'Settlement range')).toHaveText('Unavailable')
   await expect(summary(page, 'Value at reference marks')).toHaveText('Unavailable')
   await view(page, 'Analyze')

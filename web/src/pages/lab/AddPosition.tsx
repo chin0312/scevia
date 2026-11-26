@@ -103,7 +103,8 @@ function Search({ inScenario, isPicked, toggle }: PickProps) {
   const [cat, setCat] = useState<(typeof CATS)[number]>('All categories')
   const [openOnly, setOpenOnly] = useState(true)
   const [pricedOnly, setPricedOnly] = useState(false)
-  const [state, setState] = useState<{ q: string; events: CatalogEvent[] } | { error: true } | null>(null)
+  // Results are keyed by the request that produced them; only results for the current query and provider are shown.
+  const [state, setState] = useState<{ q: string; prov: string; events: CatalogEvent[] } | { q: string; prov: string; error: true } | null>(null)
   const [loading, setLoading] = useState(false)
   const [retry, setRetry] = useState(0)
   const seq = useRef(0)
@@ -113,12 +114,15 @@ function Search({ inScenario, isPicked, toggle }: PickProps) {
     // Only the latest request may update the list (stale responses are dropped); a failure is shown, never an empty list.
     const t = window.setTimeout(() => {
       MARKET_CATALOG.search(q, { provider })
-        .then((events) => { if (n === seq.current) { setState({ q, events }); setLoading(false) } })
-        .catch(() => { if (n === seq.current) { setState({ error: true }); setLoading(false) } })
+        .then((events) => { if (n === seq.current) { setState({ q, prov, events }); setLoading(false) } })
+        .catch(() => { if (n === seq.current) { setState({ q, prov, error: true }); setLoading(false) } })
     }, 150)
     return () => window.clearTimeout(t)
-  }, [q, prov, retry])
-  const events = state && 'events' in state ? state.events.map((ev) => ({ ...ev, markets: ev.markets.filter((m) => (cat === 'All categories' || m.category === (cat as Category)) && (!openOnly || m.status === 'open') && (!pricedOnly || m.outcomes.some((o) => o.refPrice != null))) })).filter((ev) => ev.markets.length) : []
+  }, [q, prov, retry, MARKET_CATALOG])
+  // A closed dialog (or another service) can't receive an obsolete response.
+  useEffect(() => () => { seq.current++ }, [])
+  const current = !!state && state.q === q && state.prov === prov
+  const events = current && state && 'events' in state ? state.events.map((ev) => ({ ...ev, markets: ev.markets.filter((m) => (cat === 'All categories' || m.category === (cat as Category)) && (!openOnly || m.status === 'open') && (!pricedOnly || m.outcomes.some((o) => o.refPrice != null))) })).filter((ev) => ev.markets.length) : []
   return (<>
     <div className="row" style={{ flexWrap: 'wrap' }}>
       <input data-autofocus autoFocus className="text-input" style={{ flex: 1, minWidth: 200 }} type="search" placeholder="Search markets, e.g. “Fed” or “Ethereum”" aria-label="Search markets" value={q} onChange={(e) => setQ(e.target.value)} />
@@ -131,10 +135,10 @@ function Search({ inScenario, isPicked, toggle }: PickProps) {
       <Chip tone="warn">{MARKET_CATALOG.label}</Chip>
     </div>
     <div className="addpos-list" aria-busy={loading} aria-live="polite">
-      {loading && <small className="t3" role="status">Searching…</small>}
-      {loading && !state && <div className="skeleton" style={{ height: 120 }} />}
-      {state && 'error' in state && <Callout tone="warn" icon="alert">Market search isn’t available right now. Your scenario is unaffected and nothing is shown in its place. <button type="button" className="link" onClick={() => setRetry((r) => r + 1)}>Try again</button></Callout>}
-      {state && 'events' in state && events.length === 0 && <div className="empty"><p>No markets match{state.q ? ` “${state.q}”` : ''} with these filters.</p></div>}
+      {(loading || !current) && <small className="t3" role="status">Searching{q.trim() ? ` for “${q.trim()}”` : ''}…</small>}
+      {!current && <div className="skeleton" style={{ height: 120 }} />}
+      {current && state && 'error' in state && <Callout tone="warn" icon="alert">Market search isn’t available right now. Your scenario is unaffected and nothing is shown in its place. <button type="button" className="link" onClick={() => setRetry((r) => r + 1)}>Try again</button></Callout>}
+      {current && state && 'events' in state && events.length === 0 && <div className="empty"><p>No markets match{state.q ? ` “${state.q}”` : ''} with these filters.</p></div>}
       {events.map((ev) => <EventCard key={ev.eventId} ev={ev} inScenario={inScenario} isPicked={isPicked} toggle={toggle} />)}
     </div>
   </>)

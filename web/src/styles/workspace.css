@@ -108,3 +108,10 @@
 .ev-b { font-size: var(--font-size-caption); padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--color-bg-raised); color: var(--color-text-tertiary); }
 .ev-b.available { color: var(--color-text-secondary); }
 .ev-b.partial { color: var(--color-warn-fg); }
+
+.set-adv { margin: var(--space-3) 0; }
+.set-adv summary { cursor: pointer; font-size: var(--font-size-sm); color: var(--color-text-secondary); }
+.set-adv summary:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
+.fx-legs { list-style: none; margin: var(--space-2) 0 0; padding: 0; display: grid; gap: var(--space-1); font-size: var(--font-size-xs); color: var(--color-text-tertiary); }
+.fx-legs li { display: flex; justify-content: space-between; gap: var(--space-3); }
+.set-adv > p { font-size: var(--font-size-xs); margin: var(--space-2) 0; }

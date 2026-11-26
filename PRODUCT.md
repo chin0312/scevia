@@ -122,7 +122,7 @@ Scenario Lab is a **portfolio construction and simulation workspace**. The user 
 - **Honest charts.** No equity curves, annualized returns, Sharpe ratios, drawdowns or Monte Carlo for hypothetical scenarios, and no expected values without stated probabilities. A settlement range is not a distribution.
 - **Current build:**
   - Market search and link resolution run against a small **sample market catalog**, labelled "Sample market data".
-  - Real lookup arrives with provider integration (Phase 2), and real-data scenarios with Phase 5.
+  - Backend market lookup and scenario services are merged (Phases 2, 5–7); they are validated against real sources in Phase 9 and connected to this UI in Phase 10.
 
 ## Accounts, sources and records
 

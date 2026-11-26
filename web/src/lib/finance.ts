@@ -16,7 +16,7 @@
  *  - Settlement payoff a contract pays $1 per share if its side wins, $0 otherwise.
  */
 import { DEFAULT_FEES, estimateFee, type FeeAssumption, type FeeSchedule, type FeeStatus } from './fees'
-import type { PortfolioData, AccountRef, Category, ClosedTrade, DataSource, OpenPosition, Platform, RelClass, Relation, RiskEvent, Side } from '../data/types'
+import type { Denomination, PortfolioData, AccountRef, Category, ClosedTrade, DataSource, OpenPosition, Platform, RelClass, Relation, RiskEvent, Side } from '../data/types'
 export type { RelClass, Relation }
 export type { RelProvenance } from '../data/types'
 
@@ -280,6 +280,11 @@ export interface InstrumentRef {
   source: 'sample' | 'provider'
   /** The market's fee parameters as known when the instrument was selected (null = unavailable). */
   fee?: FeeSchedule | null
+  /** Provider-native outcome/instrument id when known (null for fixture data); identity is provider + marketId +
+   *  outcome, and this id binds it to the backend's canonical instrument at integration. */
+  nativeOutcomeId?: string | null
+  /** Native settlement asset when established (null = not established). */
+  denomination?: Denomination | null
 }
 export const instrumentKey = (i: Pick<InstrumentRef, 'provider' | 'marketId' | 'outcome'>) => `${i.provider}:${i.marketId}:${i.outcome}`
 /** A hypothetical change: hold `to` shares of an instrument, trading at the assumed `price`.

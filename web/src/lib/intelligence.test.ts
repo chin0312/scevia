@@ -141,7 +141,7 @@ describe('Historical Replay', () => {
     ],
   })
   // A market whose trading closed on Nov 20 and that resolved on Nov 23.
-  const closing: ReplayMarket = { provider: 'pm', marketId: 'x-close', title: 'Closes before it resolves', eventTitle: 'X', category: 'Economics', listedAt: '2026-10-01', closesAt: '2026-11-20', expectedResolution: '2026-11-22', resolution: { outcome: 'NO', at: '2026-11-23' }, fee: null, observations: { YES: [], NO: [] } }
+  const closing: ReplayMarket = { provider: 'pm', marketId: 'x-close', title: 'Closes before it resolves', eventTitle: 'X', category: 'Economics', listedAt: '2026-10-01', closesAt: '2026-11-20', expectedResolution: '2026-11-22', resolution: { outcome: 'NO', at: '2026-11-23' }, fee: null, observations: { YES: [], NO: [] }, denomination: 'USDC', identity: 'fixture', nativeOutcomeIds: { YES: null, NO: null } }
   const pos = (over: Partial<ReplayPosition>): ReplayPosition => ({ id: 'q', market: closing, outcome: 'NO', bucketId: PM.id, entryDate: '2026-11-10', entryPrice: 0.7, size: { mode: 'shares', value: 100 }, exit: { kind: 'settle' }, ...over })
   const with_ = (...ps: ReplayPosition[]): Replay => ({ ...base(), positions: ps })
 
@@ -283,13 +283,31 @@ describe('reporting currency and exchange-rate references', () => {
     const { fixtureFx, convert } = await import('./fx')
     const fx = fixtureFx()
     expect(fx.live).toBe(false)
-    expect(fx.reference('USD', 'SGD')).toMatchObject({ rate: 1.34, kind: 'fiat', source: 'Development fixture' })
+    expect(fx.reference('USD', 'SGD')).toMatchObject({ rate: 1.34, kind: 'fiat', source: 'ecb_euro_reference', fixture: true })
     expect(fx.reference('USD', 'MYR').freshness).toBe('stale')
     expect(fx.reference('USDC', 'USD').kind).toBe('stablecoin')
     expect(fx.reference('USD', 'JPY')).toMatchObject({ rate: null, freshness: 'unsupported' })
     expect(convert(100, fx.reference('USD', 'JPY'))).toBeNull()
     expect(convert(null, fx.reference('USD', 'SGD'))).toBeNull()
     expect(convert(100, fx.reference('USDC', 'SGD'))).toBeCloseTo(134)
+    // A confirmed zero needs no rate; an unknown amount stays unknown.
+    expect(convert(0, fx.reference('USD', 'JPY'))).toBe(0)
+  })
+  it('uses each source only for the legs it supports, falls back qualified, and defaults to automatic', async () => {
+    const { fixtureFx, readFxPreferences, AUTO_FX } = await import('./fx')
+    expect(readFxPreferences({ fiatSource: 'oanda', stablecoinSource: 'kraken_usdc_usd_ohlc' })).toEqual({ fiatSource: 'auto', stablecoinSource: 'kraken_usdc_usd_ohlc' })
+    const auto = fixtureFx(undefined, AUTO_FX)
+    expect(auto.reference('USDC', 'USD')).toMatchObject({ source: 'kraken_usdc_usd_ohlc', fallback: false })
+    expect(auto.reference('PUSD', 'USD')).toMatchObject({ source: 'coingecko_polygon_pusd_usd', fallback: false })
+    const kraken = fixtureFx(undefined, { fiatSource: 'auto', stablecoinSource: 'kraken_usdc_usd_ohlc' })
+    expect(kraken.reference('PUSD', 'USD')).toMatchObject({ source: 'coingecko_polygon_pusd_usd', fallback: true })
+  })
+  it('never converts an authoritative reporting amount again', async () => {
+    const { fmtReporting, setReportingFormat } = await import('./format')
+    setReportingFormat({ code: 'SGD', symbol: 'S$', rate: 1.34 })
+    expect(fmtReporting(1000, 'SGD')).toBe('S$1,000.00')
+    expect(fmtReporting(null, 'SGD')).toBe('Unavailable')
+    setReportingFormat({ code: 'USD', symbol: '$', rate: 1 })
   })
   it('formats portfolio money in the reporting currency; native amounts keep their units', async () => {
     const { fmt, fmtNative, setReportingFormat, reportingCode } = await import('./format')
@@ -362,5 +380,63 @@ describe('market discovery service', () => {
     expect((await d.resolveLink('https://kalshi.com/markets/kxdown')).status).toBe('temporarily-unavailable')
     expect((await d.resolveLink('https://manifold.markets/x')).status).toBe('unsupported')
     await expect(d.search('outage')).rejects.toThrow()
+  })
+})
+
+describe('replay funding follows each market’s own settlement asset', () => {
+  it('maps USDC, PUSD and USD markets to separate buckets and never guesses an unknown asset', async () => {
+    const { devDiscovery } = await import('../data/devWorkspaces')
+    const { bucketFor } = await import('./replay')
+    const d = devDiscovery()
+    const find = async (q: string, id: string) => { const ev = (await d.search(q)).find((e) => e.markets.some((m) => m.marketId === id))!; return replayMarketFrom(ev, ev.markets.find((m) => m.marketId === id)!) }
+    const usdc = await find('Bitcoin', 'pm-btc-150k'), pusd = await find('Brent', 'pm-brent-90-mar'), usd = await find('ECB', 'KXECB-27JAN-CUT'), unknown = await find('Copper', 'pm-copper-5')
+    expect([usdc.denomination, pusd.denomination, usd.denomination, unknown.denomination]).toEqual(['USDC', 'PUSD', 'USD', null])
+    const pmUsdc = { id: bucketId('pm', 'USDC'), venue: 'pm' as const, denomination: 'USDC' as const, capital: 500 }
+    // Same venue, different asset: a PUSD market gets its own (new, empty) PUSD bucket, not the USDC one.
+    expect(bucketFor([pmUsdc], pusd)).toMatchObject({ id: bucketId('pm', 'PUSD'), denomination: 'PUSD', capital: 0 })
+    expect(bucketFor([pmUsdc], usdc)).toBe(pmUsdc)
+    expect(bucketFor([pmUsdc], usd)).toMatchObject({ venue: 'ks', denomination: 'USD' })
+    expect(bucketFor([pmUsdc], unknown)).toBeNull()
+    const pmPusd = { id: bucketId('pm', 'PUSD'), venue: 'pm' as const, denomination: 'PUSD' as const, capital: 300 }
+    const pos = (id: string, m: typeof usdc, bucket: string) => ({ id, market: m, outcome: 'YES' as const, bucketId: bucket, entryDate: '2026-11-20', entryPrice: 0.3, size: { mode: 'amount' as const, value: 100 }, exit: { kind: 'settle' as const } })
+    const r: Replay = { key: 'd', name: 'd', color: '', start: '2026-11-01', end: '2026-11-24', buckets: [pmUsdc, pmPusd], fees: { mode: 'excluded' }, rates: { USDC: null, PUSD: null }, basis: 'retrospective', createdAt: '',
+      positions: [pos('a', usdc, pmUsdc.id), pos('b', pusd, pmPusd.id), pos('c', pusd, pmUsdc.id), pos('e', unknown, pmUsdc.id)] }
+    const v = validateReplay(r, '2026-11-24')
+    expect(v.positions.a).toBeUndefined()
+    expect(v.positions.b).toBeUndefined()
+    expect(v.positions.c).toBe('This market settles in PUSD; its funding must be PUSD, not USDC.')
+    expect(v.positions.e).toMatch(/settlement asset isn’t established/)
+    // A replay with USDC and PUSD keeps two native results.
+    const res = runReplay({ ...r, positions: r.positions.slice(0, 2) }, '2026-11-24')
+    expect(res.byDenomination.map((x) => x.denomination).sort()).toEqual(['PUSD', 'USDC'])
+  })
+  it('keeps the fixture rule only for replays saved before denominations were stored', () => {
+    const ev = SAMPLE_MARKET_EVENTS.find((e) => e.markets.some((m) => m.marketId === 'pm-btc-150k'))!
+    const m = replayMarketFrom(ev, ev.markets[0])
+    const legacy = { ...m } as Record<string, unknown>
+    delete legacy.denomination; delete legacy.identity; delete legacy.nativeOutcomeIds
+    const raw = [{ key: 'x', name: 'x', start: '2026-03-01', end: '2026-11-24', buckets: [], positions: [{ id: 'p', market: legacy, outcome: 'YES', bucketId: bucketId('pm', 'USDC'), entryDate: '2026-03-02', entryPrice: 0.3, size: { mode: 'shares', value: 1 }, exit: { kind: 'settle' } }] }]
+    expect(sanitizeReplays(raw)![0].positions[0].market.denomination).toBe('USDC')
+    const provider = [{ ...raw[0], positions: [{ ...raw[0].positions[0], market: { ...legacy, identity: 'provider' } }] }]
+    expect(sanitizeReplays(provider)![0].positions[0].market.denomination).toBeNull()
+  })
+})
+
+describe('frozen replay reporting references', () => {
+  it('converts with the references frozen in the replay, unaffected by newer references until taken explicitly', () => {
+    const PM = { id: bucketId('pm', 'PUSD'), venue: 'pm' as const, denomination: 'PUSD' as const, capital: 1500 }
+    const KS = { id: bucketId('ks', 'USD'), venue: 'ks' as const, denomination: 'USD' as const, capital: 1200 }
+    const r: Replay = { key: 'f', name: 'f', color: '', start: '2026-03-01', end: '2026-11-24', buckets: [PM, KS], fees: { mode: 'excluded' }, rates: { USDC: null, PUSD: null }, basis: 'retrospective', createdAt: '', positions: [],
+      refRates: { USDC: 1, PUSD: 0.9, sources: { PUSD: 'coingecko_polygon_pusd_usd' }, capturedAt: '2026-11-24' } }
+    expect(runReplay(r, '2026-11-24').combined!.endValue).toBeCloseTo(2550)
+    // Newer references exist elsewhere, but the replay keeps converting with its frozen ones.
+    const newer = (asset: string) => (asset === 'USD' ? 1 : 0.95)
+    expect(runReplay(r, '2026-11-24').combined!.endValue).toBeCloseTo(2550)
+    // Taking them is explicit, and a stored replay keeps what it captured.
+    const taken = { ...r, refRates: { ...r.refRates!, PUSD: newer('PUSD') } }
+    expect(runReplay(taken, '2026-11-24').combined!.endValue).toBeCloseTo(1200 + 1500 * 0.95)
+    expect(sanitizeReplays(JSON.parse(JSON.stringify([r])))![0].refRates).toMatchObject({ PUSD: 0.9 })
+    // A replay saved before references were captured has no combined result until they are.
+    expect(runReplay({ ...r, refRates: null }, '2026-11-24').combinedMissing).toBe('rate')
   })
 })

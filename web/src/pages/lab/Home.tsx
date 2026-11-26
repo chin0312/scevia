@@ -92,10 +92,10 @@ export function LabHome({ hasPortfolio, scenarios, evals, onCurrent, onScratch, 
               const e = evals[s.key], st = SC.status(s)
               return (
                 <button type="button" key={s.key} className="scn-card" onClick={() => onOpen(s.key)} aria-label={`Open ${s.name}`}>
-                  <span className="scn-kind">Current market{s.baseAsOf ? ` · prices from ${fmtDate(s.baseAsOf)}` : ''}</span>
+                  <span className="scn-kind">Current market · {s.baseline === 'scratch' ? 'from scratch' : `from ${s.source?.name ?? 'a portfolio'}`}{s.frozen ? ` · frozen ${fmtDate(s.frozen.asOf)}` : ''}</span>
                   <span className="row"><i className="sw" style={{ background: s.color }} /><b>{s.name}</b><small className={cx('scn-st', st)}>{st === 'saved' ? 'Saved' : st === 'new' ? 'Not saved' : 'Unsaved changes'}</small></span>
                   <span className="t3">{s.baseline === 'scratch' ? 'From scratch' : 'From current portfolio'} · {s.adjs.length} position{s.adjs.length === 1 ? '' : 's'}{e.funding ? ` · +${fmt(e.funding)} capital` : ''}</span>
-                  <span className="scn-v">{e.A.totalValue == null ? <span className="t3">Value unavailable</span> : fmt(e.A.totalValue)}<small className="t3"> at marks{Object.keys(e.sim.errors).length ? ' · incomplete' : ''}{e.A.shortfall > 0 ? ' · needs funding' : ''}</small></span>
+                  <span className="scn-v">{s.baseline === 'portfolio' && !s.frozen ? <span className="t3">Original starting portfolio unavailable</span> : e.A.totalValue == null ? <span className="t3">Value unavailable</span> : fmt(e.A.totalValue)}<small className="t3"> at marks{Object.keys(e.sim.errors).length ? ' · incomplete' : ''}{e.A.shortfall > 0 ? ' · needs funding' : ''}</small></span>
                 </button>
               )
             })}

@@ -4,12 +4,14 @@
    (data/sampleMarkets.ts), clearly labelled as such. In Phase 2 a backend implementation replaces it: provider
    APIs are called by trusted backend adapters, never from the browser, and the browser never fetches the pasted URL.
    Public market data is independent of the user's private portfolio. */
-import type { Category, Platform } from '../data/types'
+import type { Category, Denomination, Platform } from '../data/types'
 import type { InstrumentRef, Outcome } from './finance'
 import type { FeeSchedule } from './fees'
 
 export type MarketStatus = 'open' | 'closed' | 'resolved'
-export interface CatalogOutcome { outcome: Outcome; refPrice: number | null }
+/** One outcome of a binary market. `nativeId` is the provider's own outcome/instrument id (a Polymarket token id, a
+ *  Kalshi ticker side) when the market service supplies it; null for the fictional sample (never invented). */
+export interface CatalogOutcome { outcome: Outcome; refPrice: number | null; nativeId?: string | null }
 export interface CatalogMarket {
   provider: Platform
   /** Provider-native market id. */
@@ -33,8 +35,11 @@ export interface CatalogMarket {
   closesAt?: string | null
   /** Verified resolution (outcome and time), or null while unresolved. Settlement payouts follow it. */
   resolution?: { outcome: Outcome; at: string } | null
-  /** Native settlement asset of the market (USD, USDC, PUSD); null = not reported. */
-  denomination?: string | null
+  /** Native settlement asset of the market as established by the market service (USD, USDC, PUSD); null = not
+   *  established. Never inferred from the venue: Polymarket has legacy USDC and current PUSD markets. */
+  denomination?: Denomination | null
+  /** Where the identity comes from: the bundled fictional catalog (synthetic ids) or the backend market service. */
+  identity?: 'fixture' | 'provider'
   /** Which supporting evidence the market service has. A market can be found even when pricing it isn't possible. */
   evidence?: MarketEvidence
 }
@@ -88,6 +93,7 @@ export function instrumentFrom(ev: CatalogEvent, m: CatalogMarket, o: CatalogOut
   return {
     provider: m.provider, eventId: m.settlementGroup, eventTitle: ev.eventTitle, marketId: m.marketId, marketTitle: m.marketTitle,
     outcome: o.outcome, category: m.category, resolves: m.resolves, refPrice: o.refPrice, refAsOf: m.refAsOf, source, fee: m.fee,
+    ...(o.nativeId ? { nativeOutcomeId: o.nativeId } : {}), ...(m.denomination ? { denomination: m.denomination } : {}),
   }
 }
 

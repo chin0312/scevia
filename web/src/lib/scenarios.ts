@@ -30,6 +30,8 @@ export interface Scenario extends Snapshot {
    *  scenario is evaluated against this snapshot, never the latest portfolio; rebasing replaces it explicitly. */
   frozen?: PortfolioData | null
   source?: { workspaceId: string; name: string } | null
+  /** 'replaced': the original starting portfolio was never recorded (an earlier version) and the user set a new one. */
+  baselineNote?: 'replaced' | null
 }
 export type ScenarioStatus = 'new' | 'saved' | 'modified'
 
@@ -100,6 +102,7 @@ function readInstrument(v: unknown): InstrumentRef | undefined | false {
     provider: i.provider as Platform, eventId: i.eventId as string, eventTitle: i.eventTitle as string, marketId: i.marketId as string, marketTitle: i.marketTitle as string,
     outcome: i.outcome, category: i.category as InstrumentRef['category'], resolves: i.resolves as string, refPrice: i.refPrice as number | null,
     refAsOf: typeof i.refAsOf === 'string' ? i.refAsOf : null, source: i.source === 'provider' ? 'provider' : 'sample',
+    ...(typeof i.nativeOutcomeId === 'string' ? { nativeOutcomeId: i.nativeOutcomeId } : {}), ...(i.denomination === 'USD' || i.denomination === 'USDC' || i.denomination === 'PUSD' ? { denomination: i.denomination } : {}),
     fee: readSchedule(i.fee),
   }
 }
@@ -158,7 +161,7 @@ export function sanitize(raw: unknown, knownIds: (id: string, frozen: PortfolioD
     // Older formats stored `start` as a list of adjustments.
     const start = Array.isArray(x.start) ? { ...cur, adjs: adjs(x.start) } : x.start && typeof x.start === 'object' ? snapshot(x.start, typeof x.start.name === 'string' ? x.start.name : cur.name) : undefined
     return [{ ...cur, key: x.key, saved, savedAt: typeof x.savedAt === 'string' ? x.savedAt : null, color: typeof x.color === 'string' ? x.color : '', start, baseAsOf: typeof x.baseAsOf === 'string' ? x.baseAsOf : null,
-      frozen, source: x.source && typeof x.source.workspaceId === 'string' && typeof x.source.name === 'string' ? { workspaceId: x.source.workspaceId, name: x.source.name } : null }]
+      frozen, ...(x.baselineNote === 'replaced' ? { baselineNote: 'replaced' as const } : {}), source: x.source && typeof x.source.workspaceId === 'string' && typeof x.source.name === 'string' ? { workspaceId: x.source.workspaceId, name: x.source.name } : null }]
   })
   const keys = new Set<string>()
   return { scenarios: scenarios.filter((x) => !keys.has(x.key) && keys.add(x.key)), dropped }

@@ -104,7 +104,13 @@ test('discovery: markets beyond the local catalog, links and ids, partial eviden
   // A multi-market event: both markets listed, nothing selected for the user; the unpriced one is found, not priced.
   await expect(dlg.getByText('ECB cuts rates in Jan 2027')).toBeVisible()
   await expect(dlg.getByText('ECB holds rates in Jan 2027')).toBeVisible()
-  await expect(dlg.getByText('found, not priced yet')).toBeVisible()
+  // Scoped to the market's own row: only that market is found but not priced.
+  const hold = dlg.locator('.addpos-market', { hasText: 'ECB holds rates in Jan 2027' })
+  await expect(hold).toContainText('found, not priced yet')
+  await expect(hold.getByRole('button', { name: 'Select ECB holds rates in Jan 2027 YES' })).toContainText('no price')
+  await expect(dlg.locator('.addpos-market', { hasText: 'ECB cuts rates in Jan 2027' })).not.toContainText('found, not priced yet')
+  // Only results for the current query are shown: nothing from the earlier (empty or "slow fed") queries.
+  await expect(dlg.locator('.addpos-market')).toHaveCount(2)
   await expect(dlg.getByRole('button', { name: /^Deselect/ })).toHaveCount(0)
   await page.waitForTimeout(1700) // the slow earlier request must not replace the latest results
   await expect(dlg.getByText('ECB cuts rates in Jan 2027')).toBeVisible()
@@ -160,4 +166,67 @@ test('reporting currency: a global setting that converts portfolio money but not
   await expect(page.locator('.hero-fig')).toContainText('SGD')
   await page.getByRole('button', { name: /^Data status/ }).click()
   await expect(page.getByRole('menu', { name: 'Data status' })).toContainText('Exchange rates')
+})
+
+test('replay picker: exact outcomes, picks kept across queries, link mode states, funding by settlement asset', async ({ page }) => {
+  await start(page, '/scenario-lab/replay?new=1')
+  await page.getByRole('button', { name: 'Add markets…' }).first().click()
+  const dlg = page.getByRole('dialog', { name: 'Add markets' })
+  await dlg.getByLabel('Search markets').fill('Brent')
+  const brent = dlg.getByRole('group', { name: 'Brent above $90 on Mar 31' })
+  await expect(brent).toContainText('Settles in PUSD')
+  await brent.getByRole('button', { name: 'Select Brent above $90 on Mar 31 NO' }).click()
+  await dlg.getByLabel('Search markets').fill('Bitcoin')
+  await dlg.getByRole('group', { name: 'Bitcoin above $150k on Dec 31' }).getByRole('button', { name: /YES$/ }).click()
+  // Picks survive the query change; the count matches the basket.
+  await expect(dlg.getByLabel('Selected positions')).toContainText('Brent above $90 on Mar 31 · NO · PUSD')
+  await expect(dlg.getByLabel('Selected positions')).toContainText('Bitcoin above $150k on Dec 31 · YES · USDC')
+  await expect(dlg.getByRole('button', { name: 'Add 2 positions' })).toBeEnabled()
+  // A market whose settlement asset isn't established can't be selected.
+  await dlg.getByLabel('Search markets').fill('Copper')
+  await expect(dlg.getByRole('group', { name: 'Copper above $5 on Dec 31' })).toContainText('settlement asset not established')
+  await expect(dlg.getByRole('group', { name: 'Copper above $5 on Dec 31' }).getByRole('button')).toHaveCount(0)
+  // Link or id is an explicit mode with its own states.
+  await dlg.getByRole('radiogroup', { name: 'Find by' }).getByRole('radio', { name: 'Link or id' }).click()
+  await dlg.getByLabel('Market link or id').fill('https://kalshi.com/markets/kxscalar-27')
+  await expect(dlg.getByText(/market type isn’t supported/)).toBeVisible()
+  await dlg.getByLabel('Market link or id').fill('https://example.com/x')
+  await expect(dlg.getByText('Links from example.com aren’t supported.', { exact: false })).toBeVisible()
+  await dlg.getByRole('button', { name: 'Add 2 positions' }).click()
+  // Funding matched by venue and asset: separate USDC and PUSD virtual buckets.
+  await expect(page.getByLabel('Starting capital, Polymarket · USDC')).toBeVisible()
+  await expect(page.getByLabel('Starting capital, Polymarket · PUSD')).toBeVisible()
+  await expect(page.getByRole('group', { name: /Brent above/ })).toContainText('Virtual funding · PUSD')
+})
+
+test('legacy migration: an old current-portfolio scenario keeps its configuration but no invented baseline', async ({ page }) => {
+  await page.goto('/scenario-lab')
+  await page.evaluate(() => {
+    sessionStorage.clear()
+    sessionStorage.setItem('scevia-scenarios-v4', JSON.stringify([{ key: 'old', name: 'Old scenario', baseline: 'portfolio', funding: { pm: 100 }, assumptions: {}, adjs: [{ id: 'btc', to: 1000, price: 0.3 }], saved: null, savedAt: null, color: '' }]))
+    sessionStorage.setItem('scevia-active-v4', JSON.stringify('old'))
+  })
+  await page.reload()
+  await expect(page.getByRole('heading', { level: 1 })).toContainText('Old scenario')
+  await expect(page.getByText('Original starting portfolio unavailable.')).toBeVisible()
+  await expect(page.locator('#build-summary')).toHaveCount(0)
+  await page.getByRole('button', { name: /Set a new starting portfolio from Sample portfolio/ }).click()
+  await expect(page.locator('#build-summary')).toBeVisible()
+  await expect(page.getByText(/New starting portfolio from Sample portfolio as of Nov 24; the original wasn’t recorded/)).toBeVisible()
+  expect(await page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v4'))).toBeNull()
+})
+
+test('reference sources: automatic by default; a preferred source applies only where it can, else a marked fallback', async ({ page }) => {
+  await start(page, '/overview')
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const dlg = page.getByRole('dialog', { name: 'Settings' })
+  await dlg.getByText('Reference sources (advanced)').click()
+  await expect(dlg.getByLabel('Stablecoin reference source')).toHaveValue('auto')
+  const legs = dlg.getByLabel('Effective reference sources')
+  await expect(legs).toContainText('USDC → USD')
+  await expect(legs).toContainText('Kraken USDC/USD')
+  await dlg.getByLabel('Stablecoin reference source').selectOption('kraken_usdc_usd_ohlc')
+  await expect(dlg.getByLabel('Effective reference sources')).toBeVisible() // the section stays open after a change
+  await expect(dlg.getByLabel('Effective reference sources')).toContainText(/PUSD → USD.*CoinGecko Polygon PUSD\/USD · fallback/)
+  await expect(dlg.getByLabel('Effective reference sources')).toContainText('development fixture')
 })

@@ -11,7 +11,7 @@ import { LineChart } from '../components/charts'
 import { Icon } from '../components/Icon'
 import { Menu, Modal, useToast } from '../components/overlays'
 import { SectionRail, useHashScroll, type RailSection } from '../components/shell'
-import { Button, Callout, Card, CardHeader, Chip, PlatformBadge, Seg, Tabs, cx } from '../components/ui'
+import { Button, Callout, Card, CardHeader, PlatformBadge, Seg, Tabs, cx } from '../components/ui'
 import { PLATFORM_NAME } from '../data/labels'
 import type { Denomination, Platform } from '../data/types'
 import { addDays, fmtDate, type Outcome } from '../lib/finance'
@@ -20,10 +20,10 @@ import { feeLabel } from '../lib/fees'
 import { fmt, fmtNative, kfmt, pct, qty, sfmt } from '../lib/format'
 import { useReporting } from '../lib/reporting'
 import { BASIS_LABEL } from '../lib/history'
-import type { CatalogEvent } from '../lib/markets'
+import type { CatalogEvent, CatalogMarket, LinkResolution } from '../lib/markets'
 import {
-  DEFAULT_ASSET, MAX_REPLAY_POSITIONS, bucketId, replayRates, compareReplays, coverShortfall, replayMarketFrom, replayValid, runReplay, sanitizeReplays, tradingWindow, validateReplay,
-  type FundingBucket, type FundingStatus, type RateAt, type Replay, type ReplayPosition, type ReplayResult,
+  MAX_REPLAY_POSITIONS, bucketFor, bucketId, replayRates, compareReplays, coverShortfall, replayMarketFrom, replayValid, runReplay, sanitizeReplays, tradingWindow, validateReplay,
+  type FrozenRates, type FundingBucket, type FundingStatus, type Replay, type ReplayPosition, type ReplayResult,
 } from '../lib/replay'
 import { useSettings } from '../lib/settings'
 import { readStored, removeStored, scopedKey, writeStored } from '../lib/storage'
@@ -73,7 +73,7 @@ export default function ReplayPage() {
 
   const create = () => {
     const key = `r${Date.now().toString(36)}`
-    const r: Replay = { key, name: `Historical replay ${replays.length + 1}`, color: COLORS[replays.length % COLORS.length], start: addDays(today, -182), end: today, buckets: [], fees: settings.newFees === 'excluded' ? { mode: 'excluded' } : { mode: 'provider', role: 'taker' }, rates: { USDC: null, PUSD: null }, positions: [], basis: 'retrospective', createdAt: today }
+    const r: Replay = { key, name: `Historical replay ${replays.length + 1}`, color: COLORS[replays.length % COLORS.length], start: addDays(today, -182), end: today, buckets: [], fees: settings.newFees === 'excluded' ? { mode: 'excluded' } : { mode: 'provider', role: 'taker' }, rates: { USDC: null, PUSD: null }, refRates: capture(), positions: [], basis: 'retrospective', createdAt: today }
     setReplays((rs) => [...rs, r]); setActiveKey(key); setView('Build')
   }
   // ?new=1 creates once; ?open=key selects. Both are cleared so reloads and Back don't repeat them.
@@ -91,9 +91,11 @@ export default function ReplayPage() {
   const valid = !!issues && replayValid(issues) && active!.positions.length > 0
   // Combined reporting uses the exchange-rate service's references (per date; constant in the development fixture)
   // unless the replay overrides a rate as an explicit hypothetical assumption.
+  // Each replay converts with the references frozen in it (captured when it was created, or when the user explicitly
+  // takes newer ones) — never silently with whatever references are latest.
   const { fx, currency } = useReporting()
-  const refAt = useMemo<RateAt>(() => (asset) => fx.reference(asset, 'USD').rate, [fx])
-  const result = useMemo(() => (active && valid ? runReplay(active, today, replayRates(active, refAt)) : null), [active, valid, today, refAt])
+  const capture = (): FrozenRates => { const u = fx.reference('USDC', 'USD'), p = fx.reference('PUSD', 'USD'); return { USDC: u.rate, PUSD: p.rate, sources: { USDC: u.source, PUSD: p.source }, capturedAt: today } }
+  const result = useMemo(() => (active && valid ? runReplay(active, today, replayRates(active)) : null), [active, valid, today])
   const issueCount = issues ? (issues.period ? 1 : 0) + (issues.capital ? 1 : 0) + Object.keys(issues.positions).length : 0
 
   if (!active) return (
@@ -151,8 +153,8 @@ export default function ReplayPage() {
         </div>
 
         {view === 'Build' && <BuildReplay r={active} issues={issues!} result={result} onChange={update} onAdd={() => setAdding(true)} onAnalyze={() => { setView('Analyze'); window.scrollTo(0, 0) }} valid={valid} />}
-        {view === 'Analyze' && (result ? <AnalyzeReplay res={result} onChange={update} currency={currency} /> : <Callout tone="warn" icon="alert">This replay can’t be analyzed yet: {active.positions.length === 0 ? 'add at least one position.' : `${issueCount} input${issueCount === 1 ? '' : 's'} in Build need${issueCount === 1 ? 's' : ''} attention.`} <button type="button" className="link" onClick={() => setView('Build')}>Go to Build</button></Callout>)}
-        {view === 'Compare' && <CompareReplays replays={replays} today={today} activeKey={active.key} refAt={refAt} />}
+        {view === 'Analyze' && (result ? <AnalyzeReplay res={result} onChange={update} currency={currency} latest={capture()} /> : <Callout tone="warn" icon="alert">This replay can’t be analyzed yet: {active.positions.length === 0 ? 'add at least one position.' : `${issueCount} input${issueCount === 1 ? '' : 's'} in Build need${issueCount === 1 ? 's' : ''} attention.`} <button type="button" className="link" onClick={() => setView('Build')}>Go to Build</button></Callout>)}
+        {view === 'Compare' && <CompareReplays replays={replays} today={today} activeKey={active.key} />}
         <div className="footer-note"><span>Historical replays apply your stated prices and fees to recorded market history, with hindsight. They aren’t your actual performance, a strategy test or a recommendation.</span><span>{ws.summary.name} · virtual funding · sample market data</span></div>
       </main>
 
@@ -218,7 +220,7 @@ function BuildReplay({ r, issues, result, onChange, onAdd, onAnalyze, valid }: {
         {r.positions.length === 0 ? <div className="empty"><p>No positions yet. Add markets that traded during this period.</p><Button size="sm" icon="plus" onClick={onAdd}>Add markets…</Button></div> : (
           <div className="rp-rows">
             {r.positions.map((p, i) => {
-              const err = issues.positions[p.id], cav = issues.caveats[p.id], m = p.market, onVenue = r.buckets.filter((b) => b.venue === m.provider)
+              const err = issues.positions[p.id], cav = issues.caveats[p.id], m = p.market, onVenue = r.buckets.filter((b) => b.venue === m.provider && b.denomination === m.denomination)
               const n = r.positions.filter((q) => q.market.provider === m.provider && q.market.marketId === m.marketId).length
               return (
                 <div key={p.id} className={cx('rp-row', err && 'invalid')} role="group" aria-label={`Position ${i + 1}: ${m.title} ${p.outcome}`}>
@@ -232,7 +234,7 @@ function BuildReplay({ r, issues, result, onChange, onAdd, onAnalyze, valid }: {
                   </div>
                   <div className="rp-grid">
                     <div className="rp-field">Outcome<Seg label={`Outcome for position ${i + 1}`} options={['YES', 'NO'] as const} value={p.outcome} onChange={(v: Outcome) => setPos(p.id, { outcome: v })} /></div>
-                    <label className="rp-field">Virtual funding<select className="select" value={p.bucketId} onChange={(e) => setPos(p.id, { bucketId: e.target.value })}>{onVenue.map((b) => <option key={b.id} value={b.id}>{bucketLabel(b)}</option>)}</select></label>
+                    <label className="rp-field">Virtual funding · {m.denomination ?? 'asset unknown'}<select className="select" value={p.bucketId} onChange={(e) => setPos(p.id, { bucketId: e.target.value })}>{onVenue.map((b) => <option key={b.id} value={b.id}>{bucketLabel(b)}</option>)}</select></label>
                     <label className="rp-field">Entry date<input className="rp-in date" type="date" min={m.listedAt?.slice(0, 10) ?? undefined} max={r.end} value={p.entryDate} onChange={(e) => setPos(p.id, { entryDate: e.target.value })} /></label>
                     <label className="rp-field">Execution price<input className="rp-in num" type="number" inputMode="decimal" min={0.01} max={0.99} step={0.01} placeholder="0.01–0.99" value={p.entryPrice ?? ''} onChange={(e) => setPos(p.id, { entryPrice: num(e.target.value) })} /></label>
                     <div className="rp-field">Size by<Seg label={`Size by for position ${i + 1}`} options={['Shares', 'Amount', '% of capital'] as const} value={p.size.mode === 'shares' ? 'Shares' : p.size.mode === 'amount' ? 'Amount' : '% of capital'} onChange={(v) => setPos(p.id, { size: { mode: v === 'Shares' ? 'shares' : v === 'Amount' ? 'amount' : 'weight', value: p.size.value } })} /></div>
@@ -258,67 +260,110 @@ function BuildReplay({ r, issues, result, onChange, onAdd, onAnalyze, valid }: {
   </>)
 }
 
-/* Market picker (through the MarketCatalog interface). Markets that didn't trade in the period can't be added; a
-   market already in the replay can be added again as another position. Funding for the venue is offered automatically. */
+/* Market picker (through the shared MarketCatalog). Search by title, or resolve an exact provider link or native id
+   (an explicit mode). Each pick is an exact outcome (provider + market + outcome) and survives query changes; the
+   basket lists exactly the positions that will be added. Funding is matched by venue AND the market's own settlement
+   asset (a compatible empty bucket is created if needed); a market whose asset isn't established can't be added. */
+type ReplayPick = { key: string; ev: CatalogEvent; m: CatalogMarket; outcome: Outcome }
 function AddReplayMarkets({ r, onClose, onAdd }: { r: Replay; onClose: () => void; onAdd: (ps: ReplayPosition[], buckets: FundingBucket[]) => void }) {
   const MARKET_CATALOG = useMarketCatalog()
-  const [events, setEvents] = useState<CatalogEvent[] | null>(null)
-  const [error, setError] = useState(false)
+  const [found, setFound] = useState<{ q: string; events: CatalogEvent[]; outcome: LinkResolution | null; error: boolean } | null>(null)
   const [q, setQ] = useState('')
-  const [picked, setPicked] = useState<Set<string>>(new Set())
+  const [mode, setMode] = useState<'Search' | 'Link or id'>('Search')
+  const [picks, setPicks] = useState<ReplayPick[]>([])
   const seq = useRef(0)
-  // Search by title, provider link or native id. Only the latest request updates the list; a failure is shown and
-  // nothing is put in its place.
+  // Only the latest request may publish; closing the dialog drops anything still in flight.
   useEffect(() => {
-    const n = ++seq.current
+    const n = ++seq.current, term = q.trim(), key = `${mode}:${term}`
+    if (mode === 'Link or id' && !term) { setFound({ q: key, events: [], outcome: null, error: false }); return }
     const t = window.setTimeout(() => {
-      const term = q.trim(), asLink = !!term && (/^https?:\/\//i.test(term) || !/\s/.test(term) && /[-_]/.test(term))
-      const run = asLink ? MARKET_CATALOG.resolveLink(term).then((r) => (r.status === 'resolved' ? [r.event] : [])) : MARKET_CATALOG.search(term)
-      setError(false)
-      run.then((e) => { if (n === seq.current) setEvents(e) }).catch(() => { if (n === seq.current) { setEvents([]); setError(true) } })
+      const run: Promise<{ events: CatalogEvent[]; outcome: LinkResolution | null }> = mode === 'Link or id'
+        ? MARKET_CATALOG.resolveLink(term).then((res) => ({ events: res.status === 'resolved' ? [res.event] : [], outcome: res }))
+        : MARKET_CATALOG.search(term).then((events) => ({ events, outcome: null }))
+      run.then((x) => { if (n === seq.current) setFound({ q: key, ...x, error: false }) }).catch(() => { if (n === seq.current) setFound({ q: key, events: [], outcome: null, error: true }) })
     }, 150)
     return () => window.clearTimeout(t)
-  }, [q, MARKET_CATALOG])
-  const rows = (events ?? []).flatMap((ev) => ev.markets.map((m) => {
-    const key = `${m.provider}:${m.marketId}`, rm = replayMarketFrom(ev, m)
+  }, [q, mode, MARKET_CATALOG])
+  useEffect(() => () => { seq.current++ }, [])
+  const current = found && found.q === `${mode}:${q.trim()}` ? found : null
+  const why = (m: CatalogMarket) => {
+    const rm = replayMarketFrom({ provider: m.provider, eventId: '', eventTitle: '', url: '', available: true, markets: [] }, m)
     const closedBefore = m.closesAt ? m.closesAt.slice(0, 10) < r.start : !!m.resolution && m.resolution.at.slice(0, 10) <= r.start
-    const why = m.listedAt && m.listedAt.slice(0, 10) > r.end ? `opened ${long(m.listedAt)}, after the period`
+    return !m.denomination ? 'settlement asset not established'
+      : m.listedAt && m.listedAt.slice(0, 10) > r.end ? `opened ${long(m.listedAt)}, after the period`
       : closedBefore && !tradingWindow(rm, r.start).ok ? `closed ${long(m.closesAt ?? m.resolution!.at)}, before the period` : null
-    const inReplay = r.positions.filter((p) => `${p.market.provider}:${p.market.marketId}` === key).length
-    return { key, ev, m, why, inReplay }
-  }))
-  const add = () => {
-    const buckets: FundingBucket[] = []
-    const ps = rows.filter((x) => picked.has(x.key)).map(({ ev, m }, i) => {
-      const existing = r.buckets.find((b) => b.venue === m.provider) ?? buckets.find((b) => b.venue === m.provider)
-      const b = existing ?? { id: bucketId(m.provider, DEFAULT_ASSET[m.provider]), venue: m.provider, denomination: DEFAULT_ASSET[m.provider], capital: 0 }
-      if (!existing) buckets.push(b)
-      const entry = m.listedAt && m.listedAt.slice(0, 10) > r.start ? m.listedAt.slice(0, 10) : r.start
-      return { id: `rp${Date.now().toString(36)}${i}`, market: replayMarketFrom(ev, m), outcome: 'YES' as const, bucketId: b.id, entryDate: entry, entryPrice: null, size: { mode: 'amount' as const, value: null }, exit: { kind: 'settle' as const } }
-    })
-    onAdd(ps, buckets)
   }
+  const pk = (m: CatalogMarket, o: Outcome) => `${m.provider}:${m.marketId}:${o}`
+  const toggle = (ev: CatalogEvent, m: CatalogMarket, o: Outcome) => setPicks((ps) => (ps.some((p) => p.key === pk(m, o)) ? ps.filter((p) => p.key !== pk(m, o)) : [...ps, { key: pk(m, o), ev, m, outcome: o }]))
+  const add = () => {
+    let buckets = [...r.buckets]
+    const added: FundingBucket[] = []
+    const ps = picks.map(({ ev, m, outcome }, i) => {
+      const rm = replayMarketFrom(ev, m)
+      const b = bucketFor(buckets, rm)!
+      if (!buckets.some((x) => x.id === b.id)) { buckets = [...buckets, b]; added.push(b) }
+      const entry = m.listedAt && m.listedAt.slice(0, 10) > r.start ? m.listedAt.slice(0, 10) : r.start
+      return { id: `rp${Date.now().toString(36)}${i}`, market: rm, outcome, bucketId: b.id, entryDate: entry, entryPrice: null, size: { mode: 'amount' as const, value: null }, exit: { kind: 'settle' as const } }
+    })
+    onAdd(ps, added)
+  }
+  const o = current?.outcome
   return (
-    <Modal title="Add markets" sub={`Markets that traded between ${long(r.start)} and ${long(r.end)} · ${MARKET_CATALOG.label}${MARKET_CATALOG.live ? '' : ' (fictional, not live)'}`} onClose={onClose} width={620}
-      footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" disabled={!picked.size} onClick={add}>Add {picked.size || ''} position{picked.size === 1 ? '' : 's'}</Button></>}>
-      <input className="text-input" type="search" aria-label="Find markets" placeholder="Search events or markets, or paste a link or market id" value={q} onChange={(e) => setQ(e.target.value)} style={{ width: '100%', marginBottom: 'var(--space-3)' }} />
-      {error ? <Callout tone="warn" icon="alert">Market search isn’t available right now. Your replay is unaffected and nothing is shown in its place.</Callout> : !events ? <div className="skeleton" style={{ height: 240 }} aria-busy="true" aria-label="Loading markets" /> : events.length === 0 ? <div className="empty"><p>No markets found{q.trim() ? ` for “${q.trim()}”` : ''}.</p></div> : (
-        <div className="rp-pick">
-          {rows.map(({ key, m, why, inReplay }) => (
-            <label key={key} className="rp-pick-i">
-              <span className="row" style={{ minWidth: 0 }}><input type="checkbox" disabled={!!why} checked={picked.has(key)} onChange={(e) => setPicked((s) => { const n = new Set(s); if (e.target.checked) n.add(key); else n.delete(key); return n })} />
-                <PlatformBadge p={m.provider} size={16} /><span style={{ minWidth: 0 }}>{m.marketTitle}<EvidenceBadges m={m} /><small>{m.listedAt ? `Opened ${long(m.listedAt)}` : 'Opening unknown'} · {m.closesAt ? `closed ${long(m.closesAt)}` : 'close not recorded'}{m.resolution ? ` · resolved ${m.resolution.outcome} ${long(m.resolution.at)}` : ''}</small></span></span>
-              {why ? <small className="t3">{why}</small> : inReplay ? <small className="t3">{inReplay} in replay</small> : m.resolution ? <Chip>resolved</Chip> : null}
-            </label>
-          ))}
-        </div>
-      )}
-      <small className="t3" style={{ display: 'block', marginTop: 'var(--space-3)' }}>No account is needed: virtual funding for the market’s venue is added if the replay has none. Resolved markets can be replayed for past periods; they can’t be traded today.</small>
+    <Modal title="Add markets" sub={`Markets that traded between ${long(r.start)} and ${long(r.end)} · ${MARKET_CATALOG.label}${MARKET_CATALOG.live ? '' : ' (fictional, not live)'}`} onClose={onClose} width={640}
+      footer={<><span className="t3" style={{ marginRight: 'auto' }}>{picks.length ? `${picks.length} selected` : 'Choose an outcome for each position'}</span><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" disabled={!picks.length} onClick={add}>Add {picks.length || ''} position{picks.length === 1 ? '' : 's'}</Button></>}>
+      <div className="row" style={{ gap: 'var(--space-2)', marginBottom: 'var(--space-3)', flexWrap: 'wrap' }}>
+        <Seg label="Find by" options={['Search', 'Link or id'] as const} value={mode} onChange={(v) => setMode(v)} />
+        <input className="text-input" style={{ flex: 1, minWidth: 220 }} type="search" aria-label={mode === 'Search' ? 'Search markets' : 'Market link or id'} placeholder={mode === 'Search' ? 'Search events or markets' : 'Paste a Polymarket or Kalshi link, or a market id'} value={q} onChange={(e) => setQ(e.target.value)} />
+      </div>
+      <div aria-live="polite">
+        {!current ? <><small className="t3" role="status">{mode === 'Search' ? 'Searching' : 'Resolving market'}{q.trim() ? ` “${q.trim()}”` : ''}…</small><div className="skeleton" style={{ height: 200 }} aria-busy="true" /></>
+          : current.error ? <Callout tone="warn" icon="alert">Market search isn’t available right now. Your replay is unaffected and nothing is shown in its place.</Callout>
+          : o && o.status === 'invalid' ? <Callout tone="warn" icon="alert">{o.message}</Callout>
+          : o && o.status === 'unsupported' ? <Callout tone="warn" icon="alert">Links from {o.host} aren’t supported. Use a Polymarket or Kalshi link or market id.</Callout>
+          : o && o.status === 'unsupported-market' ? <Callout tone="warn" icon="alert">This {PLATFORM_NAME[o.provider]} market type isn’t supported: {o.reason}</Callout>
+          : o && o.status === 'not-found' ? <Callout icon="info">No {PLATFORM_NAME[o.provider]} market found for this link.</Callout>
+          : o && o.status === 'unavailable' ? <Callout tone="warn" icon="alert">{o.eventTitle}: market data is unavailable.</Callout>
+          : o && (o.status === 'temporarily-unavailable' || o.status === 'access-unavailable') ? <Callout tone="warn" icon="alert">{o.status === 'temporarily-unavailable' ? 'Market data is temporarily unavailable.' : 'Market data access isn’t available.'} Nothing is shown in its place.</Callout>
+          : mode === 'Link or id' && !q.trim() ? <p className="t3">Paste an exact market link or a provider market id.</p>
+          : current.events.length === 0 ? <div className="empty"><p>No markets found{q.trim() ? ` for “${q.trim()}”` : ''}.</p></div>
+          : (
+            <div className="rp-pick">
+              {current.events.flatMap((ev) => ev.markets.map((m) => {
+                const w = why(m), n = r.positions.filter((p) => p.market.provider === m.provider && p.market.marketId === m.marketId).length
+                return (
+                  <div key={`${m.provider}:${m.marketId}`} className="rp-pick-i" role="group" aria-label={m.marketTitle}>
+                    <span className="row" style={{ minWidth: 0 }}><PlatformBadge p={m.provider} size={16} /><span style={{ minWidth: 0 }}>{m.marketTitle}<EvidenceBadges m={m} />
+                      <small>{m.denomination ? `Settles in ${m.denomination}` : 'Settlement asset not established'} · {m.listedAt ? `opened ${long(m.listedAt)}` : 'opening unknown'} · {m.closesAt ? `closed ${long(m.closesAt)}` : 'close not recorded'}{m.resolution ? ` · resolved ${m.resolution.outcome} ${long(m.resolution.at)}` : ''}{n ? ` · ${n} in replay` : ''}</small></span></span>
+                    {w ? <small className="t3">{w}</small> : (
+                      <span className="addpos-outcomes">{(['YES', 'NO'] as Outcome[]).map((oc) => { const on = picks.some((p) => p.key === pk(m, oc)); return (
+                        <button key={oc} type="button" className={cx('outcome-btn', oc === 'YES' ? 'yes' : 'no', on && 'on')} aria-pressed={on} aria-label={`${on ? 'Deselect' : 'Select'} ${m.marketTitle} ${oc}`} onClick={() => toggle(ev, m, oc)}><b>{oc}</b><span>{on ? 'selected' : 'select'}</span></button>
+                      ) })}</span>
+                    )}
+                  </div>
+                )
+              }))}
+            </div>
+          )}
+      </div>
+      {picks.length > 0 && <div className="addpos-basket" aria-label="Selected positions">{picks.map((p) => <span key={p.key} className="chip">{p.m.marketTitle} · {p.outcome} · {p.m.denomination}<button type="button" className="link" aria-label={`Remove ${p.m.marketTitle} ${p.outcome}`} onClick={() => setPicks((ps) => ps.filter((x) => x.key !== p.key))}>×</button></span>)}</div>}
+      <small className="t3" style={{ display: 'block', marginTop: 'var(--space-3)' }}>No account is needed: each position is funded from virtual funding in its market’s own settlement asset, added if the replay has none. Resolved markets can be replayed for past periods; they can’t be traded today.</small>
     </Modal>
   )
 }
 
 /* ───────────── Analyze ───────────── */
+/** The references this replay converts with (frozen), and an explicit way to take newer ones. */
+function FrozenRatesLine({ r, latest, needed, onChange }: { r: Replay; latest: FrozenRates; needed: Denomination[]; onChange: (fn: (r: Replay) => Replay) => void }) {
+  const assets = needed.filter((d): d is 'USDC' | 'PUSD' => d === 'USDC' || d === 'PUSD')
+  const differs = !r.refRates || assets.some((a) => r.refRates![a] !== latest[a])
+  return (
+    <p className="t3 rp-frozen" role="status">
+      {r.refRates ? <>Converted with references captured {r.refRates.capturedAt}: {assets.map((a) => `1 ${a} = ${r.refRates![a] ?? '—'} USD (${r.refRates!.sources[a] ?? 'no source'})`).join(' · ')} · development fixture.</> : <>No references were captured for this replay, so the combined result is unavailable.</>}
+      {differs && <> <button type="button" className="link" onClick={() => onChange((x) => ({ ...x, refRates: latest }))}>{r.refRates ? 'Use latest references' : 'Capture current references'}</button></>}
+    </p>
+  )
+}
+
 function RatesEditor({ r, onChange, needed }: { r: Replay; onChange: (fn: (r: Replay) => Replay) => void; needed: Denomination[] }) {
   return (
     <details className="adv rp-rates">
@@ -333,7 +378,7 @@ function RatesEditor({ r, onChange, needed }: { r: Replay; onChange: (fn: (r: Re
   )
 }
 
-function AnalyzeReplay({ res, onChange, currency }: { res: ReplayResult; onChange: (fn: (r: Replay) => Replay) => void; currency: string }) {
+function AnalyzeReplay({ res, onChange, currency, latest }: { res: ReplayResult; onChange: (fn: (r: Replay) => Replay) => void; currency: string; latest: FrozenRates }) {
   const r = res.replay
   const from = res.supportedFrom ? res.series.findIndex((p) => p.date === res.supportedFrom) : -1
   const seg = from >= 0 ? res.series.slice(from) : []
@@ -357,6 +402,7 @@ function AnalyzeReplay({ res, onChange, currency }: { res: ReplayResult; onChang
         <div className="rp-kpi"><small>Combined · {currency}</small><b>{res.combined ? fmt(res.combined.endValue, 2) : 'Unavailable'}</b>
           <div className="rp-foot">{res.combined ? <>From {fmt(res.combined.capital, 2)} · net gain {sfmt(res.combined.netGain, 2)}{res.combined.ret != null ? ` (${res.combined.ret >= 0 ? '+' : ''}${pct(res.combined.ret * 100)})` : ''}{Object.entries(res.combined.rates).map(([d, v]) => ` · 1 ${d} = ${v} USD`).join('')} · {res.combined.basis === 'reference' ? 'reference rates' : res.combined.basis === 'hypothetical' ? 'your hypothetical rates' : 'reference and hypothetical rates'}</> : res.combinedMissing === 'rate' ? `No reference rate for ${nonUsd.join(' and ')}; native results above` : 'Needs every native value'}</div></div>
       </div>
+      {nonUsd.length > 0 && <FrozenRatesLine r={r} latest={latest} needed={nonUsd} onChange={onChange} />}
       {nonUsd.length > 0 && <RatesEditor r={r} onChange={onChange} needed={nonUsd} />}
     </section>
 
@@ -424,9 +470,9 @@ function AnalyzeReplay({ res, onChange, currency }: { res: ReplayResult; onChang
 /* ───────────── Compare ─────────────
    Normalized value (index = 100 at each replay's start) only where every compared replay has a complete series over
    the same period; otherwise an unavailable state. Figures whose basis differs are marked. */
-function CompareReplays({ replays, today, activeKey, refAt }: { replays: Replay[]; today: string; activeKey: string; refAt: RateAt }) {
+function CompareReplays({ replays, today, activeKey }: { replays: Replay[]; today: string; activeKey: string }) {
   const [picked, setPicked] = useState<string[]>(() => [activeKey, ...replays.filter((r) => r.key !== activeKey).slice(-2).map((r) => r.key)])
-  const evaluated = replays.filter((r) => picked.includes(r.key)).map((r) => { const i = validateReplay(r, today); return { r, res: replayValid(i) && r.positions.length ? runReplay(r, today, replayRates(r, refAt)) : null } })
+  const evaluated = replays.filter((r) => picked.includes(r.key)).map((r) => { const i = validateReplay(r, today); return { r, res: replayValid(i) && r.positions.length ? runReplay(r, today, replayRates(r)) : null } })
   const ready = evaluated.filter((x): x is { r: Replay; res: ReplayResult } => !!x.res)
   const cmp = ready.length >= 2 ? compareReplays(ready.map((x) => x.res)) : null
   const diffs = cmp?.differences.filter((d) => d.differs) ?? []

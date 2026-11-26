@@ -21,6 +21,10 @@ export const kfmt = (v: number) => {
   const s = a >= 1000 ? `${(a / 1000).toFixed(a >= 10000 ? 0 : 1)}k` : `${Math.round(a)}`
   return `${x < 0 ? '−' : ''}${sym()}${s}`
 }
+/** An amount the backend already reports in `currency` (authoritative): formatted with that currency's symbol and
+ *  NEVER converted again. Unavailable stays unavailable. */
+const SYMBOL: Record<string, string> = { USD: '$', SGD: 'S$', EUR: '€', GBP: '£', MYR: 'RM' }
+export const fmtReporting = (v: number | null, currency: string, d = 2) => (v == null ? 'Unavailable' : `${v < 0 ? '−' : ''}${SYMBOL[currency] ?? ''}${nf(d).format(Math.abs(v))}${SYMBOL[currency] ? '' : ` ${currency}`}`)
 /** The active reporting currency code (USD when conversion is unavailable). */
 export const reportingCode = () => (REPORT.rate == null ? 'USD' : REPORT.code)
 export const skfmt = (v: number) => `${v > 0 ? '+' : ''}${kfmt(v)}`
