@@ -74,7 +74,7 @@ The optional shared Polymarket market stream uses the documented public endpoint
 
 ## Operator acceptance
 
-Use the [prioritized live-data checklist](DATA_ACQUISITION_STRATEGY.md#live-data-acceptance-checklist) for scope, credentials, commands and independent financial evidence. Phase 7 live acceptance remains open.
+Use the [prioritized live-data checklist](DATA_ACQUISITION_STRATEGY.md#live-data-acceptance-checklist) for scope, credentials, commands and independent financial evidence. Phase 9 live acceptance remains open.
 
 ## Independent market research and reporting currency
 

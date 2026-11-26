@@ -15,7 +15,7 @@ Continuous refresh needs shared authorization-aware caching, retry/reconnection 
 
 Phase 7 owns shared authorized market-price storage, source-aware quote deduplication, historical aggregation, retention and bounded storage. Share history across workspaces and retain independent account synchronization. Revalue affected portfolios incrementally and recover interrupted refresh from durable progress. Measure representative workload and cost before choosing production retention and cadence. The current 2,000-quote manifest and 500-revision workspace bounds support local validation. Phase 11 owns production identity, external access and user-testing gates.
 
-## Phase 7 authorized validation inputs
+## Phase 9 authorized validation inputs
 
 1. Written provider and Polygon RPC permission covering the intended endpoints or exports, data retention and display, including a scoped read-only Kalshi credential or an approved export. Supply the approved Polygon RPC endpoint and representative wallet address, transaction hashes and date range through the configured access path.
 2. Approved populated Kalshi account or exports and Polymarket activity for the same declared cutoff, plus independent opening/ending cash, fills, fee and rebate totals, positions, settlements, redemptions and P&L. Include ambiguous events and a representative history size.
@@ -23,4 +23,4 @@ Phase 7 owns shared authorized market-price storage, source-aware quote deduplic
 
 The finalized CTF Exchange V2 receipt reader covers exact transaction evidence. Historical transaction discovery, other exchange generations, execution-fee/rebate and collateral activity attribution, settlement/redemption reconciliation, broader Kalshi settlement and fee coverage, and account-history scale validation remain open.
 
-See [continuous tracking operations and contracts](CONTINUOUS_TRACKING.md) for the implemented worker and outstanding Phase 7 work.
+See [continuous tracking operations and contracts](CONTINUOUS_TRACKING.md) for the implemented worker and outstanding Phase 9 live-data work.
