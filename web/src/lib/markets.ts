@@ -33,6 +33,20 @@ export interface CatalogMarket {
   closesAt?: string | null
   /** Verified resolution (outcome and time), or null while unresolved. Settlement payouts follow it. */
   resolution?: { outcome: Outcome; at: string } | null
+  /** Native settlement asset of the market (USD, USDC, PUSD); null = not reported. */
+  denomination?: string | null
+  /** Which supporting evidence the market service has. A market can be found even when pricing it isn't possible. */
+  evidence?: MarketEvidence
+}
+export type EvidenceState = 'available' | 'partial' | 'unavailable' | 'loading'
+export interface MarketEvidence { price: EvidenceState; history: EvidenceState; fee: EvidenceState; resolution: EvidenceState | 'not-resolved' }
+/** Evidence a market carries: explicit when the service reports it, otherwise derived from the fields present. */
+export function evidenceOf(m: CatalogMarket): MarketEvidence {
+  return m.evidence ?? {
+    price: m.outcomes.every((o) => o.refPrice != null) ? 'available' : m.outcomes.some((o) => o.refPrice != null) ? 'partial' : 'unavailable',
+    history: 'unavailable', fee: m.fee ? 'available' : 'unavailable',
+    resolution: m.resolution ? 'available' : m.status === 'resolved' ? 'unavailable' : 'not-resolved',
+  }
 }
 export interface CatalogEvent { provider: Platform; eventId: string; eventTitle: string; url: string; markets: CatalogMarket[]; available: boolean }
 
@@ -42,6 +56,10 @@ export type LinkResolution =
   | { status: 'not-found'; provider: Platform }
   | { status: 'unavailable'; provider: Platform; eventTitle: string }
   | { status: 'resolved'; event: CatalogEvent }
+  /** A supported provider, but a market type Scevia can't model (e.g. scalar or multi-outcome payouts). */
+  | { status: 'unsupported-market'; provider: Platform; reason: string }
+  /** The market service couldn't answer right now / isn't accessible in this build; never replaced by other data. */
+  | { status: 'temporarily-unavailable' | 'access-unavailable'; provider?: Platform }
 
 export interface MarketCatalog {
   /** Shown wherever results appear, e.g. "Sample market data". */
@@ -49,6 +67,7 @@ export interface MarketCatalog {
   /** True only for a live provider-backed implementation. */
   readonly live: boolean
   search(query: string, opts?: { provider?: Platform }): Promise<CatalogEvent[]>
+  /** Resolve a supported provider URL or a provider-native market id / ticker (never an internal database id). */
   resolveLink(url: string): Promise<LinkResolution>
 }
 
@@ -84,6 +103,13 @@ export function fixtureCatalog(events: CatalogEvent[], label: string, delayMs = 
         (!q || e.eventTitle.toLowerCase().includes(q) || e.markets.some((m) => m.marketTitle.toLowerCase().includes(q))))
     },
     async resolveLink(raw) {
+      // A provider-native market id or ticker (e.g. KXFED-26DEC or pm-btc-150k) resolves directly.
+      const id = raw.trim()
+      if (id && !/[/:\s]/.test(id)) {
+        await wait()
+        const ev = events.find((e) => e.markets.some((m) => m.marketId.toLowerCase() === id.toLowerCase()))
+        return ev ? { status: 'resolved', event: { ...ev, markets: ev.markets.filter((m) => m.marketId.toLowerCase() === id.toLowerCase()) } } : { status: 'invalid', message: 'No market with that id. Paste a full market link, or a Polymarket or Kalshi market id.' }
+      }
       const parsed = parseMarketLink(raw)
       if (!parsed.ok) return parsed.res
       await wait()

@@ -6,6 +6,7 @@ import { PERIODS, type Period, type PlatformFilter } from '../lib/finance'
 import { DEFAULT_SETTINGS, GUARDRAIL_RANGE, SECTION_FIELDS, resetSection, useSettings, type SettingsTab } from '../lib/settings'
 import { Modal, useToast } from './overlays'
 import { Button, Seg, Tabs, cx } from './ui'
+import { CURRENCIES, FRESHNESS_LABEL, fixtureFx, type ReportingCurrency } from '../lib/fx'
 
 const SCOPE: Record<string, PlatformFilter> = { All: 'all', Polymarket: 'pm', Kalshi: 'ks' }
 const SIZE = { Shares: 'shares', '$ Amount': 'amount', '% of start': 'weight' } as const
@@ -19,6 +20,14 @@ function Row({ label, help, children }: { label: string; help?: string; children
 }
 function Toggle({ label, on, set }: { label: string; on: boolean; set: (v: boolean) => void }) {
   return <button type="button" role="switch" aria-checked={on} aria-label={label} className={cx('switch', on && 'on')} onClick={() => set(!on)}><span /></button>
+}
+
+/** The reference behind the selected reporting currency, with its source and age. Not a live quote. */
+function RateLine({ currency }: { currency: ReportingCurrency }) {
+  const fx = fixtureFx()
+  const r = fx.reference('USD', currency)
+  if (currency === 'USD') return <small className="t3">No conversion needed. Stablecoin balances use their own USD references.</small>
+  return <small className={r.freshness === 'stale' ? 'stale' : 't3'}>{r.rate == null ? FRESHNESS_LABEL[r.freshness] : `1 USD = ${r.rate.toFixed(4)} ${currency}`} · {FRESHNESS_LABEL[r.freshness].toLowerCase()} · {fx.label.toLowerCase()}{r.observedAt ? `, as of ${r.observedAt}` : ''}. Not a live rate.</small>
 }
 
 export function SettingsModal({ tab: initial, onClose }: { tab: SettingsTab; onClose: () => void }) {
@@ -35,13 +44,20 @@ export function SettingsModal({ tab: initial, onClose }: { tab: SettingsTab; onC
       <Tabs label="Settings sections" options={Object.keys(SECTION_FIELDS) as SettingsTab[]} value={tab} onChange={setTab} />
       <div className="set-body">
         {tab === 'General' && <>
+          <Row label="Reporting currency" help="All portfolio values, charts and comparisons are shown in this currency, converted at the latest eligible reference rate. Converting never moves funds: balances, quantities, prices and native funding keep their own units.">
+            <span className="set-col">
+              <select className="select" aria-label="Reporting currency" value={s.reportingCurrency} onChange={(e) => update({ reportingCurrency: e.target.value as ReportingCurrency })}>
+                {CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.code} · {c.name}</option>)}
+              </select>
+              <RateLine currency={s.reportingCurrency} />
+            </span></Row>
           <Row label="Default platform scope" help="Overview opens in this scope. Switching on the page is a view filter: it never changes the portfolio.">
             <Seg label="Default platform scope" options={['All', 'Polymarket', 'Kalshi'] as const} value={(key(SCOPE, s.defaultScope) ?? 'All') as 'All'} onChange={(v) => update({ defaultScope: SCOPE[v] })} /></Row>
           <Row label="Automatic refresh" help="How often Scevia checks the selected portfolio’s sources while it’s open. Figures change only when a source has new data; scenarios, filters and inputs are never changed.">
             <Seg label="Automatic refresh" options={Object.keys(REFRESH) as (keyof typeof REFRESH)[]} value={(key(REFRESH, s.autoRefresh) ?? '15 min') as keyof typeof REFRESH} onChange={(v) => update({ autoRefresh: REFRESH[v] })} /></Row>
           <Row label="Market prices" help="For a standard YES/NO contract the price and the market-implied probability are the same number. It’s the market’s price, not Scevia’s forecast.">
             <Seg label="Market prices" options={['$0.64', '64%'] as const} value={s.priceDisplay === 'implied' ? '64%' : '$0.64'} onChange={(v) => update({ priceDisplay: v === '64%' ? 'implied' : 'price' })} /></Row>
-          <Row label="Amounts" help="Each account keeps its native asset (USD, USDC or PUSD). Totals across them are indicative and assume they’re equal in value; that assumption never funds a trade or changes a scenario."><span className="t2">Native first</span></Row>
+          <Row label="Native assets" help="Each account keeps its native asset (USD, USDC or PUSD). Combined totals convert each asset at its own reference (stablecoins aren’t assumed to equal the dollar); conversion never funds a trade or changes a saved scenario."><span className="t2">Shown first, then converted</span></Row>
         </>}
         {tab === 'Analytics' && <>
           <Row label="Default period" help="Overview’s chart and Analytics open with this period.">

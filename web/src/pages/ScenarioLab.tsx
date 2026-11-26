@@ -10,13 +10,16 @@ import { Menu, Modal, useToast } from '../components/overlays'
 import { SectionRail, scrollToSection, useHashScroll, type RailSection } from '../components/shell'
 import { Button, Callout, PlatformBadge, SideChip, Tabs, cx } from '../components/ui'
 import { PLATFORM_NAME } from '../data/labels'
-import type { Platform } from '../data/types'
-import { fmtDate, validFunding, type Adjustment, type Baseline } from '../lib/finance'
+import type { Platform, PortfolioData } from '../data/types'
+import { useActiveWorkspace } from '../lib/workspaceContext'
+import { FinanceProvider, emptyPortfolio } from '../lib/financeContext'
+import { LAB_ACTIVE_KEY, LAB_SCENARIOS_KEY, baselineDiff, freezeBaseline, mergeByKey } from './lab/baseline'
+import { createFinance, fmtDate, instrumentKey, validFunding, type Adjustment, type Baseline, type Finance } from '../lib/finance'
 import { validFeePct } from '../lib/fees'
-import { int } from '../lib/format'
+import { fmt, int } from '../lib/format'
 import { claimHandoff, readHandoff } from '../lib/handoff'
 import * as SC from '../lib/scenarios'
-import { readStored, scopedKey } from '../lib/storage'
+import { readStored, removeStored, scopedKey, writeStored } from '../lib/storage'
 import { useSettings } from '../lib/settings'
 import { useSessionState, useStorageHealthy } from '../lib/useSessionState'
 import type { Scenario } from '../lib/scenarios'
@@ -46,23 +49,36 @@ const RAILS: Record<View | 'home', RailSection[]> = {
   ],
   Compare: [{ id: 'c-pick', label: 'Scenarios', icon: 'layers' }, { id: 'c-charts', label: 'Charts', icon: 'compare' }, { id: 'c-table', label: 'Detailed table', icon: 'table' }],
 }
-const KEY = 'scevia-scenarios-v4', LEGACY_KEY = 'scevia-scenarios-v3'
+const LEGACY_KEYS = ['scevia-scenarios-v4', 'scevia-scenarios-v3']
 const NO_ADJ: Adjustment[] = []
+const knownIn = (id: string, frozen: PortfolioData | null) => !!frozen?.openPositions.some((p) => p.id === id)
 
 export default function ScenarioLab() {
   const { F, workspaceId: wsId, hasPortfolio } = useFinanceCtx()
+  const wsName = useActiveWorkspace().snapshot.summary.name
   const { TODAY, POSITIONS, POS_BY_ID, instrumentOfPosition } = F
-  const known = (id: string) => !!POS_BY_ID[id]
   useHashScroll()
   const toast = useToast()
   const [params, setParams] = useSearchParams()
-  // A new workspace is empty. Scenarios saved in an earlier format are migrated, never discarded.
-  const [legacy] = useState(() => readStored<Scenario[] | null>(scopedKey(LEGACY_KEY, wsId), null, (raw) => SC.sanitize(raw, known)?.scenarios ?? null))
-  const [scenarios, setScenarios] = useSessionState<Scenario[]>(scopedKey(KEY, wsId), legacy ?? [], (raw) => {
-    const r = SC.sanitize(raw, known)
-    return r ? r.scenarios.map((x, i) => ({ ...x, color: x.color || COLORS[i % COLORS.length] })) : null
+  // The Scenario Lab collection is the user's, not a tracked portfolio's. Scenarios kept per portfolio by earlier
+  // versions are merged in once (by key, never duplicated) and their old keys removed. Current-portfolio scenarios
+  // from then are frozen at this portfolio's state as they're migrated, and say so.
+  const sanitizeAll = (raw: unknown) => { const r = SC.sanitize(raw, knownIn); return r ? r.scenarios.map((x, i) => ({ ...x, color: x.color || COLORS[i % COLORS.length] })) : null }
+  const [initial] = useState<Scenario[]>(() => {
+    let all = readStored<Scenario[]>(LAB_SCENARIOS_KEY, [], sanitizeAll)
+    for (const base of LEGACY_KEYS) {
+      const k = scopedKey(base, wsId)
+      const legacy = readStored<Scenario[] | null>(k, null, (raw) => SC.sanitize(raw, (id) => !!POS_BY_ID[id])?.scenarios ?? null)
+      if (!legacy) continue
+      const migrated = legacy.map((x) => (x.baseline === 'portfolio' && !x.frozen ? { ...x, frozen: hasPortfolio ? freezeBaseline(F) : null, source: { workspaceId: wsId, name: wsName }, baseAsOf: x.baseAsOf ?? TODAY } : x))
+      all = mergeByKey(all, migrated)
+      if (writeStored(LAB_SCENARIOS_KEY, all)) removeStored(k)
+    }
+    return all
   })
-  const [storedActive, setActiveKey] = useSessionState<string>(scopedKey('scevia-active-v4', wsId), 'base', (v) => (typeof v === 'string' ? v : null))
+  const [scenarios, setScenarios] = useSessionState<Scenario[]>(LAB_SCENARIOS_KEY, initial, sanitizeAll)
+  const [initialActive] = useState(() => readStored<string | null>(LAB_ACTIVE_KEY, null, (v) => (typeof v === 'string' ? v : null)) ?? readStored<string>(scopedKey('scevia-active-v4', wsId), 'base', (v) => (typeof v === 'string' ? v : null)))
+  const [storedActive, setActiveKey] = useSessionState<string>(LAB_ACTIVE_KEY, initialActive, (v) => (typeof v === 'string' ? v : null))
   const [view, setView] = useSessionState<View>('scevia-lab-view', 'Build', (v) => (VIEWS.includes(v as View) ? (v as View) : null))
   const { settings } = useSettings()
   // A view preference: opens as set in Settings › Scenario Lab; each target keeps the unit it was typed in.
@@ -81,9 +97,24 @@ export default function ScenarioLab() {
   const active = scenarios.find((s) => s.key === activeKey)
   const adjs = active?.adjs ?? NO_ADJ
 
-  // Evaluations are cached per scenario object (lab/model.ts): editing one scenario re-evaluates only that one.
+  // Each scenario is evaluated against its own starting point: the frozen snapshot of the portfolio it came from, or
+  // an empty portfolio from scratch. Never the latest workspace, so refreshes, other portfolios and preferences can't
+  // change its results. Evaluations are cached per scenario object (lab/model.ts).
+  const financeOf = useMemo(() => {
+    const byData = new WeakMap<PortfolioData, Finance>(), empty = new Map<string, Finance>()
+    return (s: Scenario): Finance => {
+      if (s.baseline === 'portfolio' && s.frozen) { let f = byData.get(s.frozen); if (!f) { f = createFinance(s.frozen); byData.set(s.frozen, f) } return f }
+      const d = s.baseAsOf ?? TODAY
+      let f = empty.get(d); if (!f) { f = createFinance(emptyPortfolio(d)); empty.set(d, f) } return f
+    }
+  }, [TODAY])
   const actual = useMemo(() => evaluateActual(F), [F])
-  const evals = useMemo(() => Object.fromEntries(scenarios.map((s) => [s.key, evaluate(s, F)])) as Record<string, Evaluation>, [scenarios, F])
+  const evals = useMemo(() => Object.fromEntries(scenarios.map((s) => [s.key, evaluate(s, financeOf(s))])) as Record<string, Evaluation>, [scenarios, financeOf])
+  const SF = active ? financeOf(active) : F
+  const fromHere = !!active?.source && active.source.workspaceId === wsId && hasPortfolio
+  const diff = useMemo(() => (active?.baseline === 'portfolio' && active.frozen && fromHere ? baselineDiff(SF, F) : null), [active, fromHere, SF, F])
+  const [rebasing, setRebasing] = useState(false)
+  const frozenFor = (): Pick<Scenario, 'frozen' | 'source' | 'baseAsOf'> => ({ frozen: freezeBaseline(F), source: { workspaceId: wsId, name: wsName }, baseAsOf: TODAY })
   const E = active ? evals[active.key] : actual
   const errorCount = Object.keys(E.sim.errors).length
   const fundingErr = active && (['pm', 'ks'] as Platform[]).some((p) => active.funding[p] != null && !validFunding(active.funding[p]))
@@ -123,14 +154,17 @@ export default function ScenarioLab() {
    *  copy their quantities as purchases. */
   const confirmAdd = (target: string, ids: string[], copyQty: boolean) => {
     const dest = target === 'new' ? 'portfolio' : scenarios.find((x) => x.key === target)?.baseline ?? 'portfolio'
+    const targetS = scenarios.find((x) => x.key === target)
     const adds = ids.map((id) => {
-      const p = POS_BY_ID[id], keep = dest === 'portfolio' || copyQty
-      return { id, to: keep ? p.shares : null, price: keep ? p.mark : null, instrument: instrumentOfPosition(p) }
+      const p = POS_BY_ID[id], keep = dest === 'portfolio' || copyQty, inst = instrumentOfPosition(p)
+      // A holding that isn't in the target's frozen starting portfolio is added as a new purchase of that instrument.
+      if (targetS && targetS.baseline === 'portfolio' && !financeOf(targetS).POS_BY_ID[id]) return { id: instrumentKey(inst), to: null, price: null, instrument: inst }
+      return { id, to: keep ? p.shares : null, price: keep ? p.mark : null, instrument: inst }
     })
     let key = target, name = scenarios.find((x) => x.key === target)?.name ?? 'New scenario'
     if (target === 'new') {
       key = nextKey(); name = 'New scenario'
-      setScenarios((ss) => [...ss, SC.addPositions(SC.create(key, COLORS[ss.length % COLORS.length], name, 'portfolio', TODAY), adds).scenario])
+      setScenarios((ss) => [...ss, SC.addPositions({ ...SC.create(key, COLORS[ss.length % COLORS.length], name, 'portfolio', TODAY), ...frozenFor() }, adds).scenario])
     } else setScenarios((ss) => ss.map((x) => (x.key === target ? SC.addPositions(x, adds).scenario : x)))
     open(key); setPending(null)
     const what = ids.length > 1 ? `${ids.length} positions` : `“${POS_BY_ID[ids[0]].market}”`
@@ -142,13 +176,16 @@ export default function ScenarioLab() {
   /** Switching the starting portfolio changes what target quantities mean, so ask only when rows would change meaning. */
   const requestBaseline = (next: Baseline) => {
     if (!active || next === active.baseline) return
-    const held = active.adjs.filter((a) => POSITIONS.some((p) => p.id === a.id))
-    if (held.length === 0) update((s) => ({ ...SC.configure(s, { baseline: next }), baseAsOf: next === 'portfolio' ? TODAY : null }))
+    // Starting from a current portfolio needs one; without it the choice isn't offered (and is refused here too).
+    if (next === 'portfolio' && !hasPortfolio) return
+    const held = active.adjs.filter((a) => SF.POSITIONS.some((p) => p.id === a.id) || POSITIONS.some((p) => p.id === a.id))
+    if (held.length === 0) update((s) => ({ ...SC.configure(s, { baseline: next }), ...(next === 'portfolio' ? frozenFor() : { frozen: null, source: null, baseAsOf: s.baseAsOf ?? TODAY }) }))
     else setSwitchTo(next)
   }
   const applyBaseline = (next: Baseline, keep: boolean) => {
-    update((s) => ({ ...SC.configure(s, { baseline: next }), baseAsOf: next === 'portfolio' ? TODAY : null, adjs: keep ? s.adjs : s.adjs.map((a) => {
-      const p = POS_BY_ID[a.id]
+    if (next === 'portfolio' && !hasPortfolio) { setSwitchTo(null); return }
+    update((s) => ({ ...SC.configure(s, { baseline: next }), ...(next === 'portfolio' ? frozenFor() : { frozen: null, source: null, baseAsOf: s.baseAsOf ?? TODAY }), adjs: keep ? s.adjs : s.adjs.map((a) => {
+      const p = POS_BY_ID[a.id] ?? SF.POS_BY_ID[a.id]
       if (!p) return a
       return next === 'scratch' ? { ...a, to: null, size: undefined } : { ...a, to: p.shares, size: undefined, price: a.price ?? p.mark }
     }) }))
@@ -156,18 +193,21 @@ export default function ScenarioLab() {
   }
 
   const create = (baseline: Baseline, funding: Partial<Record<Platform, number>> = {}) => {
+    if (baseline === 'portfolio' && !hasPortfolio) return
     const key = nextKey()
-    setScenarios((ss) => [...ss, SC.create(key, nextColor(), baseline === 'scratch' ? 'From scratch' : 'Untitled scenario', baseline, baseline === 'portfolio' ? TODAY : null, funding, settings.newFees === 'excluded' ? { fees: { mode: 'excluded' } } : {})])
+    const s0 = SC.create(key, nextColor(), baseline === 'scratch' ? 'From scratch' : 'Untitled scenario', baseline, TODAY, funding, settings.newFees === 'excluded' ? { fees: { mode: 'excluded' } } : {})
+    setScenarios((ss) => [...ss, baseline === 'portfolio' ? { ...s0, ...frozenFor() } : s0])
     open(key); setRenaming(true)
     if (baseline === 'scratch') window.setTimeout(() => setAdding(true), 0)
   }
   const startExample = (i: number) => {
     const key = nextKey(), ex = EXAMPLES[i]
-    setScenarios((ss) => [...ss, { ...SC.fromExample(key, nextColor(), { name: ex.name, adjs: ex.adjs(F) ?? [], baseline: 'portfolio' }), baseAsOf: TODAY }])
+    if (!hasPortfolio || !ex.adjs(F)) return
+    setScenarios((ss) => [...ss, { ...SC.fromExample(key, nextColor(), { name: ex.name, adjs: ex.adjs(F) ?? [], baseline: 'portfolio' }), ...frozenFor() }])
     open(key); toast(`Started from the example “${ex.name}” (not saved yet)`, 'info')
   }
   const save = () => { if (!active || blocked) return; update((s) => SC.save(s, 'this session')); toast(`Saved “${active.name}”`) }
-  const duplicate = () => { if (!active) return; const key = nextKey(); setScenarios((ss) => [...ss, { ...SC.duplicate(active, key, nextColor()), baseAsOf: active.baseAsOf ?? null }]); open(key, view); toast('Scenario duplicated (not saved yet)') }
+  const duplicate = () => { if (!active) return; const key = nextKey(); setScenarios((ss) => [...ss, { ...SC.duplicate(active, key, nextColor()), baseAsOf: active.baseAsOf ?? null, frozen: active.frozen ?? null, source: active.source ?? null }]); open(key, view); toast('Scenario duplicated (not saved yet)') }
   const revert = () => { if (!active) return; update(SC.revert); setUndo(null); toast(active.saved ? 'Reverted to the saved version' : 'Reset to where this scenario started', 'info') }
   const remove = () => { if (!active) return; setScenarios((ss) => ss.filter((s) => s.key !== active.key)); setActiveKey('base'); setConfirmDelete(false); toast(`Deleted “${active.name}”`, 'info') }
   /** From an analysis back to the row that causes it. */
@@ -187,7 +227,13 @@ export default function ScenarioLab() {
       </>)}
     </Menu>
   )
-  const rebased = active?.baseline === 'portfolio' && active.baseAsOf && active.baseAsOf !== TODAY
+  /** Explicit rebase: replace the frozen starting portfolio with the latest one (or copy into a new scenario). */
+  const rebase = (copy: boolean) => {
+    if (!active || !fromHere) return
+    if (copy) { const key = nextKey(); setScenarios((ss) => [...ss, { ...SC.duplicate(active, key, nextColor()), name: `${active.name} (latest)`.slice(0, 80), ...frozenFor() }]); open(key); toast('New scenario from the latest portfolio (not saved yet)') }
+    else { update((s) => ({ ...s, ...frozenFor() })); toast('Rebased onto the latest portfolio. Save to keep it.', 'info') }
+    setRebasing(false)
+  }
 
   return (
     <div className="shell">
@@ -205,6 +251,7 @@ export default function ScenarioLab() {
         </div>
       </SectionRail>
 
+      <FinanceProvider finance={SF} data={active ? active.frozen ?? null : hasPortfolio ? F.PORTFOLIO : null} workspaceId={wsId} revision={null}>
       <main className="lab-main">
         {!storageOk && <Callout tone="warn" icon="alert">This browser isn’t letting Scevia keep data in this tab, so scenarios will be lost when you reload or leave the page.</Callout>}
         {isHome || !active ? (
@@ -230,12 +277,16 @@ export default function ScenarioLab() {
               render={(o) => <span className="row" style={{ gap: 'var(--space-2)' }}>{o}{o === 'Build' && errorCount > 0 && <span className="tab-flag" aria-label={`${errorCount} incomplete`}>{errorCount}</span>}{o === 'Compare' && <small className="t3">{scenarios.length}</small>}</span>} />
             <AssumptionsBar s={active} E={E} onEdit={() => setAssumptions(true)} onCheckPrices={() => setPriceCheck(true)} />
           </div>
-          {rebased && <Callout icon="info">Created from your portfolio as of {fmtDate(active.baseAsOf!)}. It now starts from the portfolio as of {fmtDate(TODAY)}; held-position rows compare targets with today’s holdings.</Callout>}
+          {active.baseline === 'portfolio' && (!active.frozen
+            ? <Callout tone="warn" icon="alert">This scenario’s starting portfolio wasn’t recorded, so it starts empty. {fromHere ? <button type="button" className="link" onClick={() => rebase(false)}>Start from {wsName} now</button> : `Select ${active.source?.name ?? 'its portfolio'} to rebase it.`}</Callout>
+            : !fromHere ? <Callout icon="info">Starts from {active.source?.name ?? 'a portfolio'} as of {fmtDate(active.frozen.asOf)}, frozen. That portfolio isn’t the one selected now (or has no data), so its latest state isn’t compared; the saved starting point and results are kept.</Callout>
+            : diff && !diff.same ? <Callout icon="info">{wsName} has changed since this scenario’s starting point ({fmtDate(diff.asOf.frozen)}). The scenario keeps its frozen start until you rebase. <button type="button" className="link" onClick={() => setRebasing(true)}>Review rebase…</button></Callout>
+            : null)}
 
           {view === 'Build' && (
             <div className="build-grid">
               <div className="build-main">
-                <StartSetup s={active} E={E} onChange={(patch) => update((s) => SC.configure(s, patch))} onBaseline={requestBaseline} />
+                <StartSetup s={active} E={E} canPortfolio={hasPortfolio} onChange={(patch) => update((s) => SC.configure(s, patch))} onBaseline={requestBaseline} />
                 <PositionsCard E={E} adjs={adjs} baseline={active.baseline} mode={mode} onMode={setMode} onAdjs={(fn) => { setUndo(null); setAdjs(fn) }} onAdd={() => setAdding(true)}
                   onBulk={(label, prev) => { setUndo({ label, prev, key: active.key }); toast(label, 'info') }} />
                 {undo && undo.key === active.key && <div className="undo-line" role="status"><span>{undo.label}.</span><button type="button" className="link" onClick={() => { setAdjs(() => undo.prev); setUndo(null) }}>Undo</button></div>}
@@ -268,9 +319,25 @@ export default function ScenarioLab() {
           toast(`Added ${list.length} position${list.length > 1 ? 's' : ''}.${blank ? ` ${blank === list.length ? (blank > 1 ? 'Enter their targets and prices' : 'Enter a target and price') : `${blank} need${blank > 1 ? '' : 's'} a target and price`} to be included.` : ' Held positions start at their current size.'}`, 'info')
           setView('Build')
         }} />}
-      {priceCheck && active && <PriceCheckModal adjs={adjs} baseAsOf={active.baseAsOf ?? null} titleOf={(a) => `${describe(a, F).title} · ${describe(a, F).side}`} onClose={() => setPriceCheck(false)}
+      {priceCheck && active && <PriceCheckModal adjs={adjs} baseAsOf={active.baseAsOf ?? null} latest={active.baseline === 'portfolio' ? (fromHere ? F : null) : F} titleOf={(a) => `${describe(a, SF).title} · ${describe(a, SF).side}`} onClose={() => setPriceCheck(false)}
         onApply={(checks) => { setAdjs((as) => SC.applyLatestRefs(as, checks)); setPriceCheck(false); toast('Reference prices updated. Save to keep them; assumed prices and targets are unchanged.') }} />}
       {assumptions && active && <AssumptionsDrawer s={active} E={E} onChange={(patch) => update((s) => SC.configure(s, patch))} onClose={() => setAssumptions(false)} />}
+      {rebasing && active && diff && (
+        <Modal title="Rebase onto the latest portfolio?" sub={`${active.name} · frozen ${fmtDate(diff.asOf.frozen)} → latest ${fmtDate(diff.asOf.latest)}`} onClose={() => setRebasing(false)} width={600}
+          footer={<><Button variant="ghost" onClick={() => setRebasing(false)}>Keep existing baseline</Button><Button onClick={() => rebase(true)}>Duplicate with latest</Button><Button variant="primary" onClick={() => rebase(false)}>Rebase this scenario</Button></>}>
+          <p className="t2">Rebasing replaces the starting holdings, cash and marks with the latest portfolio. Your hypothetical positions, assumed prices and assumptions stay; held-position targets are then compared with the latest holdings.</p>
+          <ul className="rebase-list">
+            {diff.cash.map((c) => <li key={c.venue}>Cash on {c.venue === 'pm' ? 'Polymarket' : 'Kalshi'}: {fmt(c.frozen, 2)} → {fmt(c.latest, 2)}</li>)}
+            {diff.added.map((x) => <li key={`a${x.id}`}>New holding: {x.market}</li>)}
+            {diff.removed.map((x) => <li key={`r${x.id}`}>No longer held: {x.market}</li>)}
+            {diff.resized.map((x) => <li key={`s${x.id}`}>{x.market}: {x.frozen} → {x.latest} shares</li>)}
+            {diff.marksMoved > 0 && <li>{diff.marksMoved} mark{diff.marksMoved === 1 ? '' : 's'} moved</li>}
+            {diff.asOf.frozen !== diff.asOf.latest && <li>Valuation date {fmtDate(diff.asOf.frozen)} → {fmtDate(diff.asOf.latest)}</li>}
+          </ul>
+          <small className="t3">Checking latest prices only updates reference prices; rebasing changes the whole starting portfolio. Nothing is saved until you save.</small>
+        </Modal>
+      )}
+      </FinanceProvider>
       {pending && <AddToScenarioModal ids={pending.ids} from={pending.from} scenarios={scenarios} defaultTarget={active ? active.key : scenarios[0]?.key ?? 'new'} onCancel={() => setPending(null)} onConfirm={confirmAdd} />}
       {confirmDelete && active && (
         <Modal title={`Delete “${active.name}”?`} sub="This can’t be undone" onClose={() => setConfirmDelete(false)}

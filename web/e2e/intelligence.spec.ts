@@ -24,11 +24,11 @@ test('workspaces: Sample, Demo and own portfolios are distinct; switching keeps 
   await expect(menu).toContainText('Kalshi · USD')
   await menu.getByRole('menuitemradio', { name: /Demo portfolio/ }).click()
 
-  // Scenario Lab still works without portfolio data (scratch and replays use virtual capital); the Sample's scenario
-  // isn't shown in the Demo workspace and modifying a current portfolio isn't offered.
-  await expect(page.getByRole('heading', { name: 'What do you want to explore?' })).toBeVisible()
+  // The Scenario Lab collection is the user's, not the portfolio's: the scenario stays, on its frozen Sample start.
+  await expect(page.getByRole('heading', { level: 1 })).toContainText('Untitled scenario')
+  await expect(page.getByText(/Starts from Sample portfolio as of Nov 24, frozen/)).toBeVisible()
+  await page.getByRole('option', { name: /All scenarios/ }).click()
   await expect(page.getByRole('button', { name: 'Modify current portfolio' })).toBeDisabled()
-  await expect(page.getByText('Untitled scenario')).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Build from scratch' })).toBeEnabled()
   await expect(page.getByRole('button', { name: 'Data status: Unavailable' })).toBeVisible()
   await page.getByRole('button', { name: /^Notifications/ }).click()
@@ -45,7 +45,7 @@ test('workspaces: Sample, Demo and own portfolios are distinct; switching keeps 
   await page.getByRole('button', { name: 'Open Sample portfolio' }).click()
   await expect(page.getByRole('heading', { name: 'Portfolio overview' })).toBeVisible()
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Scenario Lab' }).click()
-  await expect(page.getByRole('heading', { level: 1 })).toContainText('Untitled scenario')
+  await expect(page.getByRole('button', { name: 'Open Untitled scenario' })).toBeVisible()
 })
 
 test('data status: streams are reported separately; refresh keeps filters and inputs', async ({ page }) => {
@@ -92,7 +92,7 @@ test('overview: valuation basis, native assets and the market-price display pref
   await expect(basis).toContainText('Valued at marks as of Nov 24, 2026')
   await expect(basis).toContainText('USDC')
   await expect(basis).toContainText('USD')
-  await expect(basis).toContainText('Combined in USD at 1 USDC = 1 USD')
+  await expect(basis).toContainText('In USD · 1 USDC = 1.0000 USD · reference rates, not live')
   await expect(page.getByRole('columnheader', { name: 'Entry → Price' })).toBeVisible()
   await page.getByRole('button', { name: 'Settings' }).click()
   await page.getByRole('radiogroup', { name: 'Market prices' }).getByRole('radio', { name: '64%' }).click()
@@ -121,7 +121,7 @@ test('historical replay: virtual funding, trading-close validation, funding stat
 
   await page.getByRole('button', { name: 'Add markets…' }).first().click()
   const dlg = page.getByRole('dialog', { name: 'Add markets' })
-  await expect(dlg).toContainText('sample market data (fictional)')
+  await expect(dlg).toContainText('Sample market data (fictional, not live)')
   await dlg.getByRole('checkbox', { name: /Incumbent wins Springfield/ }).check()
   await dlg.getByRole('checkbox', { name: /Fed cuts rates at Jan 2027 FOMC/ }).check()
   await dlg.getByRole('button', { name: 'Add 2 positions' }).click()
@@ -168,10 +168,11 @@ test('historical replay: virtual funding, trading-close validation, funding stat
   await expect(lines).toContainText('+194.00 USDC')
   await expect(lines).toContainText('Open · observed')
   await expect(page.locator('#rp-value')).toContainText('Value over time is unavailable')
-  await expect(page.locator('#rp-results')).toContainText('Set a reporting rate for USDC below')
-  await page.locator('#rp-results').getByText('Reporting rates for an indicative USD total').click()
-  await page.getByLabel('USD per 1 USDC').fill('1')
-  await expect(page.locator('#rp-results')).toContainText('1 USDC = 1 USD')
+  // Combined reporting uses reference rates automatically; an override is an explicit, labelled hypothetical rate.
+  await expect(page.locator('#rp-results')).toContainText('1 USDC = 1 USD · reference rates')
+  await page.locator('#rp-results').getByText('Advanced: override stablecoin reference rates').click()
+  await page.getByLabel('USD per 1 USDC').fill('0.9')
+  await expect(page.locator('#rp-results')).toContainText('1 USDC = 0.9 USD · your hypothetical rates')
 
   await page.getByRole('button', { name: 'Duplicate' }).click()
   await page.getByRole('tablist', { name: 'Replay views' }).getByRole('tab', { name: /^Build/ }).click()

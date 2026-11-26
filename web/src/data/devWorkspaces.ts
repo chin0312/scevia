@@ -6,6 +6,8 @@
 import { bundledService, staticSnapshot, type WorkspaceService, type WorkspaceSummary } from './workspace'
 import { SAMPLE_PORTFOLIO } from './sample'
 import type { PortfolioData } from './types'
+import { fixtureCatalog, type CatalogEvent, type MarketCatalog } from '../lib/markets'
+import { SAMPLE_MARKET_EVENTS } from './sampleMarkets'
 
 export const DEV_FLAG = 'scevia-dev-workspaces'
 const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
@@ -59,3 +61,37 @@ export function devService(): WorkspaceService | undefined {
   } catch { return undefined }
 }
 let cached: WorkspaceService | undefined
+
+/* Development discovery service: the sample catalog plus markets that are NOT in it (as a backend search would
+   return), with deterministic behaviours for testing the discovery states. Labelled; never shown as real data.
+   - "ECB rate decision (Jan 2027)": a multi-market Kalshi event, one market with partial evidence (no price yet).
+   - Query containing "slow": answers after 1.5 s; "outage": the service is temporarily unavailable.
+   - Links: kalshi.com/markets/kxscalar → unsupported market type; kalshi.com/markets/kxdown → temporarily unavailable. */
+const EXTRA: CatalogEvent[] = [
+  { provider: 'ks', eventId: 'ks-ev-ecb-jan', eventTitle: 'ECB rate decision (Jan 2027)', url: 'https://kalshi.com/markets/kxecb-27jan', available: true, markets: [
+    { provider: 'ks', marketId: 'KXECB-27JAN-CUT', marketTitle: 'ECB cuts rates in Jan 2027', settlementGroup: 'ks-ecb-cut', category: 'Economics', status: 'open', resolves: '2027-01-29', rules: 'Development fixture.', outcomes: [{ outcome: 'YES', refPrice: 0.38 }, { outcome: 'NO', refPrice: 0.63 }], refAsOf: '2026-11-24', fee: null, listedAt: '2026-10-01', closesAt: null, resolution: null, denomination: 'USD',
+      evidence: { price: 'available', history: 'unavailable', fee: 'unavailable', resolution: 'not-resolved' } },
+    { provider: 'ks', marketId: 'KXECB-27JAN-HOLD', marketTitle: 'ECB holds rates in Jan 2027', settlementGroup: 'ks-ecb-hold', category: 'Economics', status: 'open', resolves: '2027-01-29', rules: 'Development fixture.', outcomes: [{ outcome: 'YES', refPrice: null }, { outcome: 'NO', refPrice: null }], refAsOf: null, fee: null, listedAt: '2026-10-01', closesAt: null, resolution: null, denomination: 'USD',
+      evidence: { price: 'unavailable', history: 'unavailable', fee: 'unavailable', resolution: 'not-resolved' } },
+  ] },
+]
+export function devDiscovery(): MarketCatalog {
+  const base = fixtureCatalog([...SAMPLE_MARKET_EVENTS, ...EXTRA], 'Development discovery fixture', 150)
+  return {
+    label: base.label, live: false,
+    async search(q, opts) {
+      if (/outage/i.test(q)) { await wait(150); throw new Error('temporarily_unavailable') }
+      if (/slow/i.test(q)) { await wait(1500); return base.search(q.replace(/slow/ig, '').trim(), opts) }
+      return base.search(q, opts)
+    },
+    async resolveLink(raw) {
+      if (/kalshi\.com\/markets\/kxscalar/i.test(raw)) { await wait(150); return { status: 'unsupported-market', provider: 'ks', reason: 'Scalar (range) markets pay out on a scale, not $1 or $0.' } }
+      if (/kalshi\.com\/markets\/kxdown/i.test(raw)) { await wait(150); return { status: 'temporarily-unavailable', provider: 'ks' } }
+      return base.resolveLink(raw)
+    },
+  }
+}
+export function devCatalog(): MarketCatalog | undefined {
+  return devService() ? (catalogCached ??= devDiscovery()) : undefined
+}
+let catalogCached: MarketCatalog | undefined

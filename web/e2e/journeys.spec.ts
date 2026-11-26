@@ -66,14 +66,14 @@ test('1b · cancelling an incoming add changes no scenario; already-included pos
   await fresh(page, '/scenario-lab')
   await startExample(page, 'Trim crypto, add to Fed')
   await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
-  await expect.poll(() => page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v4'))).not.toBeNull()
-  const before = await page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v4'))
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v5'))).not.toBeNull()
+  const before = await page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v5'))
   await page.goto('/scenario-lab?addEvent=fed')
   const add = page.getByRole('dialog', { name: 'Add to a scenario' })
   await expect(add.getByRole('checkbox')).toHaveCount(2) // both Fed contracts, across platforms
   await add.getByRole('button', { name: 'Cancel' }).click()
   await expect(add).toHaveCount(0)
-  expect(await page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v4'))).toBe(before)
+  expect(JSON.parse((await page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v5')))!)).toEqual(JSON.parse(before!))
 
   await page.goto('/scenario-lab?add=fedk') // the draft already adjusts this contract
   await page.getByRole('dialog', { name: 'Add to a scenario' }).getByLabel('Target scenario').selectOption({ label: 'Trim crypto, add to Fed · 3 positions' })
@@ -275,7 +275,7 @@ test('section rail: one active entry; an explicit choice survives reaching the b
 
 test('inspecting stays in place: Overview schedule, Risk payoffs and search open panels, not other modules', async ({ page }) => {
   await fresh(page, '/overview')
-  const scenarios = await page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v4'))
+  const scenarios = await page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v5'))
   const fed = exposures('all').find((e) => e.event.id === 'fed')!
   await page.getByRole('row', { name: `${POS_BY_ID.shut.market}: open details` }).focus()
   await page.keyboard.press('Enter') // keyboard opening must not also activate the panel's Close button
@@ -298,7 +298,7 @@ test('inspecting stays in place: Overview schedule, Risk payoffs and search open
   await page.keyboard.press('Enter')
   await expect(page.getByRole('dialog', { name: POS_BY_ID.shut.market })).toBeVisible()
   await expect(page).toHaveURL(/\/risk$/)
-  expect(await page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v4'))).toBe(scenarios)
+  expect(await page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v5'))).toBe(scenarios)
 })
 
 for (const vp of [{ name: 'phone', width: 375, height: 812 }, { name: 'tablet', width: 768, height: 1024 }]) {
@@ -322,7 +322,7 @@ test('platform badges use the official marks and keep their names for assistive 
   expect(await badge.getAttribute('aria-label')).toMatch(/^(Polymarket|Kalshi)$/)
 })
 
-const scenariosIn = (page: Page) => page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v4'))
+const scenariosIn = (page: Page) => page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v5'))
 const settle = async (page: Page) => { await expect(page.locator('main h1')).toBeVisible(); await expect.poll(() => scenariosIn(page)).not.toBeNull() }
 
 test('hand-offs: the same deliberate request can be repeated; cancel, Back and reload never mutate', async ({ page }) => {
@@ -493,7 +493,7 @@ test('Scenario Lab entry: neutral, two clear starting paths, no empty charts, no
   await expect(page.locator('main svg[role="img"], main .stack-bars, #a-summary')).toHaveCount(0)
   await expect(page.getByRole('region', { name: 'Modify your current portfolio' })).toContainText(fmt(account('all').cash))
   await expect(page.getByRole('region', { name: 'Modify your current portfolio' })).toContainText(`${positionsFor('all').length}`)
-  expect(['[]', null]).toContain(await page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v4')))
+  expect(['[]', null]).toContain(await page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v5')))
   await expect(page.locator('.home-ex').getByRole('button')).toHaveCount(3) // examples stay optional
   await startCurrent(page)
   const rail = page.getByRole('complementary', { name: 'Sections on this page' })

@@ -3,7 +3,7 @@
    single "Live" state. A state is shown only when the source establishes it: a static fixture is "Fixed sample", never
    "Streaming". The backend reports these per stream (coverage, sync runs, quote freshness) during integration. */
 
-export type StreamId = 'market' | 'account' | 'valuation' | 'history' | 'sync' | 'sources'
+export type StreamId = 'market' | 'account' | 'valuation' | 'history' | 'fx' | 'sync' | 'sources'
 export type StreamState =
   | 'streaming' | 'recent' | 'refreshing' | 'delayed' | 'stale' | 'disconnected' | 'partial' | 'unavailable'
   | 'import_only' | 'cached_snapshot' | 'fixture'
@@ -23,7 +23,7 @@ export interface StreamStatus {
 }
 
 export const STREAM_LABEL: Record<StreamId, string> = {
-  market: 'Market data', account: 'Account data', valuation: 'Portfolio valuation', history: 'Historical coverage', sync: 'Background sync', sources: 'Source connections',
+  market: 'Market data', account: 'Account data', valuation: 'Portfolio valuation', history: 'Historical coverage', fx: 'Exchange rates', sync: 'Background sync', sources: 'Source connections',
 }
 export const STATE_LABEL: Record<StreamState, string> = {
   streaming: 'Streaming', recent: 'Recently refreshed', refreshing: 'Refreshing', delayed: 'Delayed', stale: 'Stale', disconnected: 'Disconnected',

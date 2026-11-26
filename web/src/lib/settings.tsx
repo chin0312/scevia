@@ -4,11 +4,14 @@
 import { createContext, useContext, type ReactNode } from 'react'
 import { PERIODS, type Period, type PlatformFilter } from './finance'
 import { readStored } from './storage'
+import { isReportingCurrency, type ReportingCurrency } from './fx'
 import { useSessionState } from './useSessionState'
 
 export interface Settings {
   /** Platform scope Overview opens in. */
   defaultScope: PlatformFilter
+  /** Currency all portfolio money is reported in (converted at the latest eligible reference; never transferred). */
+  reportingCurrency: ReportingCurrency
   /** Check the selected portfolio's sources every N minutes while Scevia is open (0 = only on request). */
   autoRefresh: 0 | 5 | 15 | 60
   /** How market prices of standard binary contracts are shown: $0.64 or 64% (market-implied). */
@@ -39,13 +42,13 @@ export interface Settings {
   }
 }
 export const DEFAULT_SETTINGS: Settings = {
-  defaultScope: 'all', autoRefresh: 15, priceDisplay: 'price', newFees: 'provider', defaultPeriod: '6M', defaultGrouping: 'category', labSize: 'shares', guardrail: 15,
+  defaultScope: 'all', reportingCurrency: 'USD', autoRefresh: 15, priceDisplay: 'price', newFees: 'provider', defaultPeriod: '6M', defaultGrouping: 'category', labSize: 'shares', guardrail: 15,
   alerts: { resolvingWithin: 30, priceMove: 100, concentration: true, settlements: true, dataQuality: true, imports: true },
 }
 export const GUARDRAIL_RANGE = [5, 40] as const
 /** Settings sections, each with its own Restore defaults. */
 export const SECTION_FIELDS = {
-  General: ['defaultScope', 'autoRefresh', 'priceDisplay'], Analytics: ['defaultPeriod', 'defaultGrouping'], Risk: ['guardrail'], 'Scenario Lab': ['labSize', 'newFees'], Notifications: ['alerts'],
+  General: ['reportingCurrency', 'defaultScope', 'autoRefresh', 'priceDisplay'], Analytics: ['defaultPeriod', 'defaultGrouping'], Risk: ['guardrail'], 'Scenario Lab': ['labSize', 'newFees'], Notifications: ['alerts'],
 } as const satisfies Record<string, readonly (keyof Settings)[]>
 export type SettingsTab = keyof typeof SECTION_FIELDS
 
@@ -59,6 +62,7 @@ export function readSettings(raw: unknown): Settings {
   const D = DEFAULT_SETTINGS, DA = D.alerts
   return {
     defaultScope: o.defaultScope === 'pm' || o.defaultScope === 'ks' ? o.defaultScope : 'all',
+    reportingCurrency: isReportingCurrency(o.reportingCurrency) ? o.reportingCurrency : 'USD',
     autoRefresh: o.autoRefresh === 0 || o.autoRefresh === 5 || o.autoRefresh === 60 ? o.autoRefresh : D.autoRefresh,
     priceDisplay: o.priceDisplay === 'implied' ? 'implied' : 'price',
     newFees: o.newFees === 'excluded' ? 'excluded' : 'provider',

@@ -7,6 +7,8 @@
    Switching or refreshing never changes a scenario, a record or an input. */
 import { useEffect, useState, type ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
+import { FRESHNESS_LABEL } from '../lib/fx'
+import { useReporting } from '../lib/reporting'
 import { FIXTURE_ID, MODE_LABEL, type WorkspaceSnapshot } from '../data/workspace'
 import { PLATFORM_NAME } from '../data/labels'
 import { fmtDate } from '../lib/finance'
@@ -154,11 +156,14 @@ export function WorkspaceLabel({ suffix }: { suffix?: string }) {
   return <>{s.summary.name} · {suffix ?? basis}</>
 }
 
-/** The reporting assumption behind a combined total, shown only when the figures mix native assets. USD-only figures
- *  need none. It is a reporting convention for the development fixture; actual conversion comes from the backend
- *  (`/analytics/denominations`, with its own availability). It never moves funds between accounts. */
+/** How combined figures are converted: each native asset at its own reference into the reporting currency. Shown
+ *  when figures mix assets or the reporting currency isn't USD; USD-only figures in USD need none. Provenance (source,
+ *  methodology, age) is in the title. Conversion never moves funds. */
 export function ReportingNote({ denominations }: { denominations: string[] }) {
-  const others = [...new Set(denominations)].filter((d) => d !== 'USD')
-  if (!others.length || new Set(denominations).size < 2) return null
-  return <span>Combined in USD at 1 {others.join(' = 1 ')} = 1 USD (indicative reporting; funds aren’t converted)</span>
+  const { currency, assetReference, reference } = useReporting()
+  const assets = [...new Set(denominations)]
+  if (currency === 'USD' && assets.every((d) => d === 'USD')) return null
+  const parts = assets.map((d) => { const r = assetReference(d); return r.rate == null ? `${d}: conversion unavailable` : d === currency ? null : `1 ${d} = ${r.rate.toFixed(4)} ${currency}` }).filter(Boolean)
+  const title = [reference, ...assets.map((d) => assetReference(d))].map((r) => `${r.base}→${r.quote}: ${r.source}, ${r.methodology}${r.observedAt ? `, observed ${r.observedAt}` : ''} (${FRESHNESS_LABEL[r.freshness].toLowerCase()})`).join('\n')
+  return <span title={title}>In {currency}{parts.length ? ` · ${parts.join(' · ')}` : ''} · reference rates, not live</span>
 }

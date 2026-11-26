@@ -4,7 +4,7 @@ import { DEMO_ID, FIXTURE_ID, bundledService, demoStreams, fixtureSnapshot, read
 import { SAMPLE_MARKET_EVENTS } from '../data/sampleMarkets'
 import { ago, classifyAge, summaryState, type StreamStatus } from './freshness'
 import { maxDrawdown, priceAt, seriesQuality, valueSeries } from './history'
-import { bucketId, compareReplays, coverShortfall, replayMarketFrom, runReplay, sanitizeReplays, tradingWindow, validateReplay, type FundingBucket, type Replay, type ReplayMarket, type ReplayPosition } from './replay'
+import { bucketId, compareReplays, coverShortfall, replayMarketFrom, replayRates, runReplay, sanitizeReplays, tradingWindow, validateReplay, type FundingBucket, type Replay, type ReplayMarket, type ReplayPosition } from './replay'
 import { periodAvailable, periodRange } from './fixtureFinance'
 
 const NOW = Date.parse('2026-11-24T12:00:00Z')
@@ -275,5 +275,92 @@ describe('frozen vs. latest scenario references', () => {
     expect(out[0].price).toBe(0.38)
     expect(out[0].to).toBe(100)
     expect(out[1]).toBe(adjs[1])
+  })
+})
+
+describe('reporting currency and exchange-rate references', () => {
+  it('converts with references, never at assumed parity, and keeps missing conversion unavailable', async () => {
+    const { fixtureFx, convert } = await import('./fx')
+    const fx = fixtureFx()
+    expect(fx.live).toBe(false)
+    expect(fx.reference('USD', 'SGD')).toMatchObject({ rate: 1.34, kind: 'fiat', source: 'Development fixture' })
+    expect(fx.reference('USD', 'MYR').freshness).toBe('stale')
+    expect(fx.reference('USDC', 'USD').kind).toBe('stablecoin')
+    expect(fx.reference('USD', 'JPY')).toMatchObject({ rate: null, freshness: 'unsupported' })
+    expect(convert(100, fx.reference('USD', 'JPY'))).toBeNull()
+    expect(convert(null, fx.reference('USD', 'SGD'))).toBeNull()
+    expect(convert(100, fx.reference('USDC', 'SGD'))).toBeCloseTo(134)
+  })
+  it('formats portfolio money in the reporting currency; native amounts keep their units', async () => {
+    const { fmt, fmtNative, setReportingFormat, reportingCode } = await import('./format')
+    setReportingFormat({ code: 'SGD', symbol: 'S$', rate: 1.34 })
+    expect(fmt(1000)).toBe('S$1,340')
+    expect(fmtNative(1000, 'USDC')).toBe('1,000.00 USDC')
+    setReportingFormat({ code: 'MYR', symbol: 'RM', rate: null })
+    expect(fmt(1000)).toBe('$1,000 USD')
+    expect(reportingCode()).toBe('USD')
+    setReportingFormat({ code: 'USD', symbol: '$', rate: 1 })
+  })
+})
+
+describe('Historical Replay combined reporting', () => {
+  const PM = { id: bucketId('pm', 'PUSD'), venue: 'pm' as const, denomination: 'PUSD' as const, capital: 1300 }
+  const KS = { id: bucketId('ks', 'USD'), venue: 'ks' as const, denomination: 'USD' as const, capital: 1200 }
+  const ev = SAMPLE_MARKET_EVENTS.find((e) => e.markets.some((m) => m.marketId === 'pm-mayor'))!
+  const mayor = replayMarketFrom(ev, ev.markets[0])
+  const replay = (rates: Replay['rates'] = { USDC: null, PUSD: 0.9 }): Replay => ({ key: 'c', name: 'C', color: '', start: '2026-03-01', end: '2026-11-24', buckets: [PM, KS], fees: { mode: 'excluded' }, rates, basis: 'retrospective', createdAt: '',
+    positions: [{ id: 'm', market: mayor, outcome: 'YES', bucketId: PM.id, entryDate: '2026-03-02', entryPrice: 0.6, size: { mode: 'amount', value: 300 }, exit: { kind: 'settle' } }] })
+  it('USD 1,200 + PUSD 1,500 at 1 PUSD = 0.90 USD is 2,550 USD, and the last chart point agrees', () => {
+    const res = runReplay(replay(), '2026-11-24')
+    expect(res.byDenomination.find((d) => d.denomination === 'PUSD')!.endValue).toBeCloseTo(1500)
+    expect(res.byDenomination.find((d) => d.denomination === 'USD')!.endValue).toBeCloseTo(1200)
+    expect(res.combined!.endValue).toBeCloseTo(2550)
+    expect(res.series.at(-1)!.value).toBeCloseTo(2550)
+    expect(res.combined!.capital).toBeCloseTo(1200 + 1300 * 0.9)
+    expect(res.combined!.basis).toBe('hypothetical')
+    // Native series stay native.
+    expect(res.nativeSeries.find((n) => n.denomination === 'PUSD')!.points.at(-1)!.value).toBeCloseTo(1500)
+  })
+  it('uses per-date references when not overridden, and leaves combined unavailable without one', () => {
+    const r = replay({ USDC: null, PUSD: null })
+    const varying = runReplay(r, '2026-11-24', replayRates(r, (_a, date) => (date < '2026-07-01' ? 1 : 0.8)))
+    expect(varying.combined!.capital).toBeCloseTo(1200 + 1300 * 1)
+    expect(varying.combined!.endValue).toBeCloseTo(1200 + 1500 * 0.8)
+    expect(varying.combined!.endValue).toBeCloseTo(varying.series.at(-1)!.value!)
+    expect(varying.combined!.basis).toBe('reference')
+    const none = runReplay(r, '2026-11-24')
+    expect(none.combined).toBeNull()
+    expect(none.combinedMissing).toBe('rate')
+    expect(none.series.at(-1)!.value).toBeNull()
+    expect(none.byDenomination.every((d) => d.endValue != null)).toBe(true)
+  })
+})
+
+describe('trading-window edge cases', () => {
+  it('qualifies a trade on a date-only closing day instead of treating it as verified', () => {
+    const ev = SAMPLE_MARKET_EVENTS.find((e) => e.markets.some((m) => m.marketId === 'pm-mayor'))!
+    const m = replayMarketFrom(ev, ev.markets[0])
+    const r: Replay = { key: 'x', name: 'x', color: '', start: '2026-10-01', end: '2026-11-24', buckets: [{ id: bucketId('pm', 'USDC'), venue: 'pm', denomination: 'USDC', capital: 100 }], fees: { mode: 'excluded' }, rates: { USDC: null, PUSD: null }, basis: 'retrospective', createdAt: '',
+      positions: [{ id: 'a', market: m, outcome: 'YES', bucketId: bucketId('pm', 'USDC'), entryDate: '2026-11-04', entryPrice: 0.9, size: { mode: 'shares', value: 10 }, exit: { kind: 'settle' } }] }
+    const v = validateReplay(r, '2026-11-24')
+    expect(v.positions).toEqual({})
+    expect(v.caveats.a).toMatch(/closing day \(2026-11-04\)/)
+  })
+})
+
+describe('market discovery service', () => {
+  it('resolves native ids and reports unsupported, unavailable and partial-evidence results without substitutes', async () => {
+    const { devDiscovery } = await import('../data/devWorkspaces')
+    const { evidenceOf } = await import('./markets')
+    const d = devDiscovery()
+    expect(d.live).toBe(false)
+    const ecb = (await d.search('ECB'))[0]
+    expect(ecb.markets.map((m) => m.marketId)).toEqual(['KXECB-27JAN-CUT', 'KXECB-27JAN-HOLD'])
+    expect(evidenceOf(ecb.markets[1]).price).toBe('unavailable')
+    expect((await d.resolveLink('KXECB-27JAN-CUT'))).toMatchObject({ status: 'resolved' })
+    expect((await d.resolveLink('https://kalshi.com/markets/kxscalar-1')).status).toBe('unsupported-market')
+    expect((await d.resolveLink('https://kalshi.com/markets/kxdown')).status).toBe('temporarily-unavailable')
+    expect((await d.resolveLink('https://manifold.markets/x')).status).toBe('unsupported')
+    await expect(d.search('outage')).rejects.toThrow()
   })
 })

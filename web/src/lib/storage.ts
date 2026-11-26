@@ -37,6 +37,9 @@ export function writeStored(key: string, value: unknown): boolean {
   try { s.setItem(key, JSON.stringify(value)); setHealth(true); return true } catch { setHealth(false); return false }
 }
 
+/** Remove one Scevia key (used after migrating it). */
+export function removeStored(key: string) { try { store()?.removeItem(key) } catch { /* reported by the next write */ } }
+
 /** Keys Scevia currently holds in this tab. */
 export function sceviaKeys(): string[] {
   const s = store()

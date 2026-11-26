@@ -35,14 +35,14 @@ export function AssumptionsBar({ s, E, onEdit, onCheckPrices }: { s: Scenario; E
 }
 
 /** Essentials at the top of Build. */
-export function StartSetup({ s, E, onChange, onBaseline }: { s: Scenario; E: Evaluation; onChange: (p: Patch) => void; onBaseline: (b: Baseline) => void }) {
+export function StartSetup({ s, E, canPortfolio = true, onChange, onBaseline }: { s: Scenario; E: Evaluation; canPortfolio?: boolean; onChange: (p: Patch) => void; onBaseline: (b: Baseline) => void }) {
   const { accountsOn } = useFinance()
   const heldRows = s.adjs.filter((a) => !a.instrument).length
   return (
     <Card id="setup">
       <div className="card-b start-setup">
         <fieldset className="setup-f"><legend className="l">Starting portfolio</legend>
-          <Seg label="Starting portfolio" options={['Current portfolio', 'Empty portfolio'] as const} value={s.baseline === 'scratch' ? 'Empty portfolio' : 'Current portfolio'} onChange={(v) => onBaseline(v === 'Empty portfolio' ? 'scratch' : 'portfolio')} />
+          <Seg label="Starting portfolio" options={['Current portfolio', 'Empty portfolio'] as const} value={s.baseline === 'scratch' ? 'Empty portfolio' : 'Current portfolio'} disabled={(o) => (o === 'Current portfolio' && !canPortfolio && s.baseline === 'scratch' ? 'No portfolio data to start from in the selected portfolio' : null)} onChange={(v) => onBaseline(v === 'Empty portfolio' ? 'scratch' : 'portfolio')} />
           <small className="t3">{s.baseline === 'scratch' ? 'No holdings, cash or history.' : `Your holdings and cash · ${fmt(E.B.totalValue ?? 0)} at marks${E.funding ? ' incl. added capital' : ''}.`}{heldRows > 0 && s.baseline === 'scratch' ? ` ${heldRows} older position${heldRows > 1 ? 's' : ''} can’t be used from scratch.` : ''}</small>
         </fieldset>
         <fieldset className="setup-f"><legend className="l">{s.baseline === 'scratch' ? 'Virtual starting capital' : 'Additional virtual capital'} <span className="t3">(by venue · simulated, not profit)</span></legend>

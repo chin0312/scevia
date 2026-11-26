@@ -16,6 +16,7 @@ import { accountName } from '../../lib/useWorkspace'
 import { readStored, scopedKey } from '../../lib/storage'
 import { useFinanceCtx } from '../../lib/financeContext'
 import { DEFAULT_ASSET, sanitizeReplays } from '../../lib/replay'
+import { LAB_REPLAYS_KEY, mergeByKey } from './baseline'
 import { useFinance } from '../../lib/financeContext'
 import { useActiveWorkspace } from '../../lib/workspaceContext'
 
@@ -26,7 +27,7 @@ export function LabHome({ hasPortfolio, scenarios, evals, onCurrent, onScratch, 
   const F = useFinance(), { TODAY, ACCOUNTS, POSITIONS, account } = F
   const nav = useNavigate()
   const ws = useActiveWorkspace().snapshot
-  const replays = readStored(scopedKey('scevia-replays-v1', useFinanceCtx().workspaceId), [], sanitizeReplays)
+  const replays = mergeByKey(readStored(LAB_REPLAYS_KEY, [], sanitizeReplays), readStored(scopedKey('scevia-replays-v1', useFinanceCtx().workspaceId), [], sanitizeReplays))
   const a = account('all'), events = new Set(POSITIONS.map((p) => p.eventId)).size
   const [cap, setCap] = useState<Record<Platform, string>>({ pm: '', ks: '' })
   const parsed = { pm: parseMoney(cap.pm), ks: parseMoney(cap.ks) }

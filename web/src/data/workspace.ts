@@ -122,6 +122,7 @@ export function demoStreams(d: Extract<DemoState, { status: 'available' }>, chec
     { id: 'account', state: 'fixture', asOf: d.capturedAt, checkedAt, classifiedBy: 'source', detail: 'Hypothetical demo records with virtual capital. No personal account is connected.' },
     { id: 'valuation', state: market === 'unavailable' ? 'unavailable' : 'partial', asOf: d.capturedAt, checkedAt, detail: 'Valued at the capture cutoff; completeness comes from the valuation service.' },
     { id: 'history', state: 'partial', asOf: d.capturedAt, checkedAt, detail: 'History covers the captured period only.' },
+    { id: 'fx', state: 'unavailable', asOf: null, checkedAt, detail: 'Exchange-rate references come with the demo’s valuation from the backend.' },
     { id: 'sync', state: 'unavailable', asOf: null, checkedAt, detail: 'The demo has no account sync.' },
     { id: 'sources', state: 'unavailable', asOf: null, checkedAt, detail: 'No personal sources are connected to the demo.' },
   ]
@@ -149,6 +150,7 @@ export function staticSnapshot(summary: WorkspaceSummary, data: PortfolioData, c
       { id: 'account', state: 'fixture', asOf, checkedAt, detail: staleVenues ? `Fictional records. ${staleVenues} sample source is marked stale to show how that looks.` : 'Fictional records.' },
       { id: 'valuation', state: 'fixture', asOf, checkedAt, detail: 'Valued at the sample’s fixed marks.' },
       { id: 'history', state: 'fixture', asOf: PORTFOLIO.historyStart, checkedAt, detail: 'Sample history with weekly sample marks.' },
+      { id: 'fx', state: 'fixture', asOf, checkedAt, detail: 'Development fixture exchange and stablecoin references (constant). Not live rates.' },
       { id: 'sync', state: 'unavailable', asOf: null, checkedAt, detail: 'The sample has no background sync.' },
       { id: 'sources', state: 'unavailable', asOf: null, checkedAt, detail: 'The sample isn’t connected to any provider.' },
     ],
@@ -159,7 +161,7 @@ export function staticSnapshot(summary: WorkspaceSummary, data: PortfolioData, c
 const unavailableDemo = (checkedAt: string): WorkspaceSnapshot => ({
   summary: DEMO_SUMMARY, status: 'unavailable', reason: 'authorized_demo_dataset_unavailable',
   financialRevision: null, marketRevision: null, valuationAsOf: null, historyStart: null, accounts: [],
-  streams: (['market', 'account', 'valuation', 'history', 'sync', 'sources'] as const).map((id) => ({ id, state: 'unavailable' as const, asOf: null, checkedAt, detail: 'The demo’s approved real-market data isn’t available.' })),
+  streams: (['market', 'account', 'valuation', 'history', 'fx', 'sync', 'sources'] as const).map((id) => ({ id, state: 'unavailable' as const, asOf: null, checkedAt, detail: 'The demo’s approved real-market data isn’t available.' })),
   checkedAt, data: null,
 })
 

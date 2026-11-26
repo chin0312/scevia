@@ -2,9 +2,10 @@
    the selection, then add them together. Each pick is one explicit outcome of one market; nothing is added for a
    whole event. Nothing is traded or stored as a holding: the result is hypothetical rows in the scenario. */
 import { useEffect, useRef, useState } from 'react'
+import { useMarketCatalog } from '../../lib/marketContext'
+import { evidenceOf, type CatalogMarket } from '../../lib/markets'
 import { Modal } from '../../components/overlays'
 import { Button, Callout, Chip, PlatformBadge, Seg, SideChip, Tabs, cx } from '../../components/ui'
-import { MARKET_CATALOG } from '../../data/markets'
 import { CATEGORIES, PLATFORM_NAME } from '../../data/labels'
 import type { Category, Platform } from '../../data/types'
 import { fmtDate, instrumentKey, type Adjustment, type Baseline, type InstrumentRef, type Position, type Finance } from '../../lib/finance'
@@ -96,6 +97,7 @@ function Holdings({ baseline, inScenario, isPicked, toggle }: PickProps & { base
 
 const CATS = ['All categories', ...CATEGORIES] as const
 function Search({ inScenario, isPicked, toggle }: PickProps) {
+  const MARKET_CATALOG = useMarketCatalog()
   const [q, setQ] = useState('')
   const [prov, setProv] = useState<'All' | 'Polymarket' | 'Kalshi'>('All')
   const [cat, setCat] = useState<(typeof CATS)[number]>('All categories')
@@ -129,8 +131,9 @@ function Search({ inScenario, isPicked, toggle }: PickProps) {
       <Chip tone="warn">{MARKET_CATALOG.label}</Chip>
     </div>
     <div className="addpos-list" aria-busy={loading} aria-live="polite">
+      {loading && <small className="t3" role="status">Searching…</small>}
       {loading && !state && <div className="skeleton" style={{ height: 120 }} />}
-      {state && 'error' in state && <Callout tone="warn" icon="alert">Market search failed. <button type="button" className="link" onClick={() => setRetry((r) => r + 1)}>Try again</button></Callout>}
+      {state && 'error' in state && <Callout tone="warn" icon="alert">Market search isn’t available right now. Your scenario is unaffected and nothing is shown in its place. <button type="button" className="link" onClick={() => setRetry((r) => r + 1)}>Try again</button></Callout>}
       {state && 'events' in state && events.length === 0 && <div className="empty"><p>No markets match{state.q ? ` “${state.q}”` : ''} with these filters.</p></div>}
       {events.map((ev) => <EventCard key={ev.eventId} ev={ev} inScenario={inScenario} isPicked={isPicked} toggle={toggle} />)}
     </div>
@@ -138,6 +141,7 @@ function Search({ inScenario, isPicked, toggle }: PickProps) {
 }
 
 function PasteLink({ inScenario, isPicked, toggle }: PickProps) {
+  const MARKET_CATALOG = useMarketCatalog()
   const [url, setUrl] = useState('')
   const [state, setState] = useState<{ loading: boolean; res: LinkResolution | null; failed?: boolean }>({ loading: false, res: null })
   const seq = useRef(0)
@@ -153,8 +157,8 @@ function PasteLink({ inScenario, isPicked, toggle }: PickProps) {
   const r = state.res
   return (<>
     <form className="row" style={{ flexWrap: 'wrap' }} onSubmit={(e) => { e.preventDefault(); void resolve() }}>
-      <input data-autofocus autoFocus className="text-input" style={{ flex: 1, minWidth: 220 }} inputMode="url" placeholder="https://polymarket.com/event/… or https://kalshi.com/markets/…" aria-label="Market link" value={url} onChange={(e) => { setUrl(e.target.value); seq.current++; setState({ loading: false, res: null }) }} />
-      <Button type="submit" disabled={!url.trim() || state.loading}>{state.loading ? 'Resolving…' : 'Find market'}</Button>
+      <input data-autofocus autoFocus className="text-input" style={{ flex: 1, minWidth: 220 }} inputMode="url" placeholder="Market link, or a Polymarket / Kalshi market id" aria-label="Market link" value={url} onChange={(e) => { setUrl(e.target.value); seq.current++; setState({ loading: false, res: null }) }} />
+      <Button type="submit" disabled={!url.trim() || state.loading}>{state.loading ? 'Resolving market…' : 'Find market'}</Button>
     </form>
     <p className="t3 note">Supported: Polymarket and Kalshi market links. Scevia doesn’t open the link; it looks up the market reference. {MARKET_CATALOG.live ? '' : `In this version, links resolve only against the ${MARKET_CATALOG.label.toLowerCase()}.`}</p>
     <div aria-live="polite">
@@ -164,6 +168,8 @@ function PasteLink({ inScenario, isPicked, toggle }: PickProps) {
       {r?.status === 'unsupported' && <Callout tone="warn" icon="alert">Links from {r.host} aren’t supported. Use a Polymarket or Kalshi market link.</Callout>}
       {r?.status === 'not-found' && <Callout icon="info">No {PLATFORM_NAME[r.provider]} market for this link in the {MARKET_CATALOG.label.toLowerCase()}. {MARKET_CATALOG.live ? '' : 'Live link lookup isn’t connected in this version, so real links aren’t resolved.'}</Callout>}
       {r?.status === 'unavailable' && <Callout tone="warn" icon="alert">{r.eventTitle} on {PLATFORM_NAME[r.provider]}: market data is unavailable, so it can’t be added.</Callout>}
+      {r?.status === 'unsupported-market' && <Callout tone="warn" icon="alert">This {PLATFORM_NAME[r.provider]} market type isn’t supported: {r.reason}</Callout>}
+      {(r?.status === 'temporarily-unavailable' || r?.status === 'access-unavailable') && <Callout tone="warn" icon="alert">{r.status === 'temporarily-unavailable' ? 'Market data is temporarily unavailable for this link.' : 'Market data access isn’t available for this link.'} Nothing is shown in its place. <button type="button" className="link" onClick={() => void resolve()}>Try again</button></Callout>}
       {r?.status === 'resolved' && <>
         <p className="t2 note">{r.event.markets.length > 1 ? `This link covers ${r.event.markets.length} markets. Choose the markets and outcomes to add.` : 'Choose the outcome to add.'} <Chip tone="warn">{MARKET_CATALOG.label}</Chip></p>
         <EventCard ev={r.event} inScenario={inScenario} isPicked={isPicked} toggle={toggle} />
@@ -174,6 +180,7 @@ function PasteLink({ inScenario, isPicked, toggle }: PickProps) {
 
 /** One event with its markets and selectable outcomes. Closed or resolved markets can't be added. */
 function EventCard({ ev, inScenario, isPicked, toggle }: PickProps & { ev: CatalogEvent }) {
+  const MARKET_CATALOG = useMarketCatalog()
   const { holdingsOfInstrument } = useFinance()
   return (
     <div className="addpos-event">
@@ -181,7 +188,8 @@ function EventCard({ ev, inScenario, isPicked, toggle }: PickProps & { ev: Catal
       {ev.markets.map((m) => (
         <div className="addpos-market" key={m.marketId}>
           <div className="addpos-t"><span>{m.marketTitle}</span>
-            <small className="t3">{m.category} · resolves {fmtDate(m.resolves, { month: 'short', day: 'numeric', year: 'numeric' })} · {m.status === 'open' ? (m.refAsOf ? `sample prices as of ${fmtDate(m.refAsOf)}` : 'no reference price') : m.status}</small></div>
+            <small className="t3">{PLATFORM_NAME[m.provider]}{m.denomination ? ` · settles in ${m.denomination}` : ''} · {m.category} · resolves {fmtDate(m.resolves, { month: 'short', day: 'numeric', year: 'numeric' })} · {m.status === 'open' ? (m.refAsOf ? `reference as of ${fmtDate(m.refAsOf)}` : 'found, not priced yet') : m.status === 'closed' ? 'trading closed' : 'resolved'}</small>
+            <EvidenceBadges m={m} /></div>
           <div className="addpos-outcomes">
             {m.outcomes.map((o) => {
               const i = instrumentFrom(ev, m, o, MARKET_CATALOG.live ? 'provider' : 'sample'), pk: Pick = { key: instrumentKey(i), i, held: null }
@@ -198,5 +206,17 @@ function EventCard({ ev, inScenario, isPicked, toggle }: PickProps & { ev: Catal
         </div>
       ))}
     </div>
+  )
+}
+
+/** What the market service has for a market. Finding a market and pricing it are different: a found market can lack a
+ *  price, history, fee or resolution evidence, and each missing part stays visible instead of failing the search. */
+export function EvidenceBadges({ m }: { m: CatalogMarket }) {
+  const e = evidenceOf(m)
+  const items: [string, string][] = [['Price', e.price], ['History', e.history], ['Fees', e.fee], ['Resolution', e.resolution]]
+  return (
+    <span className="ev-badges" aria-label="Evidence">
+      {items.filter(([k, v]) => !(k === 'Resolution' && v === 'not-resolved')).map(([k, v]) => <span key={k} className={cx('ev-b', v)}>{k}: {v === 'available' ? 'yes' : v === 'partial' ? 'partial' : v === 'loading' ? 'loading…' : 'none'}</span>)}
+    </span>
   )
 }

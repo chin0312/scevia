@@ -118,8 +118,10 @@ export function validateReplay(r: Replay, today: string): ReplayIssues {
       : exit && !exit.ok ? `${exit.reason} Hold to settlement instead.`
       : p.exit.kind === 'date' && !(p.exit.price != null && p.exit.price > 0 && p.exit.price < 1) ? 'Enter the exit price you assume, between 0 and 1.'
       : null
+    const onCloseDay = !!m.closesAt && !/T/.test(m.closesAt) && (p.entryDate === day(m.closesAt) || (p.exit.kind === 'date' && p.exit.date === day(m.closesAt)))
     if (e) positions[p.id] = e
     else if (!m.closesAt) caveats[p.id] = 'Trading close isn’t recorded for this market; the replay assumes it was still trading on these dates.'
+    else if (onCloseDay) caveats[p.id] = `This trade is on the closing day (${day(m.closesAt)}) and no close time is recorded; the replay assumes it happened before trading closed.`
   }
   return { period, capital, positions, caveats }
 }
@@ -156,11 +158,16 @@ export interface ReplayResult {
   buckets: ReplayBucketResult[]
   /** Native results per denomination (USD, USDC and PUSD are separate assets). */
   byDenomination: DenomResult[]
-  /** Indicative USD total using the replay's frozen reporting rates; null when a rate or a value is missing. */
-  combined: { capital: number; endValue: number; netGain: number; ret: number | null; rates: Partial<ReportingRates> } | null
+  /** Combined result in the USD reporting basis (shown in the reporting currency): every native value converted at the
+   *  rate for its own date (`rateAt`). Null when a rate or a value is missing — never at an assumed parity. Its ending
+   *  value is the last point of `series`, so the KPI, chart, return and drawdown agree. */
+  combined: { capital: number; endValue: number; netGain: number; ret: number | null; rates: Partial<Record<'USDC' | 'PUSD', number>>; basis: RateBasis } | null
   combinedMissing: 'rate' | 'value' | null
   funding: FundingStatus
+  /** The combined reporting series (null values where a native value or a rate is missing). */
   series: ValuedPoint[]
+  /** Each denomination's own value series, in its native asset. */
+  nativeSeries: { denomination: Denomination; points: ValuedPoint[] }[]
   quality: ReturnType<typeof seriesQuality>
   /** First date from which every later date can be valued (the supported segment), or null. */
   supportedFrom: string | null
@@ -190,7 +197,21 @@ const hist = (p: ReplayPosition): InstrumentHistory => ({ key: instrumentKeyOf(p
 const worst = (xs: FundingStatus[]): FundingStatus => (xs.includes('unavailable') ? 'unavailable' : xs.includes('unfunded') ? 'unfunded' : 'funded')
 
 /** Evaluate a valid replay. Results are exact for the stated assumptions; anything without evidence is null. */
-export function runReplay(r: Replay, today: string): ReplayResult {
+/** USD per 1 unit of `asset` on `date`, or null when no eligible reference exists. USD is 1. */
+export type RateAt = (asset: Denomination, date: string) => number | null
+/** Where a replay's rates come from: reference evidence (per date, from the exchange-rate service), the replay's own
+ *  hypothetical overrides, or both. */
+export type RateBasis = 'reference' | 'hypothetical' | 'mixed'
+/** Rates for a replay: its explicit hypothetical overrides first, otherwise the supplied reference (per date). */
+export function replayRates(r: Replay, reference: RateAt = () => null): RateAt {
+  return (asset, date) => (asset === 'USD' ? 1 : r.rates[asset] ?? reference(asset, date))
+}
+export function rateBasis(r: Replay, assets: Denomination[]): RateBasis {
+  const used = assets.filter((a) => a !== 'USD').map((a) => (r.rates[a as 'USDC' | 'PUSD'] != null ? 'hypothetical' : 'reference'))
+  return used.length && used.every((u) => u === 'hypothetical') ? 'hypothetical' : used.some((u) => u === 'hypothetical') ? 'mixed' : 'reference'
+}
+
+export function runReplay(r: Replay, today: string, rateAt: RateAt = replayRates(r)): ReplayResult {
   const lines: ReplayLine[] = []
   const cash: ReplayCashEvent[] = r.buckets.filter((b) => b.capital > 0).map((b) => ({ date: r.start, bucketId: b.id, positionId: null, kind: 'capital' as const, amount: b.capital, fee: 0, note: 'Starting capital' }))
   for (const p of r.positions) {
@@ -252,25 +273,42 @@ export function runReplay(r: Replay, today: string): ReplayResult {
       fees: bs.some((x) => x.fees == null) ? null : bs.reduce((s, x) => s + (x.fees ?? 0), 0),
     }
   })
-  const rateOf = (d: Denomination) => (d === 'USD' ? 1 : r.rates[d])
-  const missingRate = denoms.some((d) => rateOf(d) == null)
+  // Value over time from recorded observations (LOCF), per native denomination, once per instrument (positions in the
+  // same instrument are aggregated, so a repeated position is never valued twice). Cash uses known amounts and is
+  // incomplete after an unknown fee, which makes those points partial.
+  const dates = replayDates(r.start, r.end)
+  const denomOf = (bid: string) => r.buckets.find((b) => b.id === bid)?.denomination
+  const nativeSeries = denoms.map((d) => {
+    const ps = r.positions.filter((p) => denomOf(p.bucketId) === d)
+    const instruments = [...new Map(ps.map((p) => [instrumentKeyOf(p), hist(p)])).values()]
+    const qtyAt = (key: string, date: string) => lines.filter((l) => denomOf(l.position.bucketId) === d && instrumentKeyOf(l.position) === key && l.position.entryDate <= date && !(l.end !== 'open' && l.endDate <= date)).reduce((s, l) => s + l.shares, 0)
+    const cashAt = (date: string) => { const cs = cash.filter((c) => denomOf(c.bucketId) === d && c.date <= date); return { amount: cs.reduce((s, c) => s + c.amount - (c.fee ?? 0), 0), complete: cs.every((c) => c.fee != null) } }
+    return { denomination: d, points: valueSeries(dates, instruments, qtyAt, cashAt) }
+  })
+  // Combined series: each native point converted at the rate for that date. A missing value or rate leaves the point
+  // unavailable (known parts stay in `known`).
+  const series: ValuedPoint[] = dates.map((date, i) => {
+    let value: number | null = 0, known = 0, cashSum = 0, cashComplete = true, observed = 0, carried = 0, stale = 0, missing = 0
+    for (const ns of nativeSeries) {
+      const p = ns.points[i], rate = rateAt(ns.denomination, date)
+      if (rate == null) { value = null; missing++; continue }
+      known += p.known * rate; cashSum += p.cash * rate
+      cashComplete &&= p.cashComplete; observed += p.observed; carried += p.carried; stale += p.stale; missing += p.missing
+      value = value == null || p.value == null ? null : value + p.value * rate
+    }
+    return { date, value: nativeSeries.length ? value : null, known, cash: cashSum, cashComplete, observed, carried, stale, missing }
+  })
+  const missingRate = denoms.some((d) => dates.some((date) => rateAt(d, date) == null))
   const missingValue = byDenomination.some((d) => d.endValue == null)
   let combined: ReplayResult['combined'] = null
-  if (byDenomination.length && !missingRate && !missingValue) {
-    const capital = byDenomination.reduce((s, d) => s + d.capital * rateOf(d.denomination)!, 0)
-    const endValue = byDenomination.reduce((s, d) => s + d.endValue! * rateOf(d.denomination)!, 0)
+  if (byDenomination.length && !missingRate && !missingValue && series.at(-1)!.value != null) {
+    // Starting capital at the start date's rates; ending value = the last series point (end date's rates).
+    const capital = byDenomination.reduce((s, d) => s + d.capital * rateAt(d.denomination, r.start)!, 0)
+    const endValue = series.at(-1)!.value!
     const funded = byDenomination.every((d) => d.funding === 'funded')
-    combined = { capital, endValue, netGain: endValue - capital, ret: capital > 0 && funded ? (endValue - capital) / capital : null, rates: Object.fromEntries(denoms.filter((d) => d !== 'USD').map((d) => [d, r.rates[d as 'USDC' | 'PUSD']])) }
+    combined = { capital, endValue, netGain: endValue - capital, ret: capital > 0 && funded ? (endValue - capital) / capital : null,
+      rates: Object.fromEntries(denoms.filter((d) => d !== 'USD').map((d) => [d, rateAt(d, r.end)])) as Partial<Record<'USDC' | 'PUSD', number>>, basis: rateBasis(r, denoms) }
   }
-
-  // Value over time from recorded observations (LOCF), once per instrument (positions in the same instrument are
-  // aggregated, so a repeated position is never valued twice). Cash uses known amounts and is incomplete after an
-  // unknown fee, which makes those points partial.
-  const dates = replayDates(r.start, r.end)
-  const instruments = [...new Map(r.positions.map((p) => [instrumentKeyOf(p), hist(p)])).values()]
-  const qtyAt = (key: string, date: string) => lines.filter((l) => instrumentKeyOf(l.position) === key && l.position.entryDate <= date && !(l.end !== 'open' && l.endDate <= date)).reduce((s, l) => s + l.shares, 0)
-  const cashAt = (date: string) => { const cs = cash.filter((c) => c.date <= date); return { amount: cs.reduce((s, c) => s + c.amount - (c.fee ?? 0), 0), complete: cs.every((c) => c.fee != null) } }
-  const series = valueSeries(dates, instruments, qtyAt, cashAt)
   const quality = seriesQuality(series)
   let k = series.length
   while (k > 0 && series[k - 1].value != null) k--
@@ -279,7 +317,7 @@ export function runReplay(r: Replay, today: string): ReplayResult {
   const funding = worst(bucketResults.map((x) => x.funding))
   return {
     replay: r, lines, cash, buckets: bucketResults, byDenomination, combined, combinedMissing: combined ? null : missingRate ? 'rate' : 'value', funding,
-    series, quality, supportedFrom, drawdown: quality.complete ? maxDrawdown(series) : null,
+    series, nativeSeries, quality, supportedFrom, drawdown: quality.complete ? maxDrawdown(series) : null,
     hindsight: true, resolvedSelected: r.positions.some((p) => !!p.market.resolution && day(p.market.resolution.at) <= today),
     evidence: [...new Map(r.positions.map((p) => [`${p.market.provider}:${p.market.marketId}`, p.market])).values()].map((m) => ({
       marketId: m.marketId, provider: m.provider, title: m.title, listed: !!m.listedAt, closeRecorded: !!m.closesAt, resolution: !!m.resolution,
@@ -308,14 +346,14 @@ export interface ReplayComparison {
 export function compareReplays(rs: ReplayResult[]): ReplayComparison {
   const same = <T,>(f: (r: ReplayResult) => T) => new Set(rs.map((r) => JSON.stringify(f(r)))).size <= 1
   const capitalKey = (r: ReplayResult) => r.byDenomination.map((d) => [d.denomination, d.capital]).sort()
-  const assets = (r: ReplayResult) => [r.byDenomination.map((d) => d.denomination).sort(), r.replay.rates]
+  const assets = (r: ReplayResult) => [r.byDenomination.map((d) => d.denomination).sort(), r.replay.rates, r.combined?.basis ?? null]
   const differences = [
     { key: 'period', label: 'Replay period', differs: !same((r) => [r.replay.start, r.replay.end]) },
     { key: 'markets', label: 'Selected markets', differs: !same((r) => r.replay.positions.map(instrumentKeyOf).sort()) },
     { key: 'dates', label: 'Entry and exit dates', differs: !same((r) => r.replay.positions.map((p) => [instrumentKeyOf(p), p.entryDate, p.exit.kind === 'date' ? p.exit.date : 'settle']).sort()) },
     { key: 'sizing', label: 'Position sizes', differs: !same((r) => r.replay.positions.map((p) => [instrumentKeyOf(p), p.size.mode, p.size.value]).sort()) },
     { key: 'capital', label: 'Starting capital', differs: !same(capitalKey) },
-    { key: 'assets', label: 'Native assets and reporting rates', differs: !same(assets) },
+    { key: 'assets', label: 'Native assets and conversion rates', differs: !same(assets) },
     { key: 'execution', label: 'Execution prices', differs: !same((r) => r.replay.positions.map((p) => [instrumentKeyOf(p), p.entryPrice, p.exit.kind === 'date' ? p.exit.price : null]).sort()) },
     { key: 'fees', label: 'Fee assumption', differs: !same((r) => r.replay.fees) },
     { key: 'funding', label: 'Funding status', differs: !same((r) => r.funding) },

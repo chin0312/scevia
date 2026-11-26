@@ -2,18 +2,20 @@
    added) with the latest market reference, next to the user's assumed execution price. Nothing changes unless the
    user confirms; confirming updates only the frozen references of moved instruments. Assumed prices and targets stay. */
 import { useEffect, useState } from 'react'
+import { useMarketCatalog } from '../../lib/marketContext'
 import { Modal } from '../../components/overlays'
 import { Button, Chip } from '../../components/ui'
-import { MARKET_CATALOG } from '../../data/markets'
-import { fmtDate, instrumentKey, type Adjustment } from '../../lib/finance'
+import { fmtDate, instrumentKey, type Adjustment, type Finance } from '../../lib/finance'
 import { refStatus, type RefCheck } from '../../lib/scenarios'
-import { useFinance } from '../../lib/financeContext'
 
 const px = (v: number | null) => (v == null ? '—' : v.toFixed(2))
 const STATUS: Record<RefCheck['status'], string> = { same: 'Unchanged', moved: 'Moved', 'no-latest': 'No latest price', 'no-frozen': 'New price available' }
 
-export function PriceCheckModal({ adjs, baseAsOf, titleOf, onClose, onApply }: { adjs: Adjustment[]; baseAsOf: string | null; titleOf: (a: Adjustment) => string; onClose: () => void; onApply: (checks: RefCheck[]) => void }) {
-  const { POS_BY_ID, sourceOf } = useFinance()
+export function PriceCheckModal({ adjs, baseAsOf, latest: latestF, titleOf, onClose, onApply }: { adjs: Adjustment[]; baseAsOf: string | null; latest: Finance | null; titleOf: (a: Adjustment) => string; onClose: () => void; onApply: (checks: RefCheck[]) => void }) {
+  const MARKET_CATALOG = useMarketCatalog()
+  // Latest marks come from the portfolio the scenario started from, when it's the one selected; otherwise there is no
+  // latest portfolio mark (never another portfolio's).
+  const POS_BY_ID = latestF?.POS_BY_ID ?? {}, sourceOf = latestF?.sourceOf
   const [checks, setChecks] = useState<RefCheck[] | null>(null)
   const [error, setError] = useState(false)
   useEffect(() => {
@@ -26,7 +28,7 @@ export function PriceCheckModal({ adjs, baseAsOf, titleOf, onClose, onApply }: {
         // A held position's latest reference is the selected workspace's current mark; a new instrument's comes from
         // the market service. Its frozen reference is what the row stored when it was added.
         const held = POS_BY_ID[a.id]
-        const l = held ? { price: held.mark, at: sourceOf(held.platform).asOf } : a.instrument ? latest.get(instrumentKey(a.instrument)) ?? { price: null, at: null } : { price: null, at: null }
+        const l = held && sourceOf ? { price: held.mark, at: sourceOf(held.platform).asOf } : a.instrument ? latest.get(instrumentKey(a.instrument)) ?? { price: null, at: null } : { price: null, at: null }
         const frozen = a.instrument?.refPrice ?? null, frozenAt = a.instrument?.refAsOf ?? baseAsOf
         return { id: a.id, frozen, frozenAt, latest: l.price, latestAt: l.at, assumed: a.price, status: refStatus(frozen, l.price) }
       }))

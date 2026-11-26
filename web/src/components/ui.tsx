@@ -1,7 +1,7 @@
 /* Small presentational primitives. Each maps 1:1 to an entry in design-system/components.md. */
 import type { ReactNode } from 'react'
 import type { Side } from '../data/types'
-import { splitMoney } from '../lib/format'
+import { splitMoney, reportingCode } from '../lib/format'
 import { Icon, type IconName } from './Icon'
 import { InfoTip } from './overlays'
 
@@ -74,9 +74,9 @@ export function Delta({ value, children, tone }: { value?: number; children: Rea
   return <span className={cx('delta', t)}>{children}</span>
 }
 
-export function HeroFigure({ value, currency = 'USD' }: { value: number; currency?: string }) {
+export function HeroFigure({ value, currency }: { value: number; currency?: string }) {
   const m = splitMoney(value)
-  return <div className="hero-fig">{m.sign}${m.int}<span className="dec">.{m.dec}</span><span className="cur">{currency}</span></div>
+  return <div className="hero-fig">{m.sign}{m.symbol}{m.int}<span className="dec">.{m.dec}</span><span className="cur">{currency ?? reportingCode()}</span></div>
 }
 
 export function Tile({ label, info, value, foot, tone }: { label: string; info?: string; value: ReactNode; foot?: ReactNode; tone?: 'gain' | 'loss' | 'warn' }) {

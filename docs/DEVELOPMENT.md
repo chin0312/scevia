@@ -218,6 +218,32 @@ PR #8 (Phase 6) is merged; PR #7 (Phase 5) is merged. The backend's `backend/doc
 
 The frontend's calculations stay fixture, validation and presentation logic. Authoritative accounting, valuation, risk, scenario and replay results come from the backend.
 
+### Reporting currency and exchange rates (frontend contract)
+
+- **Preference:** Settings › General › *Reporting currency* (USD default; SGD, EUR, GBP, MYR; extensible in `lib/fx.ts`). It is presentation and analysis only: `ReportingProvider` (`lib/reporting.tsx`) sets how `fmt` / `sfmt` / `kfmt` / `HeroFigure` show portfolio money; `fmtNative`, prices, quantities, payout units, execution prices and native funding are never converted, and no stored amount changes.
+- **Contract (`FxReference`):** base/quote, rate (null when unavailable — never defaulted to 1), kind (`fiat`, `stablecoin`, `hypothetical`), source, methodology, observation and retrieval times, freshness (current, recently refreshed, last-known, stale, unavailable, unsupported, override), evidence revision. `FxService.reference(base, quote)` is the frontend's view of the backend service; components never fetch rates.
+- **Development fixture:** constant, labelled fixture references (USD→SGD 1.34, EUR 0.92, GBP 0.79, MYR 4.47 and deliberately stale; USDC and PUSD fixture references of 1.0000 that are fixture values, not a claim of parity). Never described as live; Data status shows an *Exchange rates* stream.
+- **Methodology:** current tracking uses the latest eligible reference; historical performance needs the reference for each valuation date (backend). With the constant fixture, historical charts are a constant-rate view and labelled as fixture rates. Saved scenarios keep their results in the USD basis and are shown in the reporting currency at the current reference (a display conversion, not a re-evaluation). Historical Replay converts each native value at the rate for its own date (`RateAt`), using reference rates by default and explicit hypothetical overrides (advanced, saved with the replay).
+- **Missing conversion:** values are shown in USD with the code (never as zero); native results remain.
+
+### Independent Scenario Lab
+
+- **Collection ownership:** scenarios (`scevia-scenarios-v5`, active `scevia-active-v5`) and replays (`scevia-replays-v2`) are the user's Scenario Lab collection, not a tracked portfolio's. Per-portfolio keys from the previous version are merged in once by key (never duplicated) and removed after a successful write; current-portfolio scenarios migrated that way are frozen at that portfolio's state.
+- **Frozen starting portfolio:** a current-portfolio scenario stores a minimal snapshot (`pages/lab/baseline.ts` `freezeBaseline`) and its source (`{ workspaceId, name }`). It is evaluated only against that snapshot (`createFinance(frozen)` via a nested `FinanceProvider`), so refreshes, other portfolios, market revisions and the reporting currency don't change it (tested in `lib/baseline.test.ts`). When the source portfolio is selected and differs, *Review rebase…* previews differences (cash, holdings added/removed/resized, marks, date) with *Keep existing baseline*, *Duplicate with latest* and *Rebase this scenario*. When it isn't selected or has no data, the frozen start and results are kept and the latest isn't compared. *Check latest* (reference prices only) is separate from rebasing.
+- **Capability gating:** *Modify current portfolio*, the *Current portfolio* starting choice, baseline switching, examples and hand-offs need portfolio data; *Build from scratch* and *Historical replay* never do. Hand-offs into a current-portfolio scenario add holdings missing from its frozen start as new purchases.
+- **Virtual funding:** current-market scenarios take virtual starting / additional capital per venue (shown with its native asset), with *Add … virtual capital* for a shortfall; replays use explicit buckets (venue + asset). Not yet unified: current-market scenarios still pool by venue — the backend's account/denomination buckets (`hypotheticalBuckets`) replace that at integration.
+- **Market discovery:** `MarketCatalog` (search, provider link or native id via `resolveLink`, explicit statuses: invalid, unsupported provider, unsupported market type, not found, unavailable, temporarily unavailable, access unavailable, resolved) is provided by `MarketCatalogProvider` (`lib/marketContext.tsx`). Markets carry `denomination` and `evidence` (price, history, fee, resolution: available / partial / unavailable / loading); a found market can be unpriced. Both Scenario Lab's *Add markets* and the replay picker use it, with stale-response guards. The bundled catalog is the labelled sample; the development discovery fixture (`devDiscovery()`) adds markets not in it and deterministic slow / failing / unsupported cases. Live research demand, latest-reference retrieval and expiry belong to the backend (PR #9, Phase 7) and Phase 8 historical evidence.
+
+### Backend dependencies (remaining)
+
+| Need | Backend owner | Frontend seam |
+|---|---|---|
+| Exchange-rate references (current, per date, per evaluation) with provenance and revision | Phase 7 / 9 | `FxService`, `ReportingProvider`, `RateAt` |
+| Market discovery by title, link and native id; evidence availability; research demand and latest references | PR #9 (Phase 7), Phase 8 for history | `MarketCatalog` via `MarketCatalogProvider` |
+| Frozen baselines, revisioned saves, rebase preview/confirm, account/denomination funding buckets | Merged Phase 5/6 contracts | `freezeBaseline`, `baselineDiff`, Scenario fields `frozen` / `source` |
+| Scenario and replay persistence per user | Phase 9/10 | collection keys (`scevia-scenarios-v5`, `scevia-replays-v2`) |
+| Historical Replay engine (chronology, evidence, ledger, FX per date) | Phase 8 | `runReplay` result shape |
+
 ### Public Beta requirements (Phase 10, not frontend work here)
 
 Production identity and authorization, isolation, retention, export and deletion, source revocation, operational readiness and external testing gates must be in place before private financial workspaces are exposed. The Sample portfolio stays development-only; the user-facing Demo uses authorized market evidence, virtual capital and backend results.

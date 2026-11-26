@@ -5,6 +5,7 @@
    It is hindsight analysis, labelled as such. It never claims a strategy was executable, never values a holding without
    a recorded price, never counts an unknown fee as zero and never touches actual records. */
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMarketCatalog } from '../lib/marketContext'
 import { Link, useSearchParams } from 'react-router-dom'
 import { LineChart } from '../components/charts'
 import { Icon } from '../components/Icon'
@@ -12,23 +13,25 @@ import { Menu, Modal, useToast } from '../components/overlays'
 import { SectionRail, useHashScroll, type RailSection } from '../components/shell'
 import { Button, Callout, Card, CardHeader, Chip, PlatformBadge, Seg, Tabs, cx } from '../components/ui'
 import { PLATFORM_NAME } from '../data/labels'
-import { MARKET_CATALOG } from '../data/markets'
 import type { Denomination, Platform } from '../data/types'
 import { addDays, fmtDate, type Outcome } from '../lib/finance'
 import { useFinanceCtx } from '../lib/financeContext'
 import { feeLabel } from '../lib/fees'
-import { fmtNative, kfmt, pct, qty } from '../lib/format'
+import { fmt, fmtNative, kfmt, pct, qty, sfmt } from '../lib/format'
+import { useReporting } from '../lib/reporting'
 import { BASIS_LABEL } from '../lib/history'
 import type { CatalogEvent } from '../lib/markets'
 import {
-  DEFAULT_ASSET, MAX_REPLAY_POSITIONS, bucketId, compareReplays, coverShortfall, replayMarketFrom, replayValid, runReplay, sanitizeReplays, tradingWindow, validateReplay,
-  type FundingBucket, type FundingStatus, type Replay, type ReplayPosition, type ReplayResult,
+  DEFAULT_ASSET, MAX_REPLAY_POSITIONS, bucketId, replayRates, compareReplays, coverShortfall, replayMarketFrom, replayValid, runReplay, sanitizeReplays, tradingWindow, validateReplay,
+  type FundingBucket, type FundingStatus, type RateAt, type Replay, type ReplayPosition, type ReplayResult,
 } from '../lib/replay'
 import { useSettings } from '../lib/settings'
-import { scopedKey } from '../lib/storage'
+import { readStored, removeStored, scopedKey, writeStored } from '../lib/storage'
+import { LAB_REPLAYS_KEY, mergeByKey } from './lab/baseline'
 import { useSessionState } from '../lib/useSessionState'
 import { useActiveWorkspace } from '../lib/workspaceContext'
 import { COLORS } from './lab/model'
+import { EvidenceBadges } from './lab/AddPosition'
 
 export const REPLAYS_KEY = 'scevia-replays-v1'
 type View = 'Build' | 'Analyze' | 'Compare'
@@ -53,7 +56,15 @@ export default function ReplayPage() {
   const { F, workspaceId } = useFinanceCtx()
   const ws = useActiveWorkspace().snapshot
   const today = F.TODAY
-  const [replays, setReplays] = useSessionState<Replay[]>(scopedKey(REPLAYS_KEY, workspaceId), [], sanitizeReplays)
+  // Replays belong to the Scenario Lab collection, not a tracked portfolio. Ones kept per portfolio by earlier
+  // versions are merged in once (by key) and their old keys removed.
+  const [initial] = useState<Replay[]>(() => {
+    let all = readStored<Replay[]>(LAB_REPLAYS_KEY, [], sanitizeReplays)
+    const k = scopedKey(REPLAYS_KEY, workspaceId), legacy = readStored<Replay[] | null>(k, null, sanitizeReplays)
+    if (legacy) { all = mergeByKey(all, legacy); if (writeStored(LAB_REPLAYS_KEY, all)) removeStored(k) }
+    return all
+  })
+  const [replays, setReplays] = useSessionState<Replay[]>(LAB_REPLAYS_KEY, initial, sanitizeReplays)
   const [view, setView] = useSessionState<View>('scevia-replay-view', 'Build', (v) => (VIEWS.includes(v as View) ? (v as View) : null))
   const [activeKey, setActiveKey] = useState<string | null>(() => params.get('open'))
   const [adding, setAdding] = useState(false)
@@ -78,7 +89,11 @@ export default function ReplayPage() {
   const update = (fn: (r: Replay) => Replay) => active && setReplays((rs) => rs.map((r) => (r.key === active.key ? fn(r) : r)))
   const issues = active ? validateReplay(active, today) : null
   const valid = !!issues && replayValid(issues) && active!.positions.length > 0
-  const result = useMemo(() => (active && valid ? runReplay(active, today) : null), [active, valid, today])
+  // Combined reporting uses the exchange-rate service's references (per date; constant in the development fixture)
+  // unless the replay overrides a rate as an explicit hypothetical assumption.
+  const { fx, currency } = useReporting()
+  const refAt = useMemo<RateAt>(() => (asset) => fx.reference(asset, 'USD').rate, [fx])
+  const result = useMemo(() => (active && valid ? runReplay(active, today, replayRates(active, refAt)) : null), [active, valid, today, refAt])
   const issueCount = issues ? (issues.period ? 1 : 0) + (issues.capital ? 1 : 0) + Object.keys(issues.positions).length : 0
 
   if (!active) return (
@@ -136,8 +151,8 @@ export default function ReplayPage() {
         </div>
 
         {view === 'Build' && <BuildReplay r={active} issues={issues!} result={result} onChange={update} onAdd={() => setAdding(true)} onAnalyze={() => { setView('Analyze'); window.scrollTo(0, 0) }} valid={valid} />}
-        {view === 'Analyze' && (result ? <AnalyzeReplay res={result} onChange={update} /> : <Callout tone="warn" icon="alert">This replay can’t be analyzed yet: {active.positions.length === 0 ? 'add at least one position.' : `${issueCount} input${issueCount === 1 ? '' : 's'} in Build need${issueCount === 1 ? 's' : ''} attention.`} <button type="button" className="link" onClick={() => setView('Build')}>Go to Build</button></Callout>)}
-        {view === 'Compare' && <CompareReplays replays={replays} today={today} activeKey={active.key} />}
+        {view === 'Analyze' && (result ? <AnalyzeReplay res={result} onChange={update} currency={currency} /> : <Callout tone="warn" icon="alert">This replay can’t be analyzed yet: {active.positions.length === 0 ? 'add at least one position.' : `${issueCount} input${issueCount === 1 ? '' : 's'} in Build need${issueCount === 1 ? 's' : ''} attention.`} <button type="button" className="link" onClick={() => setView('Build')}>Go to Build</button></Callout>)}
+        {view === 'Compare' && <CompareReplays replays={replays} today={today} activeKey={active.key} refAt={refAt} />}
         <div className="footer-note"><span>Historical replays apply your stated prices and fees to recorded market history, with hindsight. They aren’t your actual performance, a strategy test or a recommendation.</span><span>{ws.summary.name} · virtual funding · sample market data</span></div>
       </main>
 
@@ -246,10 +261,24 @@ function BuildReplay({ r, issues, result, onChange, onAdd, onAnalyze, valid }: {
 /* Market picker (through the MarketCatalog interface). Markets that didn't trade in the period can't be added; a
    market already in the replay can be added again as another position. Funding for the venue is offered automatically. */
 function AddReplayMarkets({ r, onClose, onAdd }: { r: Replay; onClose: () => void; onAdd: (ps: ReplayPosition[], buckets: FundingBucket[]) => void }) {
+  const MARKET_CATALOG = useMarketCatalog()
   const [events, setEvents] = useState<CatalogEvent[] | null>(null)
   const [error, setError] = useState(false)
+  const [q, setQ] = useState('')
   const [picked, setPicked] = useState<Set<string>>(new Set())
-  useEffect(() => { let live = true; MARKET_CATALOG.search('').then((e) => { if (live) setEvents(e) }).catch(() => { if (live) setError(true) }); return () => { live = false } }, [])
+  const seq = useRef(0)
+  // Search by title, provider link or native id. Only the latest request updates the list; a failure is shown and
+  // nothing is put in its place.
+  useEffect(() => {
+    const n = ++seq.current
+    const t = window.setTimeout(() => {
+      const term = q.trim(), asLink = !!term && (/^https?:\/\//i.test(term) || !/\s/.test(term) && /[-_]/.test(term))
+      const run = asLink ? MARKET_CATALOG.resolveLink(term).then((r) => (r.status === 'resolved' ? [r.event] : [])) : MARKET_CATALOG.search(term)
+      setError(false)
+      run.then((e) => { if (n === seq.current) setEvents(e) }).catch(() => { if (n === seq.current) { setEvents([]); setError(true) } })
+    }, 150)
+    return () => window.clearTimeout(t)
+  }, [q, MARKET_CATALOG])
   const rows = (events ?? []).flatMap((ev) => ev.markets.map((m) => {
     const key = `${m.provider}:${m.marketId}`, rm = replayMarketFrom(ev, m)
     const closedBefore = m.closesAt ? m.closesAt.slice(0, 10) < r.start : !!m.resolution && m.resolution.at.slice(0, 10) <= r.start
@@ -270,14 +299,15 @@ function AddReplayMarkets({ r, onClose, onAdd }: { r: Replay; onClose: () => voi
     onAdd(ps, buckets)
   }
   return (
-    <Modal title="Add markets" sub={`Markets that traded between ${long(r.start)} and ${long(r.end)} · sample market data (fictional)`} onClose={onClose} width={620}
+    <Modal title="Add markets" sub={`Markets that traded between ${long(r.start)} and ${long(r.end)} · ${MARKET_CATALOG.label}${MARKET_CATALOG.live ? '' : ' (fictional, not live)'}`} onClose={onClose} width={620}
       footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" disabled={!picked.size} onClick={add}>Add {picked.size || ''} position{picked.size === 1 ? '' : 's'}</Button></>}>
-      {error ? <div className="empty"><p>Markets couldn’t be loaded.</p></div> : !events ? <div className="skeleton" style={{ height: 240 }} aria-busy="true" aria-label="Loading markets" /> : (
+      <input className="text-input" type="search" aria-label="Find markets" placeholder="Search events or markets, or paste a link or market id" value={q} onChange={(e) => setQ(e.target.value)} style={{ width: '100%', marginBottom: 'var(--space-3)' }} />
+      {error ? <Callout tone="warn" icon="alert">Market search isn’t available right now. Your replay is unaffected and nothing is shown in its place.</Callout> : !events ? <div className="skeleton" style={{ height: 240 }} aria-busy="true" aria-label="Loading markets" /> : events.length === 0 ? <div className="empty"><p>No markets found{q.trim() ? ` for “${q.trim()}”` : ''}.</p></div> : (
         <div className="rp-pick">
           {rows.map(({ key, m, why, inReplay }) => (
             <label key={key} className="rp-pick-i">
               <span className="row" style={{ minWidth: 0 }}><input type="checkbox" disabled={!!why} checked={picked.has(key)} onChange={(e) => setPicked((s) => { const n = new Set(s); if (e.target.checked) n.add(key); else n.delete(key); return n })} />
-                <PlatformBadge p={m.provider} size={16} /><span style={{ minWidth: 0 }}>{m.marketTitle}<small>{m.listedAt ? `Opened ${long(m.listedAt)}` : 'Opening unknown'} · {m.closesAt ? `closed ${long(m.closesAt)}` : 'close not recorded'}{m.resolution ? ` · resolved ${m.resolution.outcome} ${long(m.resolution.at)}` : ''}</small></span></span>
+                <PlatformBadge p={m.provider} size={16} /><span style={{ minWidth: 0 }}>{m.marketTitle}<EvidenceBadges m={m} /><small>{m.listedAt ? `Opened ${long(m.listedAt)}` : 'Opening unknown'} · {m.closesAt ? `closed ${long(m.closesAt)}` : 'close not recorded'}{m.resolution ? ` · resolved ${m.resolution.outcome} ${long(m.resolution.at)}` : ''}</small></span></span>
               {why ? <small className="t3">{why}</small> : inReplay ? <small className="t3">{inReplay} in replay</small> : m.resolution ? <Chip>resolved</Chip> : null}
             </label>
           ))}
@@ -292,18 +322,18 @@ function AddReplayMarkets({ r, onClose, onAdd }: { r: Replay; onClose: () => voi
 function RatesEditor({ r, onChange, needed }: { r: Replay; onChange: (fn: (r: Replay) => Replay) => void; needed: Denomination[] }) {
   return (
     <details className="adv rp-rates">
-      <summary>Reporting rates for an indicative USD total</summary>
-      <p className="t3">Frozen with this replay. They only convert for reporting; they never move funds between buckets.</p>
+      <summary>Advanced: override stablecoin reference rates</summary>
+      <p className="t3">By default each stablecoin is converted at its reference rate. An override is a hypothetical assumption, saved with this replay and applied to every date; it never moves funds between buckets.</p>
       <div className="rp-grid">
         {(['USDC', 'PUSD'] as const).filter((d) => needed.includes(d)).map((d) => (
-          <label key={d} className="rp-field">USD per 1 {d}<input className="rp-in num" type="number" inputMode="decimal" min={0.5} max={2} step={0.0001} placeholder="not set" value={r.rates[d] ?? ''} onChange={(e) => { const v = num(e.target.value); onChange((x) => ({ ...x, rates: { ...x.rates, [d]: v != null && v > 0 && v < 10 ? v : null } })) }} /></label>
+          <label key={d} className="rp-field">USD per 1 {d}<input className="rp-in num" type="number" inputMode="decimal" min={0.5} max={2} step={0.0001} placeholder="reference" value={r.rates[d] ?? ''} onChange={(e) => { const v = num(e.target.value); onChange((x) => ({ ...x, rates: { ...x.rates, [d]: v != null && v > 0 && v < 10 ? v : null } })) }} /></label>
         ))}
       </div>
     </details>
   )
 }
 
-function AnalyzeReplay({ res, onChange }: { res: ReplayResult; onChange: (fn: (r: Replay) => Replay) => void }) {
+function AnalyzeReplay({ res, onChange, currency }: { res: ReplayResult; onChange: (fn: (r: Replay) => Replay) => void; currency: string }) {
   const r = res.replay
   const from = res.supportedFrom ? res.series.findIndex((p) => p.date === res.supportedFrom) : -1
   const seg = from >= 0 ? res.series.slice(from) : []
@@ -323,9 +353,9 @@ function AnalyzeReplay({ res, onChange }: { res: ReplayResult; onChange: (fn: (r
             <div className="rp-foot">From {fmtNative(d.capital, d.denomination)} · net gain {d.netGain == null ? 'unavailable' : sNative(d.netGain, d.denomination)} · return {d.ret == null ? 'unavailable' : `${d.ret >= 0 ? '+' : ''}${pct(d.ret * 100)}`}</div>
             <div className="rp-foot">Realized {d.realizedPnl == null ? 'unavailable' : sNative(d.realizedPnl, d.denomination)} · fees {d.fees == null ? 'unknown' : fmtNative(d.fees, d.denomination)}</div></div>
         ))}
-        <div className="rp-kpi"><small>Largest drawdown</small><b>{res.drawdown ? kfmt(-res.drawdown.amount) : 'Unavailable'}</b><div className="rp-foot">{res.drawdown ? `${fmtDate(res.drawdown.from)} → ${fmtDate(res.drawdown.to)}` : 'Needs a complete value on every date of the replay'}</div></div>
-        <div className="rp-kpi"><small>Indicative USD total</small><b>{res.combined ? fmtNative(res.combined.endValue, 'USD') : 'Unavailable'}</b>
-          <div className="rp-foot">{res.combined ? <>Net gain {sNative(res.combined.netGain, 'USD')}{Object.entries(res.combined.rates).map(([d, v]) => ` · 1 ${d} = ${v} USD`).join('')}</> : res.combinedMissing === 'rate' ? `Set a reporting rate for ${nonUsd.join(' and ')} below` : 'Needs every native value'}</div></div>
+        <div className="rp-kpi"><small>Largest drawdown · {currency}</small><b>{res.drawdown ? kfmt(-res.drawdown.amount) : 'Unavailable'}</b><div className="rp-foot">{res.drawdown ? `${fmtDate(res.drawdown.from)} → ${fmtDate(res.drawdown.to)}` : 'Needs a complete value on every date of the replay'}</div></div>
+        <div className="rp-kpi"><small>Combined · {currency}</small><b>{res.combined ? fmt(res.combined.endValue, 2) : 'Unavailable'}</b>
+          <div className="rp-foot">{res.combined ? <>From {fmt(res.combined.capital, 2)} · net gain {sfmt(res.combined.netGain, 2)}{res.combined.ret != null ? ` (${res.combined.ret >= 0 ? '+' : ''}${pct(res.combined.ret * 100)})` : ''}{Object.entries(res.combined.rates).map(([d, v]) => ` · 1 ${d} = ${v} USD`).join('')} · {res.combined.basis === 'reference' ? 'reference rates' : res.combined.basis === 'hypothetical' ? 'your hypothetical rates' : 'reference and hypothetical rates'}</> : res.combinedMissing === 'rate' ? `No reference rate for ${nonUsd.join(' and ')}; native results above` : 'Needs every native value'}</div></div>
       </div>
       {nonUsd.length > 0 && <RatesEditor r={r} onChange={onChange} needed={nonUsd} />}
     </section>
@@ -394,9 +424,9 @@ function AnalyzeReplay({ res, onChange }: { res: ReplayResult; onChange: (fn: (r
 /* ───────────── Compare ─────────────
    Normalized value (index = 100 at each replay's start) only where every compared replay has a complete series over
    the same period; otherwise an unavailable state. Figures whose basis differs are marked. */
-function CompareReplays({ replays, today, activeKey }: { replays: Replay[]; today: string; activeKey: string }) {
+function CompareReplays({ replays, today, activeKey, refAt }: { replays: Replay[]; today: string; activeKey: string; refAt: RateAt }) {
   const [picked, setPicked] = useState<string[]>(() => [activeKey, ...replays.filter((r) => r.key !== activeKey).slice(-2).map((r) => r.key)])
-  const evaluated = replays.filter((r) => picked.includes(r.key)).map((r) => { const i = validateReplay(r, today); return { r, res: replayValid(i) && r.positions.length ? runReplay(r, today) : null } })
+  const evaluated = replays.filter((r) => picked.includes(r.key)).map((r) => { const i = validateReplay(r, today); return { r, res: replayValid(i) && r.positions.length ? runReplay(r, today, replayRates(r, refAt)) : null } })
   const ready = evaluated.filter((x): x is { r: Replay; res: ReplayResult } => !!x.res)
   const cmp = ready.length >= 2 ? compareReplays(ready.map((x) => x.res)) : null
   const diffs = cmp?.differences.filter((d) => d.differs) ?? []
@@ -435,7 +465,7 @@ function CompareReplays({ replays, today, activeKey }: { replays: Replay[]; toda
               <tr><th scope="row">Return</th>{ready.map(({ r, res }) => <td key={r.key} className="r">{res.combined?.ret == null ? 'Unavailable' : mark(cmp?.returnComparable, `${res.combined.ret >= 0 ? '+' : ''}${pct(res.combined.ret * 100)}`)}</td>)}</tr>
               <tr><th scope="row">Realized P&amp;L</th>{ready.map(({ r, res }) => <td key={r.key} className="r">{mark(cmp?.amountsComparable, amounts(res, (d) => d.realizedPnl, true))}</td>)}</tr>
               <tr><th scope="row">Fees</th>{ready.map(({ r, res }) => <td key={r.key} className="r t2">{amounts(res, (d) => d.fees)}</td>)}</tr>
-              <tr><th scope="row">Largest drawdown</th>{ready.map(({ r, res }) => <td key={r.key} className="r t2">{res.drawdown ? kfmt(res.drawdown.amount) : 'Unavailable'}</td>)}</tr>
+              <tr><th scope="row">Largest drawdown</th>{ready.map(({ r, res }) => <td key={r.key} className="r t2">{res.drawdown ? mark(cmp?.amountsComparable, kfmt(res.drawdown.amount)) : 'Unavailable'}</td>)}</tr>
             </tbody>
           </table></div>
         )}

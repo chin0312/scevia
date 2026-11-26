@@ -8,10 +8,12 @@ import { fmtDate } from '../lib/finance'
 import { qty } from '../lib/format'
 import { TYPE_LABEL } from '../lib/records'
 import { SettingsProvider, useSettings, type SettingsTab } from '../lib/settings'
-import { SAMPLE_WORKSPACE_ID, readStored, scopedKey } from '../lib/storage'
+import { SAMPLE_WORKSPACE_ID, readStored } from '../lib/storage'
 import { WorkspaceProvider, hasData, useActiveWorkspace } from '../lib/workspaceContext'
 import { FinanceProvider } from '../lib/financeContext'
-import { devService } from '../data/devWorkspaces'
+import { ReportingProvider } from '../lib/reporting'
+import { devCatalog, devService } from '../data/devWorkspaces'
+import { MarketCatalogProvider } from '../lib/marketContext'
 import { accountName, emptyRecords, initialWorkspace, notifyRecords, setActiveRecords, useWorkspaceSnapshot } from '../lib/useWorkspace'
 import { AccountMenu, PrivacyDialog } from './Account'
 import { DetailProvider, useDetails, type Detail } from './details'
@@ -97,16 +99,19 @@ function CommandPalette({ onClose, open }: { onClose: () => void; open: Overlays
     const to = (path: string) => () => { onClose(); nav(path) }
     const det = (d: Detail) => () => { onClose(); details.open(d) }
     const run = (f: () => void) => () => { onClose(); f() }
-    const scenarios = readStored<{ key: string; name: string; baseline?: string; adjs?: unknown[] }[]>(scopedKey('scevia-scenarios-v4', workspaceId), [], (v) => (Array.isArray(v) ? (v as { key: string; name: string }[]).filter((x) => x && typeof x.key === 'string' && typeof x.name === 'string') : null))
-    const replays = readStored<{ key: string; name: string; start?: string; end?: string }[]>(scopedKey('scevia-replays-v1', workspaceId), [], (v) => (Array.isArray(v) ? (v as { key: string; name: string }[]).filter((x) => x && typeof x.key === 'string' && typeof x.name === 'string') : null))
+    const scenarios = readStored<{ key: string; name: string; baseline?: string; adjs?: unknown[]; source?: { name?: string } | null }[]>('scevia-scenarios-v5', [], (v) => (Array.isArray(v) ? (v as { key: string; name: string }[]).filter((x) => x && typeof x.key === 'string' && typeof x.name === 'string') : null))
+    const replays = readStored<{ key: string; name: string; start?: string; end?: string }[]>('scevia-replays-v2', [], (v) => (Array.isArray(v) ? (v as { key: string; name: string }[]).filter((x) => x && typeof x.key === 'string' && typeof x.name === 'string') : null))
     const content: Item[] = hasPortfolio ? [
       ...ws.accounts.map((a) => ({ id: `acct:${a.id}`, group: 'Accounts', label: a.label, sub: `${PLATFORM_NAME[a.venue]} · ${a.kind}${a.inAnalytics ? '' : ' · records only'}`, icon: 'db' as IconName, keys: `${PLATFORM_NAME[a.venue]} ${a.connection ?? ''} account wallet`.toLowerCase(), go: to(`/portfolio/transactions?account=${encodeURIComponent(a.id)}`) })),
       ...POSITIONS.map((p) => ({ id: `pos:${p.id}`, group: 'Positions', label: p.market, sub: `${p.side} · ${qty(p.shares)} shares · ${PLATFORM_NAME[p.platform]} · ${accountName(p.accountId)}`, icon: 'layers' as IconName, keys: `${p.category} ${p.eventId} ${p.side}`.toLowerCase(), go: det({ kind: 'position', id: p.id }) })),
       ...exposures().map((x) => ({ id: `evt:${x.event.id}`, group: 'Events', label: x.event.name, sub: `${x.positions.length} contract${x.positions.length > 1 ? 's' : ''} · resolves ${fmtDate(x.resolves)}`, icon: 'target' as IconName, keys: `${x.event.short} ${x.event.category}`.toLowerCase(), go: det({ kind: 'event', id: x.event.id }) })),
       ...ws.records.map((r) => { const a = ws.accounts.find((x) => x.id === r.accountId); return { id: `rec:${r.key}`, group: 'Transactions', label: `${TYPE_LABEL[r.type]}${r.instrument ? ` · ${r.instrument} ${r.side ?? ''}` : ''}`, sub: `${a?.label ?? ''} · ${fmtDate(r.time.slice(0, 10))} · ${r.key}`, icon: 'list' as IconName, keys: `${r.key} ${r.sourceRef} ${r.batchId ?? ''} record transaction`.toLowerCase(), go: to(`/portfolio/transactions?q=${encodeURIComponent(r.key)}`) } }),
-      ...scenarios.map((s) => ({ id: `scn:${s.key}`, group: 'Scenarios', label: s.name, sub: `Current-market scenario · ${s.baseline === 'scratch' ? 'from scratch' : 'from current portfolio'} · ${s.adjs?.length ?? 0} positions`, icon: 'flask' as IconName, keys: 'scenario current', go: to(`/scenario-lab?open=${encodeURIComponent(s.key)}`) })),
-      ...replays.map((s) => ({ id: `rpl:${s.key}`, group: 'Scenarios', label: s.name, sub: `Historical replay${s.start && s.end ? ` · ${fmtDate(s.start)} – ${fmtDate(s.end)}` : ''}`, icon: 'clock' as IconName, keys: 'replay historical backtest hindsight', go: to(`/scenario-lab/replay?open=${encodeURIComponent(s.key)}`) })),
     ] : []
+    // Scenarios and replays are the user's Scenario Lab collection: searchable whichever portfolio is selected.
+    const lab: Item[] = [
+      ...scenarios.map((s) => ({ id: `scn:${s.key}`, group: 'Scenarios', label: s.name, sub: `Scenario · ${s.baseline === 'scratch' ? 'from scratch' : `from ${s.source?.name ?? 'a portfolio'}`} · ${s.adjs?.length ?? 0} positions`, icon: 'flask' as IconName, keys: 'scenario current', go: to(`/scenario-lab?open=${encodeURIComponent(s.key)}`) })),
+      ...replays.map((s) => ({ id: `rpl:${s.key}`, group: 'Scenarios', label: s.name, sub: `Historical replay${s.start && s.end ? ` · ${fmtDate(s.start)} – ${fmtDate(s.end)}` : ''}`, icon: 'clock' as IconName, keys: 'replay historical backtest hindsight', go: to(`/scenario-lab/replay?open=${encodeURIComponent(s.key)}`) })),
+    ]
     const all: Item[] = [
       { id: 'act:manual', group: 'Actions', label: 'Add a manual record', sub: 'Portfolio · transactions', icon: 'plus', keys: 'new transaction trade deposit', go: to('/portfolio/transactions?action=manual') },
       { id: 'act:import', group: 'Actions', label: 'Import transactions (CSV)', sub: 'Portfolio · imports', icon: 'download', keys: 'csv file upload import', go: to('/portfolio/imports?action=import') },
@@ -120,6 +125,7 @@ function CommandPalette({ onClose, open }: { onClose: () => void; open: Overlays
       ...AREAS.map((a) => ({ id: `page:${a.to}`, group: 'Pages', label: a.label, sub: 'Page', icon: 'home' as IconName, keys: '', go: to(a.to) })),
       ...PORTFOLIO_SECTIONS.map((s) => ({ id: `pf:${s.id}`, group: 'Portfolio', label: s.label, sub: s.sub, icon: s.icon, keys: 'portfolio manage', go: to(`/portfolio/${s.id}`) })),
       ...content,
+      ...lab,
       ...([['Getting started', 'Getting started', 'how start tour'], ['Methodology', 'Methodology & glossary', 'cost basis pnl return drawdown definition calculate fees'], ['Shortcuts', 'Keyboard shortcuts', 'keys keyboard'], ['Guides', 'User guide', 'help guide']] as [HelpTab, string, string][])
         .map(([t, l, k]) => ({ id: `help:${t}`, group: 'Help', label: l, sub: 'Help', icon: 'help' as IconName, keys: k, go: run(() => open.help(t)) })),
     ]
@@ -168,7 +174,8 @@ function CommandPalette({ onClose, open }: { onClose: () => void; open: Overlays
 /* The workspace provider sits inside Settings so the automatic-refresh preference applies. */
 function WorkspaceFromSettings({ children }: { children: ReactNode }) {
   const { settings } = useSettings()
-  return <WorkspaceProvider autoRefreshMin={settings.autoRefresh} service={devService()}><ActiveFinance>{children}</ActiveFinance></WorkspaceProvider>
+  // Keyed by reporting currency so every figure is shown again in the new currency (presentation only).
+  return <ReportingProvider currency={settings.reportingCurrency} key={settings.reportingCurrency}><WorkspaceProvider autoRefreshMin={settings.autoRefresh} service={devService()}><ActiveFinance><MarketCatalogProvider catalog={devCatalog()}>{children}</MarketCatalogProvider></ActiveFinance></WorkspaceProvider></ReportingProvider>
 }
 /* Binds the read model to the selected workspace. A workspace without data (loading, unavailable, failed) gets an
    empty portfolio, never another workspace's data. Detail panels are reset when the workspace changes. */

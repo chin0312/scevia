@@ -7,7 +7,8 @@
  */
 import type { Adjustment, Baseline, Constraint, InstrumentRef } from './finance'
 import { readFeeAssumption, type FeeAssumption, type FeeSchedule } from './fees'
-import type { Platform } from '../data/types'
+import type { Platform, PortfolioData } from '../data/types'
+import { readFrozen } from '../pages/lab/baseline'
 
 /** Assumptions a scenario may set for itself. Absent = inherit the shared setting. */
 export interface ScenarioAssumptions {
@@ -25,6 +26,10 @@ export interface Scenario extends Snapshot {
   baseAsOf?: string | null
   /** What Reset returns a never-saved scenario to: empty for a new one, the source's state for a duplicate or example. */
   start?: Snapshot
+  /** Current-portfolio scenarios: the frozen starting portfolio (pages/lab/baseline.ts) and where it came from. The
+   *  scenario is evaluated against this snapshot, never the latest portfolio; rebasing replaces it explicitly. */
+  frozen?: PortfolioData | null
+  source?: { workspaceId: string; name: string } | null
 }
 export type ScenarioStatus = 'new' | 'saved' | 'modified'
 
@@ -102,9 +107,10 @@ function readInstrument(v: unknown): InstrumentRef | undefined | false {
 /** Validate scenarios restored from storage (current or older formats). Malformed entries are dropped; positions that
  *  reference holdings no longer in the portfolio (and carry no instrument reference) are removed and counted.
  *  Older scenarios migrate to "current portfolio" with no added capital and shared assumptions. Returns null if unusable. */
-export function sanitize(raw: unknown, knownIds: (id: string) => boolean): { scenarios: Scenario[]; dropped: number } | null {
+export function sanitize(raw: unknown, knownIds: (id: string, frozen: PortfolioData | null) => boolean): { scenarios: Scenario[]; dropped: number } | null {
   if (!Array.isArray(raw)) return null
   let dropped = 0
+  let known = (id: string) => knownIds(id, null)
   const adjs = (v: unknown): Adjustment[] => {
     if (!Array.isArray(v)) return []
     const out: Adjustment[] = []
@@ -114,7 +120,7 @@ export function sanitize(raw: unknown, knownIds: (id: string) => boolean): { sce
       const price = a.price === null ? null : isNum(a.price) ? a.price : undefined
       const instrument = readInstrument(a.instrument)
       const size = a.size && typeof a.size === 'object' && (a.size.by === 'amount' || a.size.by === 'weight') && isNum(a.size.value) && a.size.value >= 0 ? { by: a.size.by as 'amount' | 'weight', value: a.size.value as number } : undefined
-      if (to === undefined || price === undefined || instrument === false || (!instrument && !knownIds(a.id))) { dropped++; continue }
+      if (to === undefined || price === undefined || instrument === false || (!instrument && !known(a.id))) { dropped++; continue }
       out.push({ id: a.id, to, price, ...(instrument ? { instrument } : {}), ...(size ? { size } : {}) })
     }
     return out
@@ -145,11 +151,14 @@ export function sanitize(raw: unknown, knownIds: (id: string) => boolean): { sce
   })
   const scenarios = raw.flatMap((x): Scenario[] => {
     if (!x || typeof x !== 'object' || typeof x.key !== 'string' || typeof x.name !== 'string') return []
+    const frozen = readFrozen(x.frozen)
+    known = (id: string) => knownIds(id, frozen)
     const cur = snapshot(x, x.name)
     const saved = x.saved && typeof x.saved === 'object' && typeof x.saved.name === 'string' ? snapshot({ baseline: cur.baseline, funding: cur.funding, assumptions: cur.assumptions, ...x.saved }, x.saved.name) : null
     // Older formats stored `start` as a list of adjustments.
     const start = Array.isArray(x.start) ? { ...cur, adjs: adjs(x.start) } : x.start && typeof x.start === 'object' ? snapshot(x.start, typeof x.start.name === 'string' ? x.start.name : cur.name) : undefined
-    return [{ ...cur, key: x.key, saved, savedAt: typeof x.savedAt === 'string' ? x.savedAt : null, color: typeof x.color === 'string' ? x.color : '', start, baseAsOf: typeof x.baseAsOf === 'string' ? x.baseAsOf : null }]
+    return [{ ...cur, key: x.key, saved, savedAt: typeof x.savedAt === 'string' ? x.savedAt : null, color: typeof x.color === 'string' ? x.color : '', start, baseAsOf: typeof x.baseAsOf === 'string' ? x.baseAsOf : null,
+      frozen, source: x.source && typeof x.source.workspaceId === 'string' && typeof x.source.name === 'string' ? { workspaceId: x.source.workspaceId, name: x.source.name } : null }]
   })
   const keys = new Set<string>()
   return { scenarios: scenarios.filter((x) => !keys.has(x.key) && keys.add(x.key)), dropped }
