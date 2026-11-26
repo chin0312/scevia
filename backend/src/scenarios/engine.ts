@@ -9,6 +9,9 @@ const sum = (values: Decimal[]) => values.reduce((total, value) => total.plus(va
 const add = (left: Decimal | null, right: Decimal | null) => left === null || right === null ? null : left.plus(right)
 export const methodology = 'weighted-average-scenario-v1'
 export interface FundingBucket { id: string; venue: string; account: string; cash: string | null; pending: string | null; inventoryComplete?: boolean; inventoryAt?: string | null; tradingVenue?: string; cashObservation?: { sourceRecordId: string; asOf: string } }
+export type KalshiScenarioFeeSchedule = { version: 'kalshi-centicent-quadratic-v1'; rate: string; makerRate: string; retrievedAt: string;
+  source: 'kalshi_series' | 'kalshi_event_override'; denomination: 'USD' }
+
 export interface ScenarioInstrument {
   id: string; mark: string | null; markAt?: string | null; market?: string; event?: string; resolvesAt?: string | null
   venue?: string; provider?: string; nativeMarket?: string; nativeInstrument?: string; settlementAsset?: string | null; outcome?: string | null; providerMarket?: string; lifecycle?: string
@@ -18,7 +21,7 @@ export interface ScenarioInstrument {
   markSource?: 'scoped_holding_consensus' | 'public_retrieval_at_cutoff' | 'assumed_current_quote' | 'declared_local'
   quoteProvenance?: string; establishedPayoutUnit?: string
   latestPrice?: string | null; latestPriceAt?: string | null
-  feeSchedule?: { version: 'polymarket-price-variance-v1'; rate: string; retrievedAt: string; source: 'gamma_market'; denomination: 'USDC' }
+  feeSchedule?: { version: 'polymarket-price-variance-v1'; rate: string; retrievedAt: string; source: 'gamma_market'; denomination: 'USDC' } | KalshiScenarioFeeSchedule
 }
 export interface ScenarioHolding { bucket: string; instrument: string; quantity: string; basis: string | null; quantityKnown?: boolean; mark?: string | null; markAt?: string | null; originalInstrument?: string; quantityObservation?: { sourceRecordId: string; asOf: string } }
 export interface ScenarioBaseline {
@@ -67,6 +70,12 @@ export function validateInstrumentIdentities(instruments: ScenarioInstrument[]) 
     if (nativeIdentities.has(id)) throw new ScenarioError('duplicate_native_instrument')
     nativeIdentities.add(id)
   }
+}
+
+function kalshiEstimatedFee(notional: Decimal, quantity: Decimal, price: Decimal, rate: string) {
+  if (new D(rate).isZero() || quantity.isZero()) return zero()
+  const fee = quantity.mul(rate).mul(price).mul(new D(1).minus(price))
+  return notional.plus(fee).toDecimalPlaces(4, Decimal.ROUND_CEIL).minus(notional)
 }
 
 export function scopedReference(observations: Array<{ scope: string; price: string; asOf: string }>) {
@@ -217,7 +226,9 @@ function evaluateInternal(baseline: ScenarioBaseline, changes: ScenarioInput, op
     if (instrument.settlementAsset && instrument.settlementAsset !== baseline.asset) throw new ScenarioError('instrument_asset_mismatch', index)
     const schedule = instrument.feeSchedule
     const providerFee = op.fee.mode === 'provider' && schedule?.denomination === baseline.asset && price.lte(1)
-      ? op.fee.role === 'maker' ? zero() : delta.abs().mul(schedule.rate).mul(price).mul(new D(1).minus(price)).toDecimalPlaces(5, Decimal.ROUND_HALF_UP)
+      ? schedule.version === 'kalshi-centicent-quadratic-v1'
+        ? kalshiEstimatedFee(notional, delta.abs(), price, op.fee.role === 'maker' ? schedule.makerRate : schedule.rate)
+        : op.fee.role === 'maker' ? zero() : delta.abs().mul(schedule.rate).mul(price).mul(new D(1).minus(price)).toDecimalPlaces(5, Decimal.ROUND_HALF_UP)
       : null
     const fee = delta.isZero() || op.fee.mode === 'excluded' ? zero()
       : op.fee.mode === 'fixed' ? new D(op.fee.value)

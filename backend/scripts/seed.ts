@@ -18,7 +18,7 @@ const { database, pool } = createDatabase(databaseConfig)
 try {
   await runMigrations(database)
   await database.insert(users).values({ id: ownerId, authSubject: 'development-fixture-principal' }).onConflictDoNothing()
-  await database.insert(portfolios).values({ id: portfolioId, ownerId, name: 'Sample portfolio' }).onConflictDoNothing()
+  await database.insert(portfolios).values({ id: portfolioId, ownerId, name: 'Test fixture portfolio' }).onConflictDoNothing()
   await database.insert(providerAccounts).values([
     {
       id: multiAccountId,
@@ -54,7 +54,7 @@ try {
   if (results.some((result) => result.status !== 'complete')) {
     throw new Error('Fixture synchronization failed')
   }
-  process.stdout.write(`Ingested ${results.length} deterministic fixture sources into the Sample portfolio.\n`)
+  process.stdout.write(`Ingested ${results.length} deterministic fixture sources into the Test fixture portfolio.\n`)
 } finally {
   await pool.end()
 }

@@ -35,6 +35,7 @@ export interface KalshiConfig {
 
 export interface ServerConfig extends DatabaseConfig {
   kalshi?: KalshiConfig
+  demoDataset?: { path: string; cacheMs: number; allowFixture: boolean }
   polymarketLiveEnabled?: boolean
   polymarketPolygonRpc?: URL
   nodeEnv: 'development' | 'test' | 'production'
@@ -103,6 +104,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     ...database,
     ...(polymarketPolygonRpc ? { polymarketPolygonRpc } : {}),
     kalshi,
+    ...(localDevelopment && env.DEMO_CAPTURE_AUTHORIZED === 'YES' && env.DEMO_DATASET_PATH?.startsWith('/') ? {
+      demoDataset: { path: env.DEMO_DATASET_PATH, allowFixture: false,
+        cacheMs: z.coerce.number().int().min(1000).max(3_600_000).parse(env.DEMO_DATASET_CACHE_MS ?? '60000') },
+    } : {}),
     nodeEnv: parsed.NODE_ENV,
     polymarketLiveEnabled: parsed.NODE_ENV === 'development' && ['127.0.0.1', '::1', 'localhost'].includes(parsed.HOST)
       && parsed.POLYMARKET_LIVE_DATA_AUTHORIZED === 'YES',

@@ -1,3 +1,4 @@
+import type { KalshiScenarioFeeSchedule } from '../../scenarios/engine.js'
 import { z } from 'zod'
 import { Decimal } from 'decimal.js'
 import { decimalTextSchema } from '../../domain/model.js'
@@ -32,7 +33,7 @@ export function kalshiMarketChoice(raw: unknown, retrievedAt: string) {
   const usable = standard && yes !== undefined && new Decimal(yes).gte(0) && new Decimal(yes).lte(1)
   return { provider: 'kalshi' as const, marketTicker: record.externalMarketId, eventTicker: record.externalEventId,
     title: record.marketTitle, lifecycle: record.marketLifecycle, tradingClosesAt: quote.close_time ?? null,
-    settlementAsset: 'USD', reviewedPayout: false, feeSchedule: null, expectedResolutionAt: quote.expected_expiration_time ?? null,
+    settlementAsset: 'USD', reviewedPayout: false, feeSchedule: null as KalshiScenarioFeeSchedule | null, expectedResolutionAt: quote.expected_expiration_time ?? null,
     establishedPayoutUnit: standard ? '1' : null,
     outcomes: record.outcomes.map((item) => {
       const no = item.outcomeType === 'no'
@@ -47,7 +48,32 @@ export function kalshiMarketChoice(raw: unknown, retrievedAt: string) {
 }
 
 export class KalshiMarketDataService {
-  constructor(private readonly client: KalshiClient, private readonly identityPrefix = '') {}
+  constructor(private readonly client: KalshiClient, private readonly identityPrefix = '', private readonly loadFees = false) {}
+
+  private async feeSchedule(eventTicker: string, signal: AbortSignal): Promise<KalshiScenarioFeeSchedule | null> {
+    try {
+      const event = z.object({ event: z.object({ event_ticker: ticker, series_ticker: ticker,
+        fee_type_override: z.string().nullable().optional(), fee_multiplier_override: z.number().nonnegative().nullable().optional() }) })
+        .parse(await this.client.read('event', new URLSearchParams(), signal, eventTicker)).event
+      if (event.event_ticker !== eventTicker) return null
+      let type = event.fee_type_override
+      let multiplier = event.fee_multiplier_override
+      let source: KalshiScenarioFeeSchedule['source'] = 'kalshi_event_override'
+      if (type == null && multiplier == null) {
+        const series = z.object({ series: z.object({ ticker, fee_type: z.string(), fee_multiplier: z.number().nonnegative() }) })
+          .parse(await this.client.read('series', new URLSearchParams(), signal, event.series_ticker)).series
+        if (series.ticker !== event.series_ticker) return null
+        type = series.fee_type
+        multiplier = series.fee_multiplier
+        source = 'kalshi_series'
+      }
+      if (multiplier == null || multiplier > 100 || !['quadratic', 'quadratic_with_maker_fees', 'quadratic_with_combo_maker_fees'].includes(type ?? '')) return null
+      const rate = new Decimal(multiplier).mul('0.07')
+      const makerRate = rate.mul(type === 'quadratic_with_maker_fees' ? '0.25' : type === 'quadratic_with_combo_maker_fees' ? '0.5' : '0')
+      return { version: 'kalshi-centicent-quadratic-v1', rate: rate.toFixed(), makerRate: makerRate.toFixed(),
+        retrievedAt: new Date().toISOString(), source, denomination: 'USD' }
+    } catch { return null }
+  }
 
   private choice(raw: unknown, retrievedAt: string) {
     const item = kalshiMarketChoice(raw, retrievedAt)
@@ -59,7 +85,8 @@ export class KalshiMarketDataService {
     const value = z.object({ market: z.unknown() }).parse(await this.client.read('market', new URLSearchParams(), signal, checked))
     const result = this.choice(value.market, new Date().toISOString())
     if (result.marketTicker !== this.identityPrefix + checked) throw new ProviderAdapterError('kalshi_market_identity_mismatch', false)
-    return result
+    return this.loadFees && result.lifecycle === 'open' && result.establishedPayoutUnit === '1'
+      ? { ...result, feeSchedule: await this.feeSchedule(result.eventTicker.slice(this.identityPrefix.length), signal) } : result
   }
   async list(event: string | undefined, cursor: string | undefined, signal: AbortSignal) {
     const query = new URLSearchParams({ limit: '50' })

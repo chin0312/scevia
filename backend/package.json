@@ -18,7 +18,9 @@
     "db:migrate": "tsx scripts/migrate.ts",
     "db:seed": "tsx scripts/seed.ts",
     "verify:polymarket": "tsx scripts/verify-polymarket-live.ts",
-    "check": "npm run lint && npm run typecheck && npm test && npm run build"
+    "check": "npm run lint && npm run typecheck && npm test && npm run build",
+    "demo:dataset": "tsx scripts/demo-dataset.ts",
+    "verify:polygon-receipt": "tsx scripts/verify-polygon-receipt.ts"
   },
   "dependencies": {
     "@fastify/cors": "11.4.3",

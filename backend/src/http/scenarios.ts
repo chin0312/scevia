@@ -7,7 +7,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify'
 import { z } from 'zod'
 import { digest } from '../accounting/decisions.js'
 import type { Database } from '../db/client.js'
-import { portfolioScenarios as scenarios, portfolios } from '../db/schema.js'
+import { portfolioScenarios as scenarios, portfolioScenarioBundles as bundles, portfolios } from '../db/schema.js'
 import { evaluate, validateScenarioOperations, validateInstrumentIdentities, ScenarioError, type ScenarioBaseline, type ScenarioInput, type ScenarioInstrument } from '../scenarios/engine.js'
 
 const id = z.string().trim().min(1).max(200)
@@ -66,6 +66,11 @@ const extend = instrumentSelection.extend({ revision, input: input.optional() })
 const previewExtension = instrumentSelection.extend({ baselineToken: z.string().length(64) }).strict()
 const evaluation = z.union([z.object({ source, input }).strict(), z.object({ baselineToken: z.string().length(64), input }).strict(), z.object({ scenarioId: z.uuid(), input: input.optional() }).strict()])
 const ids = z.object({ scenarioIds: z.array(z.uuid()).min(2).max(8) }).strict()
+export type FrozenDenominationScenario = {
+  components: Array<{ source: BaselineSource; baseline: ScenarioBaseline; input: ScenarioInput }>
+  assumedUsdPerUnit?: Partial<Record<'USDC' | 'PUSD', string>> | undefined
+}
+
 type Scope = { portfolioId: string; scenarioId?: string }
 type Read = Pick<Database, 'select' | 'selectDistinctOn'>
 
@@ -114,7 +119,7 @@ function comparisonDimensions(rows: Array<{ baseline: ScenarioBaseline; input: S
       const id = baseline.instrumentAliases?.[instrument] ?? instrument
       const schedule = fee.mode === 'provider' ? baseline.instruments.find((row) => row.id === id)?.feeSchedule : undefined
       return { bucket, id, fee: 'value' in fee ? { ...fee, value: new Decimal(fee.value).toFixed() } : fee,
-        schedule: schedule ? { version: schedule.version, rate: new Decimal(schedule.rate).toFixed(), denomination: schedule.denomination, source: schedule.source } : null }
+        schedule: schedule ? { version: schedule.version, rate: new Decimal(schedule.rate).toFixed(), denomination: schedule.denomination, source: schedule.source, ...('makerRate' in schedule ? { makerRate: schedule.makerRate } : {}) } : null }
     }).sort((a, b) => a.bucket.localeCompare(b.bucket) || a.id.localeCompare(b.id))),
     sameCapitalBudget: rows.every((row) => row.result.weightBudget !== null && row.result.weightBudget === rows[0]!.result.weightBudget)
       && same(({ baseline, result }) => [baseline.asset, result.bridge.addedCapital, result.bridge.withdrawnCapital]),
@@ -277,14 +282,21 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
     components: z.array(z.object({ baselineToken: z.string().length(64), input }).strict()).min(2).max(4),
     assumedUsdPerUnit: z.partialRecord(z.enum(['USDC', 'PUSD']), cashAmount.refine((value) => new Decimal(value).gt(0))).optional(),
   }).strict()
-  route('POST', '/evaluate-denominations', denominationEvaluation, async ({ portfolioId }, value) => {
-    const components = value.components.map(({ baselineToken, input: edits }) => {
-      const { baseline } = readPreview(portfolioId, baselineToken)
-      return run(baseline, edits)
-    })
+  function freezeDenominations(portfolioId: string, value: z.infer<typeof denominationEvaluation>): FrozenDenominationScenario {
+    return {
+      components: value.components.map(({ baselineToken, input: edits }) => {
+        const { baseline, source } = readPreview(portfolioId, baselineToken)
+        return { source, baseline, input: edits }
+      }).sort((left, right) => left.baseline.asset.localeCompare(right.baseline.asset)),
+      assumedUsdPerUnit: value.assumedUsdPerUnit,
+    }
+  }
+  function evaluateDenominations(frozen: FrozenDenominationScenario) {
+    const components = frozen.components.map(({ baseline, input: edits }) => run(baseline, edits))
     if (!unique(components.map((row) => row.asset))) throw new ScenarioError('duplicate_scenario_denomination')
     if (!components.every((row) => row.baselineAsOf === components[0]!.baselineAsOf)) throw new ScenarioError('scenario_cutoff_mismatch')
-    const rates: Record<string, string> = { ...(value.assumedUsdPerUnit ?? {}), USD: '1' }
+    if (!components.every((row) => row.mode === components[0]!.mode)) throw new ScenarioError('scenario_starting_point_mismatch')
+    const rates: Record<string, string> = { ...frozen.assumedUsdPerUnit, USD: '1' }
     const comparable = components.every((row) => row.bridge.endingValue !== null && row.additionalCapitalRequired === '0' && rates[row.asset])
     const Report = Decimal.clone({ precision: 70 })
     return {
@@ -293,6 +305,132 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
       } : null,
       fundingTransfers: false, jointSettlement: { status: 'unavailable', reason: 'cross_denomination_joint_settlement_unsupported' },
     }
+  }
+  route('POST', '/evaluate-denominations', denominationEvaluation, async ({ portfolioId }, value) => {
+    const frozen = freezeDenominations(portfolioId, value)
+    const result = evaluateDenominations(frozen)
+    return { ...result, previewDigest: digest(frozen) }
+  })
+
+  const bundlePath = '/denomination-scenarios'
+  const getBundle = async (portfolioId: string, scenarioId: string) => (await db.select().from(bundles)
+    .where(and(eq(bundles.id, scenarioId), eq(bundles.portfolioId, portfolioId))).limit(1))[0]
+  const saveBundle = async (portfolioId: string, title: string, frozen: FrozenDenominationScenario) => {
+    evaluateDenominations(frozen)
+    return db.transaction(async (tx) => {
+      await tx.select({ id: portfolios.id }).from(portfolios).where(eq(portfolios.id, portfolioId)).for('update')
+      const [total] = await tx.select({ count: count() }).from(bundles).where(eq(bundles.portfolioId, portfolioId))
+      if (total!.count >= 50) throw new ScenarioError('scenario_count_limit')
+      const [stored] = await tx.insert(bundles).values({ portfolioId, name: title, frozen }).returning()
+      return stored
+    })
+  }
+  const bundleUpdate = async (portfolioId: string, scenarioId: string, version: number, frozen: FrozenDenominationScenario) => {
+    evaluateDenominations(frozen)
+    return (await db.update(bundles).set({ frozen, revision: version + 1, updatedAt: new Date() })
+      .where(and(eq(bundles.portfolioId, portfolioId), eq(bundles.id, scenarioId), eq(bundles.revision, version))).returning())[0]
+  }
+  route('GET', bundlePath, z.undefined(), async ({ portfolioId }) => ({ items: await db.select({
+    id: bundles.id, name: bundles.name, revision: bundles.revision, createdAt: bundles.createdAt, updatedAt: bundles.updatedAt,
+  }).from(bundles).where(eq(bundles.portfolioId, portfolioId)).orderBy(desc(bundles.updatedAt)).limit(50) }))
+  route('POST', bundlePath, denominationEvaluation.extend({ name, previewDigest: z.string().length(64) }),
+    async ({ portfolioId }, value, reply) => {
+      const frozen = freezeDenominations(portfolioId, value)
+      if (digest(frozen) !== value.previewDigest) return stale(reply)
+      return reply.code(201).send(await saveBundle(portfolioId, value.name, frozen))
+    })
+  route('GET', bundlePath + '/:scenarioId', z.undefined(), async ({ portfolioId, scenarioId }, _, reply) => {
+    const current = await getBundle(portfolioId, scenarioId!)
+    return current ? { ...current, result: evaluateDenominations(current.frozen) } : notFound(reply)
+  })
+  route('POST', bundlePath + '/:scenarioId/duplicate', z.object({ name }).strict(), async ({ portfolioId, scenarioId }, value, reply) => {
+    const current = await getBundle(portfolioId, scenarioId!)
+    return current ? reply.code(201).send(await saveBundle(portfolioId, value.name, current.frozen)) : notFound(reply)
+  })
+  route('POST', bundlePath + '/:scenarioId/delete', revisionOnly, async ({ portfolioId, scenarioId }, value, reply) => {
+    if (!await getBundle(portfolioId, scenarioId!)) return notFound(reply)
+    const [deleted] = await db.delete(bundles).where(and(eq(bundles.portfolioId, portfolioId),
+      eq(bundles.id, scenarioId!), eq(bundles.revision, value.revision))).returning({ id: bundles.id })
+    return deleted ? reply.code(204).send() : stale(reply)
+  })
+  const componentInputs = z.record(sourceCommon.asset, input).optional()
+  function applyComponentInputs(frozen: FrozenDenominationScenario, edits: z.infer<typeof componentInputs>) {
+    if (!edits) return frozen
+    if (Object.keys(edits).some((asset) => !frozen.components.some((row) => row.baseline.asset === asset))) {
+      throw new ScenarioError('unknown_scenario_denomination')
+    }
+    return { ...frozen, components: frozen.components.map((row) => ({ ...row, input: edits[row.baseline.asset] ?? row.input })) }
+  }
+  route('PATCH', bundlePath + '/:scenarioId', z.object({ revision, inputs: componentInputs }).strict(),
+    async ({ portfolioId, scenarioId }, value, reply) => {
+      const current = await getBundle(portfolioId, scenarioId!)
+      if (!current) return notFound(reply)
+      if (current.revision !== value.revision) return stale(reply)
+      return await bundleUpdate(portfolioId, scenarioId!, value.revision, applyComponentInputs(current.frozen, value.inputs)) ?? stale(reply)
+    })
+  route('POST', bundlePath + '/:scenarioId/instruments', extend.extend({ asset: sourceCommon.asset }),
+    async ({ portfolioId, scenarioId }, value, reply) => {
+      const current = await getBundle(portfolioId, scenarioId!)
+      if (!current) return notFound(reply)
+      if (current.revision !== value.revision) return stale(reply)
+      const target = current.frozen.components.find((row) => row.baseline.asset === value.asset)
+      if (!target) throw new ScenarioError('unknown_scenario_denomination')
+      const expanded = { ...await extendBaseline(portfolioId, target, value), input: value.input ?? target.input }
+      const frozen = { ...current.frozen, components: current.frozen.components.map((row) => row === target ? expanded : row) }
+      return await bundleUpdate(portfolioId, scenarioId!, value.revision, frozen) ?? stale(reply)
+    })
+  route('POST', bundlePath + '/compare', ids, async ({ portfolioId }, value, reply) => {
+    if (!unique(value.scenarioIds)) throw new ScenarioError('duplicate_comparison_scenario')
+    const rows = await db.select().from(bundles).where(and(eq(bundles.portfolioId, portfolioId), inArray(bundles.id, value.scenarioIds)))
+    if (rows.length !== value.scenarioIds.length) return notFound(reply)
+    const ordered = value.scenarioIds.map((id) => rows.find((row) => row.id === id)!)
+    const compatibleAssets = ordered.every(({ frozen }) => digest(frozen.components.map((row) => row.baseline.asset))
+      === digest(ordered[0]!.frozen.components.map((row) => row.baseline.asset)))
+    return { compatibleAssets, sameReportingAssumptions: ordered.every(({ frozen }) =>
+      digest(frozen.assumedUsdPerUnit ?? null) === digest(ordered[0]!.frozen.assumedUsdPerUnit ?? null)),
+    compatibility: compatibleAssets ? ordered[0]!.frozen.components.map(({ baseline }, index) => ({
+      asset: baseline.asset, ...comparisonDimensions(ordered.map(({ frozen }) => {
+        const row = frozen.components[index]!
+        return { ...row, result: run(row.baseline, row.input) }
+      })),
+    })) : [],
+    items: ordered.map(({ id, name, revision, frozen }) => ({ id, name, revision, result: evaluateDenominations(frozen) })) }
+  })
+  const bundleRebases = new Map<string, { id: string; portfolioId: string; revision: number; frozen: FrozenDenominationScenario; expires: number }>()
+  route('POST', bundlePath + '/:scenarioId/rebase', z.union([
+    z.object({ revision, asOf: time, inputs: componentInputs }).strict(),
+    z.object({ revision, previewToken: z.string().length(64) }).strict(),
+  ]), async ({ portfolioId, scenarioId }, value, reply) => {
+    const current = await getBundle(portfolioId, scenarioId!)
+    if (!current) return notFound(reply)
+    if (current.revision !== value.revision) return stale(reply)
+    if ('previewToken' in value) {
+      const pending = bundleRebases.get(value.previewToken)
+      if (!pending || pending.expires <= Date.now() || pending.id !== scenarioId || pending.portfolioId !== portfolioId
+        || pending.revision !== value.revision) return stale(reply)
+      const updated = await bundleUpdate(portfolioId, scenarioId!, value.revision, pending.frozen)
+      if (updated) bundleRebases.delete(value.previewToken)
+      return updated ?? stale(reply)
+    }
+    if (current.frozen.components.some((row) => row.source.mode !== 'actual')) throw new ScenarioError('rebase_requires_actual_baseline')
+    const draft = applyComponentInputs(current.frozen, value.inputs)
+    const components = await Promise.all(draft.components.map(async (row) => {
+      const source = { ...row.source, asOf: value.asOf }
+      return { ...row, source, baseline: await capture(portfolioId, source, row.baseline.publicInstruments) }
+    }))
+    const candidate = { ...draft, components }
+    const changes = components.map((row, index) => ({ asset: row.baseline.asset,
+      ...baselineChanges(current.frozen.components[index]!.baseline, row.baseline) }))
+    let result: ReturnType<typeof evaluateDenominations>
+    try { result = evaluateDenominations(candidate) }
+    catch (error) {
+      if (!(error instanceof ScenarioError)) throw error
+      return { previewToken: null, changes, conflict: error.message }
+    }
+    if (bundleRebases.size >= previewLimit) bundleRebases.delete(bundleRebases.keys().next().value!)
+    const previewToken = randomBytes(32).toString('hex')
+    bundleRebases.set(previewToken, { id: scenarioId!, portfolioId, revision: value.revision, frozen: candidate, expires: Date.now() + previewLifetime })
+    return { previewToken, changes, result }
   })
   async function extendBaseline(portfolioId: string, current: { source: BaselineSource; baseline: ScenarioBaseline },
     value: z.infer<typeof instrumentSelection>) {

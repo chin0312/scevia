@@ -1,3 +1,4 @@
+import { registerDemoRoutes } from '../demo/workspace.js'
 import { PolymarketAdapter } from '../providers/polymarket/adapter.js'
 import { PolymarketCollateralReader } from '../providers/polymarket/collateral.js'
 import type { KalshiTransport } from '../providers/kalshi/client.js'
@@ -550,6 +551,28 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       return await kalshiMarketData.list(eventTicker, cursor, request.raw.signal)
     } catch { return reply.code(502).send(errorBody(request.id, 'kalshi_catalog_unavailable', 'Kalshi market evidence is unavailable.')) }
   })
+  app.get<{ Querystring: { q: string; lifecycle?: string; cursor?: string; limit?: number } }>('/v1/market-catalog/kalshi/search', {
+    schema: { tags: ['public market data'], querystring: { type: 'object', required: ['q'], additionalProperties: false,
+      properties: { q: { type: 'string', minLength: 2, maxLength: 80 },
+        lifecycle: { enum: ['open', 'closed', 'resolved', 'unknown'] }, cursor: { type: 'string', maxLength: 160 },
+        limit: { type: 'integer', minimum: 1, maximum: 50 } } } },
+  }, async (request, reply) => {
+    if (!kalshiMarketData) return reply.code(503).send(errorBody(request.id, 'kalshi_live_disabled', 'Kalshi live access is disabled.'))
+    const { q, lifecycle, cursor, limit = 20 } = request.query
+    const namespace = options.config.kalshi?.environment === 'demo' ? 'demo' : 'production'
+    const rows = await options.database.select({ marketTicker: markets.externalId, title: markets.title, lifecycle: markets.lifecycle,
+      eventTicker: events.externalId, expectedResolutionAt: events.resolvesAt }).from(markets).innerJoin(events, eq(markets.eventId, events.id))
+      .where(and(eq(markets.providerCode, 'kalshi'), sql`${markets.externalId} not like 'simulation:%'`,
+        namespace === 'demo' ? sql`${markets.externalId} like 'demo:%'` : sql`${markets.externalId} not like 'demo:%'`,
+        lifecycle ? eq(markets.lifecycle, lifecycle) : undefined,
+        cursor ? sql`${markets.externalId} > ${cursor}` : undefined,
+        sql`(strpos(lower(${markets.title}), lower(${q.trim()})) > 0 OR strpos(lower(${events.name}), lower(${q.trim()})) > 0
+          OR strpos(lower(${markets.externalId}), lower(${q.trim()})) > 0)`))
+      .orderBy(markets.externalId).limit(limit + 1)
+    const items = rows.slice(0, limit)
+    return { provider: 'kalshi', scope: 'locally_captured_catalog', items, quoteAvailability: 'lookup_required',
+      nextCursor: rows.length > limit ? items.at(-1)!.marketTicker : null }
+  })
   app.get<{ Querystring: { marketTicker: string; side: 'yes' | 'no'; from: number; through: number; minutes: number } }>('/v1/market-catalog/kalshi/history', {
     schema: { tags: ['public market data'], querystring: { type: 'object', required: ['marketTicker', 'side', 'from', 'through', 'minutes'],
       additionalProperties: false, properties: { marketTicker: { type: 'string', pattern: '^[A-Z0-9][A-Z0-9_.-]{0,127}$' },
@@ -585,6 +608,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       request.principalId = options.config.devPrincipalId
     })
 
+    registerDemoRoutes(privateApi, options.database, options.config.demoDataset)
     registerAccountingRoutes(privateApi, options.database, liveAllowed || options.marketData || kalshiMarketData ? async (url, type, assetId) => {
       try {
         if (type === 'kalshi_outcome') {
@@ -614,6 +638,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
                 name: { type: 'string' },
                 createdAt: { type: 'string', format: 'date-time' },
                 providerAccountCount: { type: 'integer' },
+                mode: { enum: ['actual', 'demo', 'fixture'] },
               } } },
             },
           },
@@ -624,11 +649,14 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         id: portfolios.id,
         name: portfolios.name,
         createdAt: portfolios.createdAt,
+        demoKind: sql<string | null>`${portfolios.demo}->'dataset'->>'evidenceKind'`,
       }).from(portfolios).where(eq(portfolios.ownerId, request.principalId!)).orderBy(portfolios.createdAt)
-      const items = await Promise.all(rows.map(async (portfolio) => {
-        const [accountCount] = await options.database.select({ count: sql<number>`count(*)::int` })
+      const items = await Promise.all(rows.map(async ({ demoKind, ...portfolio }) => {
+        const [accountCount] = await options.database.select({ count: sql<number>`count(*)::int`,
+          fixtures: sql<boolean>`coalesce(bool_or(${providerAccounts.kind} = 'fixture'), false)` })
           .from(providerAccounts).where(eq(providerAccounts.portfolioId, portfolio.id))
-        return { ...portfolio, providerAccountCount: accountCount?.count ?? 0 }
+        return { ...portfolio, providerAccountCount: accountCount?.count ?? 0,
+          mode: demoKind === 'fixture' || accountCount?.fixtures ? 'fixture' : demoKind ? 'demo' : 'actual' }
       }))
       return { items }
     })
@@ -703,6 +731,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       async (request, reply) => {
         const portfolio = await getOwnedPortfolio(options.database, request.params.portfolioId, request.principalId!)
         if (!portfolio) return reply.code(404).send(errorBody(request.id, 'not_found', 'The requested resource was not found.'))
+        if (portfolio.isDemo) return reply.code(422).send(errorBody(request.id, 'demo_connection_forbidden', 'Demo workspaces only use simulated accounts.'))
         try {
           registry.get('polymarket')
         } catch (error) {
@@ -1483,7 +1512,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 }
 
 async function getOwnedPortfolio(database: Database, portfolioId: string, ownerId: string) {
-  const [portfolio] = await database.select({ id: portfolios.id, name: portfolios.name })
+  const [portfolio] = await database.select({ id: portfolios.id, name: portfolios.name, isDemo: sql<boolean>`${portfolios.demo} is not null` })
     .from(portfolios)
     .where(and(eq(portfolios.id, portfolioId), eq(portfolios.ownerId, ownerId)))
     .limit(1)

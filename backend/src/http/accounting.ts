@@ -4,7 +4,7 @@ import { methodology, scopedReference, ScenarioError, type ScenarioBaseline, typ
 import { canonicalInstrumentKeys, instrumentKey } from '../analytics/scope.js'
 import { Decimal } from 'decimal.js'
 import { createHash, randomUUID } from 'node:crypto'
-import { and, count, desc, eq, inArray, isNotNull, isNull, lte, or } from 'drizzle-orm'
+import { and, count, desc, eq, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { Database } from '../db/client.js'
@@ -121,6 +121,17 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       const demo = account?.externalId.startsWith('kalshi:demo:') === true
       if (matches.length !== mappedKalshiIds.length || matches.some((row) => row.nativeMarket.startsWith('demo:') !== demo)) {
         return reply.code(422).send({ error: { code: 'kalshi_import_environment_mismatch' } })
+      }
+    }
+    const explicitIds = [...new Set(parsed.rows.flatMap((row) => row.canonicalInstrumentId ? [row.canonicalInstrumentId] : []))]
+    if (explicitIds.length > 2000) return reply.code(422).send({ error: { code: 'import_mapping_scope_limit' } })
+    if (explicitIds.length) {
+      const [portfolio] = await database.select({ revision: sql<string | null>`coalesce(${portfolios.demo}->>'catalogRevision', ${portfolios.demo}->>'revision')` }).from(portfolios)
+        .where(eq(portfolios.id, portfolioId))
+      const catalog = await database.select({ native: markets.externalId }).from(instruments)
+        .innerJoin(markets, eq(instruments.marketId, markets.id)).where(inArray(instruments.id, explicitIds))
+      if (catalog.some((row) => row.native.startsWith('simulation:') && !row.native.startsWith('simulation:' + portfolio?.revision + ':'))) {
+        return reply.code(422).send({ error: { code: 'demo_instrument_scope_mismatch' } })
       }
     }
     const unresolvedRows = parsed.rows.filter((row) => !row.id || ((row.type === 'split' || row.type === 'merge') && !row.completeSet)).length
@@ -252,7 +263,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
   })
 
   async function loadEvidence(portfolioId: string, cutoff: string, preview?: Pick<typeof batches.$inferSelect,
-    'id' | 'observations' | 'associatedAccountId' | 'sourceLinks'> & { manual?: boolean; acceptUnlinked?: boolean }, read?: AccountingRead, replaces?: string, accountScope?: string[]) {
+    'id' | 'observations' | 'associatedAccountId' | 'sourceLinks' | 'contentHash'> & { manual?: boolean; acceptUnlinked?: boolean }, read?: AccountingRead, replaces?: string, accountScope?: string[]) {
     const readAll = async (tx: AccountingRead) => {
       const confirmed = await tx.select().from(batches).where(and(eq(batches.portfolioId, portfolioId),
         isNotNull(batches.confirmedAt), isNull(batches.supersededAt))).orderBy(batches.id)
@@ -275,6 +286,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       const ref = { batchId: batch.id, row: index + 2 }
       const observation = { ...row, account: batch.associatedAccountId ?? row.account }
       const supportOnly = row.type === 'history_complete' || row.type === 'opening_cash' || row.type === 'opening_inventory' || row.type === 'opening_position' || row.type === 'mark'
+      if (batch.contentHash.startsWith('simulation:')) return { ...ref, observation, acquisition: 'demo' }
       if (batch.manual) return { ...ref, observation, authority: 'user_accepted', acquisition: 'manual' }
       if (supportOnly) return { ...ref, observation }
       const requested = row.id && Object.hasOwn(batch.sourceLinks, row.id) ? batch.sourceLinks[row.id] : null
@@ -802,9 +814,13 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     })
     const catalog = [...new Set([...source.catalog, ...Object.values(aliases)])]
     const venueFor = (provider: string) => ['polymarket', 'kalshi'].includes(provider) ? provider : undefined
+    const [demoPortfolio] = await tx.select({ demo: portfolios.demo }).from(portfolios).where(eq(portfolios.id, portfolioId))
+    const capture = demoPortfolio?.demo
     const metadataFor = (entry: Awaited<ReturnType<typeof loadExposureCatalog>>['metadata'][number]) => {
       const venue = venueFor(entry.provider)
-      return { market: entry.market, event: entry.event, outcome: entry.outcome, lifecycle: entry.lifecycle,
+      const simulated = capture?.dataset.markets.find((row) => row.provider === entry.provider
+        && 'simulation:' + (capture.catalogRevision ?? capture.revision) + ':' + row.nativeMarket === entry.providerMarket)
+      return { ...(simulated?.feeSchedule ? { feeSchedule: simulated.feeSchedule } : {}), market: entry.market, event: entry.event, outcome: entry.outcome, lifecycle: entry.lifecycle,
         provider: entry.provider, nativeMarket: entry.providerMarket, nativeInstrument: entry.nativeInstrument, providerMarket: entry.providerMarket,
         settlementAsset: entry.settlementAsset ?? entry.marketAsset, resolvesAt: entry.resolvesAt?.toISOString() ?? null,
         ...(venue ? { venue } : {}) }
@@ -814,9 +830,14 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       { accounts: source.accounts.join(','), ...(source.venue === undefined ? {} : { venue: source.venue }) }, catalog) : null
     const model = actual ?? await loadExposureCatalog(tx, asOf, asset, catalog, [], [], catalog)
     const listings = new Map(model.metadata.map((row) => [row.instrument, row]))
+    if (model.metadata.some((row) => row.providerMarket.startsWith('simulation:'))) {
+      if (model.metadata.some((row) => row.providerMarket.startsWith('simulation:')
+        && !row.providerMarket.startsWith('simulation:' + (capture?.catalogRevision ?? capture?.revision) + ':'))) throw new ScenarioError('demo_instrument_scope_mismatch')
+    }
     const baselineInstruments = new Map(normalizedPublic.map((row) => [row.id, row]))
     for (const id of catalog) {
-      const entry = listings.get(id)!
+      const entry = listings.get(id)
+      if (!entry) throw new ScenarioError('catalog_instrument_unavailable')
       if ((entry.settlementAsset ?? entry.marketAsset) && (entry.settlementAsset ?? entry.marketAsset) !== asset) throw new ScenarioError('catalog_instrument_asset_mismatch')
       baselineInstruments.set(id, { id, mark: null, ...baselineInstruments.get(id), ...metadataFor(entry) })
     }
@@ -943,8 +964,9 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
   }, async (request, reply) => {
     const { portfolioId } = request.params
     if (!await owned(portfolioId, request.principalId!)) return reply.code(404).send(missing)
-    const query = z.object({ asOf: z.iso.datetime({ offset: true }), assumedUsdPerUsdc: z.string()
-      .regex(/^\d{1,8}(?:\.\d{1,12})?$/).refine((rate) => new AnalyticalDecimal(rate).gt(0)).optional() }).strict().safeParse(request.query)
+    const conversionRate = z.string().regex(/^\d{1,8}(?:\.\d{1,12})?$/).refine((rate) => new AnalyticalDecimal(rate).gt(0))
+    const query = z.object({ asOf: z.iso.datetime({ offset: true }), assumedUsdPerUsdc: conversionRate.optional(),
+      assumedUsdPerPusd: conversionRate.optional() }).strict().safeParse(request.query)
     if (!query.success) return reply.code(422).send({ error: { code: 'invalid_denomination_scope' } })
     const asOf = new Date(query.data.asOf).toISOString()
     const input = await loadEvidence(portfolioId, asOf)
@@ -954,23 +976,32 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const accounts = new Map([...input.accounts, ...input.evidence.map((row) => row.observation)]
       .map((row) => [JSON.stringify([row.venue, row.account]), { venue: row.venue, account: row.account }]))
     const groups = assets.map((asset) => {
+      const scopeKey = (row: { account: string; venue: string }) => JSON.stringify([row.venue, row.account])
       const rows = state.cash.filter((row) => row.asset === asset)
+      const observed = input.balances.filter((row) => row.asset === asset)
+      const knownScopes = new Map([...rows, ...observed, ...input.positions.filter((row) => row.asset === asset)]
+        .map((row) => [scopeKey(row), { account: row.account, venue: row.venue }]))
+      const ranked = new Map(rows.map((row) => [scopeKey(row), row]))
       const known = rows.filter((row) => row.portfolioValue !== null)
       const sum = known.reduce((value, row) => value.plus(row.portfolioValue!), new AnalyticalDecimal(0)).toFixed()
-      return { asset, knownValue: known.length ? sum : null, value: rows.length && known.length === rows.length ? sum : null,
-        coverage: rows.length && known.length === rows.length ? 'selected_asset_buckets' : 'partial',
-        observedCash: input.balances.filter((row) => row.asset === asset).map(({ venue, account, balance, observedAt, sourceRecordId }) =>
+      const complete = known.length > 0 && known.length === knownScopes.size
+      return { asset, knownValue: known.length ? sum : null, value: complete ? sum : null,
+        coverage: complete ? 'selected_asset_buckets' : 'partial',
+        observedCash: observed.map(({ venue, account, balance, observedAt, sourceRecordId }) =>
           ({ venue, account, balance, observedAt, sourceRecordId })),
-        accounts: rows.map(({ venue, account, balance, portfolioValue }) => ({ venue, account, balance, portfolioValue })) }
+        accounts: [...knownScopes].map(([key, row]) => ({ ...row, balance: ranked.get(key)?.balance ?? null,
+          portfolioValue: ranked.get(key)?.portfolioValue ?? null })) }
     })
     const unknownAccounts = [...accounts.values()].filter((scope) => !state.cash.some((row) => row.account === scope.account && row.venue === scope.venue))
     const rate = query.data.assumedUsdPerUsdc
+    const pusd = query.data.assumedUsdPerPusd
+    const rates: Record<string, string | undefined> = { USD: '1', USDC: rate, PUSD: pusd }
     const supported = groups.length > 0 && !unknownAccounts.length && groups.every((group) =>
-      (group.asset === 'USD' || group.asset === 'USDC') && group.value !== null)
+      Boolean(rates[group.asset]) && group.value !== null)
     return { asOf, scope: 'selected_financial_evidence_only', groups, unknownAccounts,
-      indicativeUsd: rate && supported ? { value: groups.reduce((total, group) =>
-        total.plus(new AnalyticalDecimal(group.value!).mul(group.asset === 'USDC' ? rate : 1)), new AnalyticalDecimal(0)).toFixed(),
-        usdPerUsdc: rate, methodology: 'user_assumed_rate', asOf, fundsTransferable: false } : null,
+      indicativeUsd: (rate || pusd) && supported ? { value: groups.reduce((total, group) =>
+        total.plus(new AnalyticalDecimal(group.value!).mul(rates[group.asset]!)), new AnalyticalDecimal(0)).toFixed(),
+        usdPerUsdc: rate, ...(pusd ? { usdPerPusd: pusd } : {}), methodology: 'user_assumed_rate', asOf, fundsTransferable: false } : null,
       conversionAvailability: !rate ? 'assumption_required' : supported ? 'indicative' : 'incomplete_or_unsupported_evidence' }
   })
 

@@ -135,6 +135,36 @@ describe('restricted Kalshi contracts', () => {
     await expect(service.resolve('https://kalshi.com/events/other', signal, 'LATER:yes')).rejects.toThrow('kalshi_market_identity_mismatch')
   })
 
+  it('captures series fees and respects an explicitly verified event override', async () => {
+    let override = false
+    const service = new KalshiMarketDataService(new KalshiClient(async (url) => {
+      if (url.pathname.endsWith('/markets/FEE')) return Response.json({ market: {
+        ticker: 'FEE', event_ticker: 'EVENT', title: 'Fixture fees', market_type: 'binary', status: 'active', notional_value_dollars: '1',
+      } })
+      if (url.pathname.endsWith('/events/EVENT')) return Response.json({ event: {
+        event_ticker: 'EVENT', series_ticker: 'SERIES',
+        ...(override ? { fee_type_override: 'quadratic_with_maker_fees', fee_multiplier_override: 2 } : {}),
+      } })
+      expect(url.pathname).toBe('/trade-api/v2/series/SERIES')
+      return Response.json({ series: { ticker: 'SERIES', fee_type: 'quadratic', fee_multiplier: 1 } })
+    }), '', true)
+    expect((await service.lookup('FEE', signal)).feeSchedule).toMatchObject({ rate: '0.07', makerRate: '0', source: 'kalshi_series' })
+    override = true
+    expect((await service.lookup('FEE', signal)).feeSchedule).toMatchObject({ rate: '0.14', makerRate: '0.035', source: 'kalshi_event_override' })
+  })
+
+  it('maps finalized binary settlement CSV and preserves the distinct receipt reference', () => {
+    const common = { format: 'kalshi_activity' as const, account: 'local', units: 'cents' as const,
+      columns: { id: 'id', timestamp: 'time', ticker: 'ticker', side: 'side', quantity: 'quantity', status: 'status' } }
+    const settlement = parseMappedKalshiCsv('id,time,ticker,side,quantity,status,rate\na,2026-05-01T00:00:00Z,EVENT,NO,2.5,finalized,100',
+      { ...common, activity: 'settlement', columns: { ...common.columns, price: 'rate' } })
+    expect(settlement.rows[0]).toMatchObject({ type: 'settlement', instrument: 'EVENT:no', price: '1', quantity: '2.5' })
+    const redemption = parseMappedKalshiCsv('id,time,ticker,side,quantity,status,amount,entitlement\nb,2026-05-02T00:00:00Z,EVENT,NO,2.5,applied,250,a\nc,2026-05-02T00:00:00Z,EVENT,NO,2.5,pending,250,a',
+      { ...common, activity: 'redemption', columns: { ...common.columns, amount: 'amount', entitlement: 'entitlement' } })
+    expect(redemption.rows[0]).toMatchObject({ type: 'redemption', amount: '2.5', entitlementId: 'a' })
+    expect(redemption.issues).toEqual([{ row: 3, code: 'kalshi_activity_not_finalized' }])
+  })
+
   it('requires known public links and explicitly mapped transaction columns', () => {
     expect(parseKalshiLink('https://kalshi.com/events/KX-EXAMPLE')).toEqual({ kind: 'event', ticker: 'KX-EXAMPLE' })
     expect(() => parseKalshiLink('https://kalshi.com.attacker.test/events/KX')).toThrow('kalshi_invalid_market_link')

@@ -123,6 +123,132 @@ afterAll(async () => {
 })
 
 describe('migrations and canonical persistence', () => {
+  it('replays a versioned demo capture and isolates user corrections, scenarios and resets', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'scevia-demo-'))
+    try {
+      const path = join(directory, 'dataset.json')
+      const capturedAt = '2026-11-26T02:00:00Z'
+      const start = '2026-11-24T02:00:00Z'
+      const tradeAt = '2026-11-25T02:00:00Z'
+      const dataset = {
+        evidenceKind: 'fixture', capturedAt,
+        capital: [{ provider: 'kalshi', asset: 'USD', openedAt: start, amount: '100' },
+          { provider: 'polymarket', asset: 'PUSD', openedAt: start, amount: '50' }],
+        markets: [
+          { provider: 'kalshi', asset: 'USD', nativeMarket: 'SAMPLE-OPEN', nativeEvent: 'EVENT-A', title: 'Reference open market',
+            eventTitle: 'Event A', category: null, lifecycle: 'open', resolvesAt: null, retrievedAt: capturedAt, source: 'authorized_capture',
+            outcomes: [{ instrument: 'OPEN:YES', name: 'YES' }, { instrument: 'OPEN:NO', name: 'NO' }] },
+          { provider: 'polymarket', asset: 'PUSD', nativeMarket: 'PM-CONDITION', nativeEvent: 'EVENT-PM', title: 'Separate native denomination',
+            eventTitle: 'Event Polymarket', category: 'Test', lifecycle: 'open', resolvesAt: null, retrievedAt: capturedAt,
+            source: 'authorized_capture', outcomes: [{ instrument: 'PM-YES', name: 'YES' }, { instrument: 'PM-NO', name: 'NO' }] },
+          { provider: 'kalshi', asset: 'USD', nativeMarket: 'SAMPLE-CLOSED', nativeEvent: 'EVENT-B', title: 'Reference resolved market',
+            eventTitle: 'Event B', category: null, lifecycle: 'resolved', resolvesAt: capturedAt, retrievedAt: capturedAt, source: 'authorized_capture',
+            outcomes: [{ instrument: 'CLOSED:YES', name: 'YES' }, { instrument: 'CLOSED:NO', name: 'NO' }],
+            resolution: { knownAt: capturedAt, winningInstrument: 'CLOSED:YES', unitPayout: '1' } },
+        ],
+        quotes: [
+          { provider: 'kalshi', nativeMarket: 'SAMPLE-OPEN', instrument: 'OPEN:YES', price: '0.4',
+            method: 'historical_close', source: 'kalshi_candlesticks', observedAt: tradeAt, retrievedAt: capturedAt },
+          { provider: 'kalshi', nativeMarket: 'SAMPLE-CLOSED', instrument: 'CLOSED:YES', price: '0.25',
+            method: 'historical_close', source: 'kalshi_candlesticks', observedAt: tradeAt, retrievedAt: capturedAt },
+          { provider: 'kalshi', nativeMarket: 'SAMPLE-OPEN', instrument: 'OPEN:YES', price: '0.7',
+            method: 'book_midpoint', source: 'kalshi_book', observedAt: null, retrievedAt: capturedAt },
+          { provider: 'polymarket', nativeMarket: 'PM-CONDITION', instrument: 'PM-NO', price: '0.25',
+            method: 'historical_close', source: 'polymarket_clob', observedAt: tradeAt, retrievedAt: capturedAt },
+          { provider: 'polymarket', nativeMarket: 'PM-CONDITION', instrument: 'PM-NO', price: '0.5',
+            method: 'book_midpoint', source: 'polymarket_clob', observedAt: null, retrievedAt: capturedAt },
+        ],
+        trades: [{ id: 'open', quoteIndex: 0, quantity: '10', direction: 'buy', assumedFee: '1' },
+          { id: 'resolved', quoteIndex: 1, quantity: '4', direction: 'buy', assumedFee: '0' },
+          { id: 'polymarket', quoteIndex: 3, quantity: '10', direction: 'buy', assumedFee: '0' }],
+      }
+      await writeFile(path, JSON.stringify(dataset))
+      const app = await buildApp({ database, config: { ...testConfig(), demoDataset: { path, cacheMs: 10_000, allowFixture: true } } })
+      const other = await buildApp({ database, config: { ...testConfig(), devPrincipalId: OTHER_OWNER_ID,
+        demoDataset: { path, cacheMs: 10_000, allowFixture: true } } })
+      const disabled = await createTestApp()
+      openApps.push(app, other)
+      const headers = { authorization: `Bearer ${TOKEN}` }
+      const demo = (server: typeof app, method: 'GET' | 'POST', payload?: object) =>
+        server.inject({ method, url: '/v1/demo', headers, ...(payload ? { payload } : {}) })
+      expect((await demo(disabled, 'GET')).json()).toMatchObject({ status: 'unavailable' })
+      const created = await demo(app, 'POST')
+      expect(created.statusCode, created.body).toBe(200)
+      const { portfolioId, revision } = created.json()
+      expect(created.json()).toMatchObject({ mode: 'fixture', capturedAt: new Date(capturedAt).toISOString(), transactions: 'hypothetical' })
+      expect((await demo(app, 'POST')).json().portfolioId).toBe(portfolioId)
+      const otherId = (await demo(other, 'POST')).json().portfolioId
+      expect(otherId).not.toBe(portfolioId)
+      const root = '/v1/portfolios/' + portfolioId
+      const get = (suffix: string) => app.inject({ method: 'GET', url: root + suffix, headers })
+      const post = (suffix: string, payload: object) => app.inject({ method: 'POST', url: root + suffix, headers, payload })
+      expect((await other.inject({ method: 'GET', url: root + '/accounting', headers })).statusCode).toBe(404)
+      expect((await post('/sources/polymarket', { walletAddress: '0x1111111111111111111111111111111111111111', label: 'Wallet' })).statusCode).toBe(422)
+      const first = (await get('/accounting?view=detail&asOf=' + capturedAt)).json()
+      const cashByAsset = (rows: Array<{ asset: string }>, asset: string) => rows.find((row) => row.asset === asset) as
+        { asset: string; account: string; balance: string; portfolioValue: string }
+      expect(cashByAsset(first.cash, 'USD')).toMatchObject({ balance: '98', portfolioValue: '105', knownRealized: '3' })
+      expect(cashByAsset(first.cash, 'PUSD')).toMatchObject({ balance: '47.5', portfolioValue: '52.5' })
+      expect(cashByAsset((await get('/accounting?view=detail&asOf=' + tradeAt)).json().cash, 'USD')).toMatchObject({ portfolioValue: '99', knownRealized: '0' })
+      const records = (await get('/accounting/records')).json()
+      const fill = records.items.find((row: { original: { id: string } }) => row.original.id === 'simulation:trade:open')
+      expect(fill.acquisition).toBe('demo')
+      const edits = { changes: [{ key: fill.key, action: 'correct', correction: { quantity: '12' } }] }
+      const preview = await post('/accounting/adjustments/preview', edits)
+      expect(preview.statusCode, preview.body).toBe(200)
+      expect((await post('/accounting/adjustments/confirm', { ...edits, revision: preview.json().revision })).statusCode).toBe(200)
+      const after = (await get('/accounting?view=detail&asOf=' + capturedAt)).json()
+      expect(cashByAsset(after.cash, 'USD')).toMatchObject({ balance: '97.2', portfolioValue: '105.6' })
+      expect(after.holdings).toContainEqual(expect.objectContaining({ quantity: '12', basis: '5.8' }))
+      const source = { mode: 'actual', asset: 'USD', asOf: capturedAt, accounts: [cashByAsset(after.cash, 'USD').account] }
+      const baseline = await post('/scenarios/baseline', source)
+      expect(baseline.statusCode, baseline.body).toBe(200)
+      const scenario = await post('/scenarios', { name: 'Demo alternative', source: baseline.json().baselineSource,
+        baselineToken: baseline.json().baselineToken, input: {} })
+      expect(scenario.statusCode, scenario.body).toBe(201)
+      expect((await post('/scenarios/evaluate', { scenarioId: scenario.json().id })).statusCode).toBe(200)
+      const pusd = await post('/scenarios/baseline', { mode: 'actual', asOf: capturedAt, asset: 'PUSD', accounts: [cashByAsset(after.cash, 'PUSD').account] })
+      expect(pusd.statusCode, pusd.body).toBe(200)
+      const mixed = { components: [{ baselineToken: baseline.json().baselineToken, input: {} },
+        { baselineToken: pusd.json().baselineToken, input: {} }], assumedUsdPerUnit: { PUSD: '0.97' } }
+      const mixedResult = await post('/scenarios/evaluate-denominations', mixed)
+      expect(mixedResult.statusCode, mixedResult.body).toBe(200)
+      expect(mixedResult.json().indicativeUsd.value).toBe('156.525')
+      const saved = await post('/scenarios/denomination-scenarios', { ...mixed, name: 'Demo mixed',
+        previewDigest: mixedResult.json().previewDigest })
+      expect(saved.statusCode, saved.body).toBe(201)
+      const rebasePath = '/scenarios/denomination-scenarios/' + saved.json().id + '/rebase'
+      const reviewed = await post(rebasePath, { revision: 1, asOf: '2026-11-26T03:00:00Z' })
+      expect(reviewed.statusCode, reviewed.body).toBe(200)
+      expect(reviewed.json().previewToken).toEqual(expect.any(String))
+      const rebased = await post(rebasePath, { revision: 1, previewToken: reviewed.json().previewToken })
+      expect(rebased.statusCode, rebased.body).toBe(200)
+      expect(rebased.json().revision).toBe(2)
+      expect((await post(rebasePath, { revision: 1, previewToken: reviewed.json().previewToken })).statusCode).toBe(409)
+
+      const refreshedAt = '2026-11-26T03:00:00Z'
+      await writeFile(path, JSON.stringify({ ...dataset, capturedAt: refreshedAt, quotes: [...dataset.quotes,
+        { ...dataset.quotes[2], price: '0.8', retrievedAt: refreshedAt }] }))
+      const refreshApp = await buildApp({ database, config: { ...testConfig(), demoDataset: { path, cacheMs: 10_000, allowFixture: true } } })
+      openApps.push(refreshApp)
+      const refresh = await refreshApp.inject({ method: 'POST', url: '/v1/demo/refresh', headers, payload: { portfolioId, revision } })
+      expect(refresh.statusCode, refresh.body).toBe(200)
+      expect(refresh.json().revision).not.toBe(revision)
+      expect(refresh.json().catalogRevision).toBe(revision)
+      const updated = (await get('/accounting?view=detail&asOf=' + refreshedAt)).json()
+      expect(cashByAsset(updated.cash, 'USD')).toMatchObject({ balance: '97.2', portfolioValue: '106.8' })
+      expect(updated.holdings).toContainEqual(expect.objectContaining({ quantity: '12', basis: '5.8' }))
+      const oldOwner = await other.inject({ method: 'GET', url: '/v1/portfolios/' + otherId + '/accounting?view=detail&asOf=' + capturedAt, headers })
+      expect(cashByAsset(oldOwner.json().cash, 'USD').portfolioValue).toBe('105')
+      const clean = await demo(refreshApp, 'POST', { resetFromPortfolioId: portfolioId })
+      expect(clean.json()).toMatchObject({ status: 'available' })
+      expect(clean.json().portfolioId).not.toBe(portfolioId)
+      expect((await demo(refreshApp, 'POST', { resetFromPortfolioId: portfolioId })).statusCode).toBe(409)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   it('binds development Kalshi credentials and values signed inventory with a qualified book mark', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'scevia-kalshi-'))
     try {
@@ -135,6 +261,7 @@ describe('migrations and canonical persistence', () => {
       let revision = new Date(Date.now() - 5000).toISOString()
       let interrupted = false
       let failedDepositState = 'pending'
+      let settledAt = '2026-11-22T01:00:00Z'
       const [account, other] = await database.insert(providerAccounts).values([
         { portfolioId: PORTFOLIO_ID, providerCode: 'kalshi', externalAccountId: externalId, kind: 'authenticated_account', label: 'Authorized source' },
         { portfolioId: OTHER_PORTFOLIO_ID, providerCode: 'kalshi', externalAccountId: externalId, kind: 'authenticated_account', label: 'Other tenant' },
@@ -193,7 +320,7 @@ describe('migrations and canonical persistence', () => {
           if (path === '/portfolio/settlements') {
             const base = { exchange_index: 0, market_result: 'yes', no_count_fp: '0', fee_cost: '1' }
             return Response.json({ settlements: [
-              { ...base, ticker: 'KX-RESOLVED', yes_count_fp: '100', revenue: 10000, settled_time: '2026-11-22T01:00:00Z' },
+              { ...base, ticker: 'KX-RESOLVED', yes_count_fp: '100', revenue: 10000, settled_time: settledAt },
               { ...base, ticker: 'KX-FRACTION', yes_count_fp: '1.5', revenue: 150, settled_time: '2026-11-25T01:00:00Z' },
             ] })
           }
@@ -300,6 +427,13 @@ describe('migrations and canonical persistence', () => {
       expect((await sync(account!.id, 'history')).statusCode).toBe(200)
       const afterPayout = await snapshot()
       expect(afterPayout.json().cash).toEqual(expect.arrayContaining([expect.objectContaining({ knownDelta: '159.98', knownRealized: '59.98' })]))
+      settledAt = '2026-11-22T02:00:00Z'
+      await sync(account!.id, 'history')
+      const conflict = await database.select().from(providerActivityFacts).where(and(eq(providerActivityFacts.providerAccountId, account!.id),
+        eq(providerActivityFacts.activityType, 'KALSHI_SETTLEMENT_TIME_CONFLICT')))
+      expect(conflict).toHaveLength(2)
+      expect((await snapshot()).json().cash).toEqual(expect.arrayContaining([expect.objectContaining({ knownDelta: '159.98' })]))
+
       const beforeReplacement = calls.length
       const replacement = generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' })
       await writeFile(keyFile, replacement, { mode: 0o600 })
@@ -748,6 +882,27 @@ describe('migrations and canonical persistence', () => {
     const underfunded = await evaluate([usd, await part('USDC', 'polymarket', '300')])
     expect(underfunded.json()).toMatchObject({ indicativeUsd: null,
       components: [{ asset: 'USD', additionalCapitalRequired: '0' }, { asset: 'USDC', additionalCapitalRequired: '21' }] })
+    const path = url + '/denomination-scenarios'
+    const bundle = { components: [usd, usdc], assumedUsdPerUnit: { USDC: '0.98' }, name: 'Cross-platform',
+      previewDigest: result.json().previewDigest }
+    const saved = await app.inject({ method: 'POST', url: path, headers, payload: bundle })
+    expect(saved.statusCode, saved.body).toBe(201)
+    const { id } = saved.json()
+    const secondApp = await createTestApp()
+    const resumed = await secondApp.inject({ method: 'GET', url: path + '/' + id, headers })
+    expect(resumed.json().result.indicativeUsd.value).toBe('196.02')
+    const duplicate = await secondApp.inject({ method: 'POST', url: path + '/' + id + '/duplicate', headers, payload: { name: 'Duplicate' } })
+    expect(duplicate.statusCode, duplicate.body).toBe(201)
+    const comparison = await app.inject({ method: 'POST', url: path + '/compare', headers,
+      payload: { scenarioIds: [id, duplicate.json().id] } })
+    expect(comparison.json()).toMatchObject({ compatibleAssets: true, sameReportingAssumptions: true })
+    const changed = await app.inject({ method: 'POST', url: path + '/' + id + '/instruments', headers,
+      payload: { asset: 'USD', revision: 1, local: [{ id: 'local:extension', mark: '0.55' }] } })
+    expect(changed.statusCode, changed.body).toBe(200)
+    const remove = (revision: number) => app.inject({ method: 'POST', url: path + '/' + id + '/delete', headers, payload: { revision } })
+    expect((await remove(1)).statusCode).toBe(409)
+    expect((await remove(2)).statusCode).toBe(204)
+
   })
 
   it('persists isolated scratch scenarios with explicit revisions and unsaved evaluation', async () => {

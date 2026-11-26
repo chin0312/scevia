@@ -8,7 +8,7 @@ export const kalshiPaths = {
   credits: '/portfolio/credit_history', historicalPositions: '/historical/positions',
   markets: '/markets', events: '/events',
 } as const
-export type KalshiRead = keyof typeof kalshiPaths | 'market' | 'historicalMarket' | 'historicalCandles' | 'currentCandles' | 'event'
+export type KalshiRead = keyof typeof kalshiPaths | 'market' | 'historicalMarket' | 'historicalCandles' | 'currentCandles' | 'event' | 'series'
 export type KalshiTransport = (url: URL, init: RequestInit) => Promise<Response>
 
 export function kalshiSigner(pem: string) {
@@ -22,7 +22,7 @@ export function kalshiSigner(pem: string) {
   throw new ProviderAdapterError('kalshi_signing_key_unsupported', false)
 }
 
-const publicReads = new Set<KalshiRead>(['cutoff', 'markets', 'events', 'market', 'historicalMarket', 'historicalCandles', 'currentCandles', 'event'])
+const publicReads = new Set<KalshiRead>(['cutoff', 'markets', 'events', 'market', 'historicalMarket', 'historicalCandles', 'currentCandles', 'event', 'series'])
 const paginated = ['limit', 'cursor']
 const queryKeys: Partial<Record<KalshiRead, string[]>> = {
   markets: [...paginated, 'event_ticker', 'tickers'], events: [...paginated],
@@ -50,9 +50,9 @@ export class KalshiClient {
         throw new ProviderAdapterError('kalshi_invalid_ticker', false)
       }
       path = '/series/' + series + '/markets/' + ticker + '/candlesticks'
-    } else if (operation === 'market' || operation === 'historicalMarket' || operation === 'historicalCandles' || operation === 'event') {
+    } else if (operation === 'market' || operation === 'historicalMarket' || operation === 'historicalCandles' || operation === 'event' || operation === 'series') {
       if (!ticker || !/^[A-Z0-9][A-Z0-9_.-]{0,127}$/.test(ticker)) throw new ProviderAdapterError('kalshi_invalid_ticker', false)
-      path = '/' + (operation === 'historicalMarket' || operation === 'historicalCandles' ? 'historical/markets' : operation === 'market' ? 'markets' : 'events') + '/' + ticker + (operation === 'historicalCandles' ? '/candlesticks' : '')
+      path = '/' + (operation === 'historicalMarket' || operation === 'historicalCandles' ? 'historical/markets' : operation === 'market' ? 'markets' : operation === 'series' ? 'series' : 'events') + '/' + ticker + (operation === 'historicalCandles' ? '/candlesticks' : '')
     } else {
       if (!Object.hasOwn(kalshiPaths, operation)) throw new ProviderAdapterError('kalshi_read_not_allowlisted', false)
       path = kalshiPaths[operation]

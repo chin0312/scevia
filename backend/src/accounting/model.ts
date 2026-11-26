@@ -35,7 +35,7 @@ export type Evidence = EvidenceReference & {
     externalId: string; market: string | null; instrument: string | null; side: string | null
     largestObservedRunCount: number | null; identityKind: string; reason: string | null
   }
-  acquisition?: 'manual'
+  acquisition?: 'manual' | 'demo'
   linkedSourceRecordId?: string
   originalObservation?: FinancialObservation
   authority?: "user_accepted"

@@ -155,7 +155,7 @@ async function upsertSourceRecord(
   return { id: raced.id, accepted: true, duplicate: true }
 }
 
-async function upsertMarket(
+export async function upsertMarket(
   tx: DatabaseTransaction,
   providerCode: string,
   record: Extract<NormalizedRecord, { kind: 'market' }>,
@@ -353,7 +353,19 @@ export async function persistPage(input: PersistPageInput): Promise<PersistPageR
       recordsByType[record.kind] = (recordsByType[record.kind] ?? 0) + 1
     }
 
-    for (const record of financialRecords) {
+    for (const incoming of financialRecords) {
+      let record = incoming
+      if (input.providerCode === 'kalshi' && incoming.kind === 'activity_fact'
+        && incoming.externalId.startsWith('settlement:') && incoming.occurredAt !== null) {
+        const [prior] = await tx.select({ time: sourceRecords.sourceOccurredAt }).from(sourceRecords)
+          .where(and(eq(sourceRecords.providerAccountId, input.providerAccountId), eq(sourceRecords.recordType, 'activity_fact'),
+            eq(sourceRecords.externalRecordId, incoming.externalId))).limit(1)
+        if (prior?.time && prior.time.getTime() !== Date.parse(incoming.occurredAt)) {
+          record = { ...incoming, externalId: incoming.externalId + ':time-conflict:' + Date.parse(incoming.occurredAt),
+            classification: 'unresolved', activityType: 'KALSHI_SETTLEMENT_TIME_CONFLICT',
+            resolutionReason: 'kalshi_settlement_time_conflict' }
+        }
+      }
       if ('feeAmount' in record) assertFeeIsExplicit(record)
       const source = await upsertSourceRecord(tx, { providerAccountId: input.providerAccountId, record, retrievedAt: input.retrievedAt })
       if (!source.accepted) continue

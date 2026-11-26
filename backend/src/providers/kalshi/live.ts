@@ -31,7 +31,7 @@ export function createKalshiLive(config: ServerConfig, database: Database, trans
     const [account] = await database.select({ id: providerAccounts.id }).from(providerAccounts)
       .innerJoin(portfolios, eq(providerAccounts.portfolioId, portfolios.id))
       .where(and(eq(providerAccounts.id, binding.accountId), eq(portfolios.id, binding.portfolioId),
-        eq(portfolios.ownerId, config.devPrincipalId), eq(providerAccounts.providerCode, 'kalshi'),
+        eq(portfolios.ownerId, config.devPrincipalId), isNull(portfolios.demo), eq(providerAccounts.providerCode, 'kalshi'),
         eq(providerAccounts.kind, 'authenticated_account'), eq(providerAccounts.externalAccountId, request.externalAccountId),
         isNull(providerAccounts.disabledAt))).limit(1)
     if (!account) throw new ProviderAdapterError('kalshi_account_binding_mismatch', false)
@@ -73,7 +73,7 @@ export function createKalshiLive(config: ServerConfig, database: Database, trans
   }
 
   return {
-    marketData: new KalshiMarketDataService(publicClient, environment === 'demo' ? 'demo:' : ''),
+    marketData: new KalshiMarketDataService(publicClient, environment === 'demo' ? 'demo:' : '', true),
     adapter: new KalshiAdapter(undefined, settings.accountAuthorized && binding ? resolve : undefined, environment),
     accountId: settings.accountAuthorized ? binding?.accountId : undefined,
   }

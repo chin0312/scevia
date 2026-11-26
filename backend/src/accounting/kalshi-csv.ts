@@ -6,11 +6,11 @@ const moneyUnit = z.enum(['dollars', 'cents'])
 const column = z.string().min(1).max(100)
 export const kalshiCsvMapping = z.object({
   format: z.literal('kalshi_activity'), account: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,159}$/),
-  activity: z.enum(['fill', 'deposit', 'withdrawal', 'fee', 'rebate', 'reward']),
+  activity: z.enum(['fill', 'deposit', 'withdrawal', 'fee', 'rebate', 'reward', 'settlement', 'redemption']),
   units: moneyUnit,
   fieldUnits: z.object({ price: moneyUnit.optional(), amount: moneyUnit.optional(), fee: moneyUnit.optional() }).strict().optional(),
   columns: z.object({ id: column, timestamp: column, ticker: column.optional(), side: column.optional(), action: column.optional(),
-    quantity: column.optional(), price: column.optional(), amount: column.optional(), fee: column.optional() }).strict(),
+    quantity: column.optional(), price: column.optional(), amount: column.optional(), fee: column.optional(), status: column.optional(), sequence: column.optional(), entitlement: column.optional() }).strict(),
 }).strict()
 export type KalshiCsvMapping = z.infer<typeof kalshiCsvMapping>
 const quote = (input: string) => '"' + input.replaceAll('"', '""') + '"'
@@ -24,8 +24,14 @@ export function parseMappedKalshiCsv(text: string, mapping: KalshiCsvMapping) {
   const assigned = Object.values(selected).filter((name) => name !== undefined)
   if (new Set(assigned).size !== assigned.length) throw new Error('kalshi_csv_mapping_duplicate_column')
   const fill = mapping.activity === 'fill'
+  const settlement = mapping.activity === 'settlement'
+  const redemption = mapping.activity === 'redemption'
+  const instrumentRequired = fill || settlement || redemption
+  const requiresPrice = fill || settlement
   if (Object.values(selected).some((name) => name !== undefined && !header.includes(name))
-    || (fill ? !selected.ticker || !selected.side || !selected.action || !selected.quantity || !selected.price : !selected.amount)) {
+    || (instrumentRequired && (!selected.ticker || !selected.side || !selected.quantity))
+    || (requiresPrice && !selected.price) || (fill && !selected.action)
+    || (!requiresPrice && !selected.amount) || (redemption && !selected.entitlement)) {
     throw new Error('kalshi_csv_mapping_incomplete')
   }
   const rows: string[] = []
@@ -46,17 +52,22 @@ export function parseMappedKalshiCsv(text: string, mapping: KalshiCsvMapping) {
       const side = at(selected.side).toLowerCase()
       const action = at(selected.action).toLowerCase()
       if (!id) throw new Error('kalshi_native_id_required')
-      if (fill && (!/^[A-Z0-9][A-Z0-9_.-]{0,127}$/.test(ticker) || !['yes', 'no'].includes(side) || !['buy', 'sell'].includes(action))) {
-        throw new Error('kalshi_fill_mapping_invalid')
+      if ((instrumentRequired && (!/^[A-Z0-9][A-Z0-9_.-]{0,127}$/.test(ticker) || !['yes', 'no'].includes(side)))
+        || (fill && !['buy', 'sell'].includes(action))) throw new Error('kalshi_instrument_mapping_invalid')
+      if (selected.status && !['applied', 'finalized'].includes(at(selected.status).toLowerCase())) {
+        throw new Error('kalshi_activity_not_finalized')
       }
-      rows.push(['kalshi', mapping.account, id, at(selected.timestamp), '', fill ? action : mapping.activity,
-        fill ? ticker + ':' + side : '', 'USD', fill ? at(selected.quantity) : '', fill ? money('price') : '',
-        fill ? '' : money('amount'), fill ? money('fee') : '', ''].map(quote).join(','))
+      const price = requiresPrice ? money('price') : ''
+      if (settlement && price !== '0' && price !== '1') throw new Error('kalshi_standard_payout_required')
+      if (!fill && selected.fee && at(selected.fee) && money('fee') !== '0') throw new Error('use_separate_fee_event')
+      rows.push(['kalshi', mapping.account, id, at(selected.timestamp), at(selected.sequence), fill ? action : mapping.activity,
+        instrumentRequired ? ticker + ':' + side : '', 'USD', instrumentRequired ? at(selected.quantity) : '', price,
+        requiresPrice ? '' : money('amount'), fill ? money('fee') : '', '', redemption ? at(selected.entitlement) : ''].map(quote).join(','))
       originalRows.push(index + 2)
     } catch (error) { failures.push({ row: index + 2, code: (error as Error).message }) }
   }
   if (!rows.length) return { rows: [], issues: failures, totalRows: table.length }
-  const parsed = parseFinancialCsv(['venue,account,id,timestamp,sequence,type,instrument,asset,quantity,price,amount,fee,fee_asset', ...rows].join('\n'))
+  const parsed = parseFinancialCsv(['venue,account,id,timestamp,sequence,type,instrument,asset,quantity,price,amount,fee,fee_asset,entitlement_id', ...rows].join('\n'))
   return { rows: parsed.rows, issues: [...failures, ...parsed.issues.map((issue) => ({ ...issue, row: originalRows[issue.row - 2]! }))]
     .sort((a, b) => a.row - b.row), totalRows: table.length }
 }

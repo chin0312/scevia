@@ -74,6 +74,7 @@ export const portfolios = scevia.table(
     id: uuid('id').defaultRandom().primaryKey(),
     ownerId: uuid('owner_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
     name: text('name').notNull(),
+    demo: jsonb('demo').$type<{ revision: string; catalogRevision?: string; dataset: import('../demo/dataset.js').DemoDataset }>(),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [index('portfolios_owner_id_idx').on(table.ownerId)],
@@ -613,3 +614,13 @@ export const portfolioScenarios = scevia.table('portfolio_scenarios', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [index('portfolio_scenarios_portfolio_idx').on(table.portfolioId)])
+
+export const portfolioScenarioBundles = scevia.table('portfolio_scenario_bundles', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  portfolioId: uuid('portfolio_id').notNull().references(() => portfolios.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  revision: integer('revision').default(1).notNull(),
+  frozen: jsonb('frozen').$type<import('../http/scenarios.js').FrozenDenominationScenario>().notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [index('portfolio_scenario_bundles_portfolio_idx').on(table.portfolioId)])

@@ -28,6 +28,27 @@ function request(streamName: FetchPageRequest['streamName'], extra: Partial<Fetc
 }
 
 describe('Polymarket provider adapter', () => {
+  it('identifies receipt transfers by canonical chain and log without assuming contribution', async () => {
+    const hash = '0x' + 'b'.repeat(64)
+    const transaction = '0x' + 'a'.repeat(64)
+    const from = '0x' + '1'.repeat(40)
+    const topic = (value: string) => '0x' + value.slice(2).padStart(64, '0')
+    const transfer = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+    const reader = new PolymarketCollateralReader(new URL('https://rpc.example'), async (_url, options) => {
+      const request = JSON.parse(String(options?.body))
+      const block = { hash, number: '0x200', timestamp: '0x6553f100' }
+      const responses: Record<string, unknown> = {
+        eth_chainId: '0x89', eth_getBlockByNumber: block, eth_call: '0x' + '6'.padStart(64, '0'),
+        eth_getTransactionReceipt: { transactionHash: transaction, blockHash: hash, blockNumber: '0x200', status: '0x1',
+          logs: [{ address: polygonPusd, topics: [transfer, topic(from), topic(WALLET)], data: '0x' + (2500000).toString(16).padStart(64, '0'),
+            logIndex: '0x7' }] },
+      }
+      return jsonResponse({ jsonrpc: '2.0', id: 1, result: responses[request.method] })
+    })
+    expect(await reader.transferEvidence(WALLET, transaction, NO_ABORT)).toMatchObject({ chainId: 137, blockHash: hash,
+      items: [{ id: [137, polygonPusd, transaction, 7].join(':'), amount: '2.500000', asset: 'PUSD', classification: 'unresolved_transfer' }] })
+  })
+
   it('reads exact native pUSD at a pinned finalized Polygon block', async () => {
     const hash = '0x' + 'a'.repeat(64)
     const hex = (value: bigint) => '0x' + value.toString(16).padStart(64, '0')
