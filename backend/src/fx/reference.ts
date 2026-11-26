@@ -7,6 +7,10 @@ import { polygonPusd } from '../providers/polymarket/collateral.js'
 import { fxReferences } from '../db/schema.js'
 
 export const reportingCurrency = z.enum(['USD', 'SGD', 'EUR', 'GBP', 'MYR'])
+export const fiatReferenceSource = z.enum(['ecb_euro_reference'])
+export const stablecoinReferenceSource = z.enum(['kraken_usdc_usd_ohlc', 'coingecko_polygon_pusd_usd', 'coingecko_polygon_pusd_usd_daily'])
+export const fxReferenceSource = z.union([fiatReferenceSource, stablecoinReferenceSource])
+export const referenceFamily = (source: string) => source === 'coingecko_polygon_pusd_usd_daily' ? 'coingecko_polygon_pusd_usd' : source
 export const fxEvidenceMode = z.enum(['knowledge', 'retrospective'])
 export type FxMode = z.infer<typeof fxEvidenceMode>
 export const referenceInput = z.object({
@@ -31,6 +35,13 @@ export type FxScope = { assets: string[]; currency: string; mode?: FxMode; cutof
 export type FxOptions = { mode?: FxMode | undefined; source?: string | undefined;
   fiatSource?: string | null | undefined; stablecoinSource?: string | null | undefined }
 type Orientation = { row: Row; inverted: boolean }
+function preferredReference(fiat: boolean, options: FxOptions) {
+  const capabilities = fiat ? fiatReferenceSource : stablecoinReferenceSource
+  const selected = capabilities.safeParse(options.source).data
+    ?? capabilities.safeParse(fiat ? options.fiatSource : options.stablecoinSource).data
+  return selected ? referenceFamily(selected) : null
+}
+
 const maxAge = (row: Row) => {
   if (row.methodology === 'fiat_reference') return 5 * 86_400_000
   if (row.source === 'coingecko_polygon_pusd_usd') return 6 * 3_600_000
@@ -96,28 +107,38 @@ export function selectRate(rows: FxRows, base: string, quote: string, asOf: stri
   let directLastKnown: Orientation | null = null
   let conflict = false
   const edge = (from: string, to: string): Orientation | null => {
-    const preferredSource = options.source ?? ((['USDC', 'PUSD'].includes(from) || ['USDC', 'PUSD'].includes(to))
-      ? options.stablecoinSource : options.fiatSource)
+    const stablecoin = ['USDC', 'PUSD'].some((asset) => asset === from || asset === to)
+    const preferredSource = preferredReference(!stablecoin, options)
+    const preferred = (row: Row) => referenceFamily(row.source) === preferredSource
     const matching = rows.filter((row) => (row.base === from && row.quote === to || row.base === to && row.quote === from)
       && ((row.publishedAt ?? row.retrievedAt).getTime() <= cutoff || (options.mode === 'retrospective'
         && (row.source !== 'ecb_euro_reference' || Math.floor(row.observedAt.getTime() / 86_400_000) < Math.floor(cutoff / 86_400_000))))
-      && row.observedAt.getTime() <= cutoff)
-      .sort((a, b) => {
-        const preferred = Number(b.source === preferredSource && cutoff - b.observedAt.getTime() <= maxAge(b))
-          - Number(a.source === preferredSource && cutoff - a.observedAt.getTime() <= maxAge(a))
-        return preferred || b.observedAt.getTime() - a.observedAt.getTime() || a.source.localeCompare(b.source)
-          || a.retrievedAt.getTime() - b.retrievedAt.getTime()
-      })
-    const latest = matching[0]
-    if (!latest) return null
-    if (cutoff - latest.observedAt.getTime() > maxAge(latest)) {
-      stale = true
-      if (from === base && to === quote) directLastKnown = { row: latest, inverted: latest.base !== from }
+      && row.observedAt.getTime() <= cutoff && row.observedAt <= row.retrievedAt
+      && (!row.publishedAt || row.publishedAt >= row.observedAt && row.publishedAt <= row.retrievedAt)
+      && (!row.source.startsWith('coingecko_polygon_pusd_usd') || row.base === 'PUSD' && row.quote === 'USD'
+        && row.tokenIdentity?.chain === 'polygon-pos' && row.tokenIdentity.contract === polygonPusd
+        && row.tokenIdentity.quoteBasis === 'vendor_aggregated_fiat_usd'))
+      .sort((a, b) => b.observedAt.getTime() - a.observedAt.getTime() || a.source.localeCompare(b.source)
+        || a.retrievedAt.getTime() - b.retrievedAt.getTime() || a.revision.localeCompare(b.revision))
+    const staleRows = matching.filter((row) => cutoff - row.observedAt.getTime() > maxAge(row))
+    const fresh = matching.filter((row) => cutoff - row.observedAt.getTime() <= maxAge(row))
+    const latest = fresh.find(preferred) ?? fresh[0]
+    const preferredLatest = matching.find(preferred)
+    const previous = staleRows.find((row) => !latest || row.observedAt >= latest.observedAt
+      || preferred(row) && !preferred(latest))
+    const value = (row: Row) => row.base === from ? new D(row.rate) : new D(1).div(row.rate)
+    const conflicting = (candidate: Row) => matching.some((row) => row.source === candidate.source
+      && row.methodology === candidate.methodology && row.observedAt.getTime() === candidate.observedAt.getTime()
+      && !value(row).eq(value(candidate)))
+    if ([latest, preferredLatest, matching[0]].some((row) => row && conflicting(row))) {
+      conflict = true
       return null
     }
-    const value = (row: Row) => row.base === from ? new D(row.rate) : new D(1).div(row.rate)
-    if (matching.some((row) => row.source === latest.source && row.methodology === latest.methodology && row.observedAt.getTime() === latest.observedAt.getTime()
-      && !value(row).eq(value(latest)))) { conflict = true; return null }
+    if (previous) {
+      stale = true
+      if (from === base && to === quote) directLastKnown = { row: previous, inverted: previous.base !== from }
+    }
+    if (!latest) return null
     return { row: latest, inverted: latest.base !== from }
   }
   const direct = edge(base, quote)
@@ -132,28 +153,34 @@ export function selectRate(rows: FxRows, base: string, quote: string, asOf: stri
     const a = edge(base, 'USD'); const b = edge('USD', 'EUR'); const c = edge('EUR', quote)
     if (a && b && c) path = [a, b, c]
   }
+  const previous = directLastKnown as Orientation | null
+  const lastKnown = previous && !conflict ? { rate: previous.inverted ? new D(1).div(previous.row.rate).toFixed() : new D(previous.row.rate).toFixed(),
+    revision: previous.row.revision, source: previous.row.source, methodology: previous.row.methodology, tokenIdentity: previous.row.tokenIdentity,
+    observedAt: previous.row.observedAt.toISOString(), retrievedAt: previous.row.retrievedAt.toISOString(), qualification: 'stale_reference_only' } : null
   if (!path.length || conflict) {
-    const previous = directLastKnown as Orientation | null
     return { availability: conflict ? 'conflict' as const : stale ? 'stale' as const : 'missing' as const, rate: null, legs: [],
-      ...(previous && !conflict ? { lastKnown: { rate: previous.inverted ? new D(1).div(previous.row.rate).toFixed() : new D(previous.row.rate).toFixed(),
-        revision: previous.row.revision, source: previous.row.source, observedAt: previous.row.observedAt.toISOString(),
-        retrievedAt: previous.row.retrievedAt.toISOString(), qualification: 'stale_reference_only' } } : {}) }
+      ...(lastKnown ? { lastKnown } : {}) }
   }
   const rate = path.reduce((product, { row, inverted }) => inverted ? product.div(row.rate) : product.mul(row.rate), new D(1))
   return { availability: 'available' as const,
     fallback: path.some(({ row }) => {
-      const preferredSource = options.source ?? (row.methodology === 'fiat_reference' ? options.fiatSource : options.stablecoinSource)
-      return Boolean(preferredSource && preferredSource !== row.source)
-    }), rate: rate.toFixed(), legs: path.map(({ row, inverted }) => ({
+      const preferredSource = preferredReference(row.methodology === 'fiat_reference', options)
+      return Boolean(preferredSource && preferredSource !== referenceFamily(row.source))
+    }), ...(lastKnown ? { lastKnown } : {}), rate: rate.toFixed(), legs: path.map(({ row, inverted }) => ({
     ...row, rate: new D(row.rate).toFixed(), observedAt: row.observedAt.toISOString(), retrievedAt: row.retrievedAt.toISOString(), publishedAt: row.publishedAt?.toISOString() ?? null, inverted,
   })) }
+}
+
+export function convertAmount(value: string | null, rate: string | null) {
+  if (value === null) return null
+  const amount = new D(value)
+  return amount.isZero() ? '0' : rate === null ? null : amount.mul(rate).toFixed()
 }
 
 export function reportAmounts(rows: FxRows, amounts: Array<{ asset: string; value: string | null }>, currency: string, asOf: string, options: FxOptions = {}) {
   const components = amounts.map((entry) => {
     const reference = selectRate(rows, entry.asset, currency, asOf, options)
-    return { ...entry, reference, reportingValue: entry.value === null || reference.rate === null ? null
-      : new D(entry.value).mul(reference.rate).toFixed() }
+    return { ...entry, reference, reportingValue: convertAmount(entry.value, reference.rate) }
   })
   const known = components.filter((component) => component.reportingValue !== null)
   const sum = known.reduce((acc, component) => acc.plus(component.reportingValue!), new D(0)).toFixed()

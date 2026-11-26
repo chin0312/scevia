@@ -1,6 +1,6 @@
 import { Decimal } from 'decimal.js'
 import { drawdowns, linkedReturn, type analyzePerformance } from '../analytics/performance.js'
-import { selectRate, type FxOptions, type FxMode, type loadFx } from './reference.js'
+import { convertAmount, selectRate, type FxOptions, type FxMode, type loadFx } from './reference.js'
 
 type Data = ReturnType<typeof analyzePerformance>
 
@@ -8,7 +8,7 @@ export function reportingPerformance(rows: Awaited<ReturnType<typeof loadFx>>, d
   const d = Decimal.clone({ precision: 60 })
   const convert = (value: string | null, at: string) => {
     const reference = selectRate(rows, asset, currency, at, { ...preference, mode })
-    return { reference, value: value === null || reference.rate === null ? null : new d(value).mul(reference.rate).toFixed() }
+    return { reference, value: convertAmount(value, reference.rate) }
   }
   const opening = convert(data.opening.value, data.opening.asOf)
   const flows = data.cashFlowBoundaries.map((boundary) => {
@@ -17,7 +17,7 @@ export function reportingPerformance(rows: Awaited<ReturnType<typeof loadFx>>, d
     const flow = convert(boundary.flow, boundary.timestamp)
     return { asOf: boundary.timestamp, before, after, flow,
       eligible: boundary.valid && before.value !== null && after.value !== null && flow.value !== null
-        && before.reference.rate === after.reference.rate }
+        && (boundary.before === '0' || before.reference.rate === after.reference.rate) }
   })
   const history = data.history.map((point) => {
     const result = convert(point.value, point.asOf)

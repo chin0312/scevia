@@ -704,6 +704,16 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       const accounts = selectAccounts(input, query.data.accounts, query.data.venue)
       if (!accounts) return reply.code(422).send({ error: { code: 'invalid_analytics_accounts' } })
       const { context, evidence } = analyticalContext(input, accounts, asOf, query.data.asset, query.data.venue)
+      if (query.data.evidenceMode === 'knowledge') {
+        const relevant = input.rawEvidence.filter(({ observation }) => accounts.includes(observation.account)
+          && (!query.data.venue || observation.venue === query.data.venue)
+          && (observation.asset === query.data.asset || observation.feeAsset === query.data.asset))
+        const knowledge = await financialKnowledge(tx, portfolioId, relevant, from)
+        if (knowledge.some(({ effective, known }) => effective <= asOf && known > (effective > from ? effective : from))) {
+          return reply.code(422).send({ error: { code: 'financial_knowledge_time_unavailable',
+            reason: 'current_evidence_or_revisions_unavailable_at_historical_cutoff' } })
+        }
+      }
       try {
         const data = analyzePerformance(evidence, accounts, query.data.asset, from, asOf, context.accountIdentities)
         const [preference] = query.data.currency ? await tx.select({ fiatSource: users.fiatReferenceSource, stablecoinSource: users.stablecoinReferenceSource })
@@ -770,6 +780,41 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       }
     }, { isolationLevel: 'repeatable read', accessMode: 'read only' })
   })
+
+  // Use clocks for the currently selected evidence. Earlier record versions are not reconstructed.
+  async function financialKnowledge(tx: AccountingRead, portfolioId: string, evidence: Evidence[], from: string) {
+    const knowledge: Array<{ effective: string; known: string }> = []
+    const sourceIds = [...new Set(evidence.flatMap((row) =>
+      'sourceRecordId' in row ? [row.sourceRecordId] : row.linkedSourceRecordId ? [row.linkedSourceRecordId] : []))]
+    const batchIds = [...new Set(evidence.flatMap((row) => 'batchId' in row ? [row.batchId] : []))]
+    const sources = sourceIds.length ? await tx.select({ id: sourceRecords.id, retrievedAt: sourceRecords.retrievedAt, ingestedAt: sourceRecords.ingestedAt })
+      .from(sourceRecords).where(inArray(sourceRecords.id, sourceIds)) : []
+    const imports = batchIds.length ? await tx.select({ id: batches.id, confirmedAt: batches.confirmedAt }).from(batches)
+      .where(and(eq(batches.portfolioId, portfolioId), inArray(batches.id, batchIds))) : []
+    const clocks = new Map([...sources.map((row) => [row.id, new Date(Math.max(row.retrievedAt.getTime(), row.ingestedAt.getTime())).toISOString()] as const),
+      ...imports.map((row) => [row.id, row.confirmedAt?.toISOString()] as const)])
+    for (const item of evidence) {
+      const known = clocks.get('sourceRecordId' in item ? item.sourceRecordId : item.batchId) ?? '~'
+      const linked = item.linkedSourceRecordId ? clocks.get(item.linkedSourceRecordId) ?? '~' : known
+      knowledge.push({ effective: item.observation.timestamp, known: linked > known ? linked : known })
+    }
+    const [lastEdit] = await tx.select({ createdAt: decisions.createdAt }).from(decisions)
+      .where(eq(decisions.portfolioId, portfolioId)).orderBy(desc(decisions.createdAt)).limit(1)
+    const [lastReplacement] = await tx.select({ supersededAt: batches.supersededAt }).from(batches)
+      .where(and(eq(batches.portfolioId, portfolioId), isNotNull(batches.supersededAt))).orderBy(desc(batches.supersededAt)).limit(1)
+    for (const known of [lastEdit?.createdAt, lastReplacement?.supersededAt]) {
+      if (known) knowledge.push({ effective: from, known: known.toISOString() })
+    }
+    return knowledge
+  }
+
+  function hasUnrepresentedAccounts(input: Awaited<ReturnType<typeof loadEvidence>>, asOf: string) {
+    const represented = new Set(input.evidence.filter(({ observation }) => observation.timestamp <= asOf
+      && observation.type !== 'mark' && observation.type !== 'history_complete')
+      .map(({ observation }) => JSON.stringify([observation.venue, observation.account])))
+    return input.accounts.some((account) => ['public_wallet', 'authenticated_account'].includes(account.kind)
+      && !represented.has(JSON.stringify([account.venue, account.account])))
+  }
 
   async function loadExposureCatalog(tx: AccountingRead, asOf: string, asset: string, ids: string[], held: string[],
     recentSnapshotIds: string[], selected: string[] = []) {
@@ -846,36 +891,18 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
         const assets = [...new Set(input.evidence.map(({ observation }) => observation.asset))].sort()
         const supported = ['USD', 'USDC', 'PUSD']
         const observedOnly = [...input.positions, ...input.balances].some((row) => !reconstructed.has(assetScope(row)))
-        const unrepresented = input.accounts.some((account) => ['public_wallet', 'authenticated_account'].includes(account.kind)
-          && !input.evidence.some(({ observation }) => observation.account === account.account && observation.venue === account.venue))
-        const unsupported = observedOnly || unrepresented || assets.some((asset) => !supported.includes(asset))
-        const knowledge: Array<{ effective: string; known: string }> = []
-        if (query.data.evidenceMode === 'knowledge') {
-          const sourceIds = [...new Set(input.rawEvidence.flatMap((row) =>
-            'sourceRecordId' in row ? [row.sourceRecordId] : row.linkedSourceRecordId ? [row.linkedSourceRecordId] : []))]
-          const batchIds = [...new Set(input.rawEvidence.flatMap((row) => 'batchId' in row ? [row.batchId] : []))]
-          const sources = sourceIds.length ? await tx.select({ id: sourceRecords.id, retrievedAt: sourceRecords.retrievedAt })
-            .from(sourceRecords).where(inArray(sourceRecords.id, sourceIds)) : []
-          const imports = batchIds.length ? await tx.select({ id: batches.id, confirmedAt: batches.confirmedAt }).from(batches)
-            .where(and(eq(batches.portfolioId, portfolioId), inArray(batches.id, batchIds))) : []
-          const clocks = new Map([...sources.map((row) => [row.id, row.retrievedAt.toISOString()] as const),
-            ...imports.map((row) => [row.id, row.confirmedAt?.toISOString()] as const)])
-          for (const item of input.rawEvidence) {
-            const known = clocks.get('sourceRecordId' in item ? item.sourceRecordId : item.batchId) ?? '~'
-            const linked = item.linkedSourceRecordId ? clocks.get(item.linkedSourceRecordId) ?? '~' : known
-            knowledge.push({ effective: item.observation.timestamp, known: linked > known ? linked : known })
-          }
-          const [lastEdit] = await tx.select({ createdAt: decisions.createdAt }).from(decisions)
-            .where(eq(decisions.portfolioId, portfolioId)).orderBy(desc(decisions.createdAt)).limit(1)
-          if (lastEdit) knowledge.push({ effective: from, known: lastEdit.createdAt.toISOString() })
-        }
+        const unsupported = observedOnly || hasUnrepresentedAccounts(input, asOf) || assets.some((asset) => !supported.includes(asset))
+        const knowledge = query.data.evidenceMode === 'knowledge'
+          ? await financialKnowledge(tx, portfolioId, input.rawEvidence, from) : []
         const financialKnown = (point: string) => !knowledge.some((row) => row.effective <= point && row.known > point)
+        const financialPeriodKnown = (point: string) => !knowledge.some(({ effective, known }) =>
+          effective <= point && known > (effective > from ? effective : from))
         try {
           return consolidatePerformance(input.evidence, await loadFx(tx, from, asOf, { assets, currency, mode: query.data.evidenceMode,
             cutoffs: fxAnchors(input.evidence.map(({ observation }) => observation)
               .filter((row) => ['deposit', 'withdrawal'].includes(row.type) && row.timestamp > from && row.timestamp <= asOf)
               .map((row) => row.timestamp)) }),
-            assets.filter((asset) => supported.includes(asset)), currency, from, asOf, query.data.evidenceMode, unsupported, financialKnown, preference)
+            assets.filter((asset) => supported.includes(asset)), currency, from, asOf, query.data.evidenceMode, unsupported, financialKnown, preference, financialPeriodKnown)
         } catch (error) {
           if (error instanceof Error && error.message === 'analytics_replay_limit') {
             return reply.code(422).send({ error: { code: error.message } })
@@ -1371,7 +1398,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       const rates = await loadFx(tx, asOf, asOf, { assets: state.cash.map((row) => row.asset).concat(query.data.asset ?? []), currency })
       const scope = (row: { account: string; venue: string; asset: string }) => JSON.stringify([row.venue, row.account, row.asset])
       const selected = new Set(state.cash.map(scope))
-      const missingObserved = [...input.positions, ...input.balances].some((row) => !row.asset
+      const missingObserved = hasUnrepresentedAccounts(input, asOf) || [...input.positions, ...input.balances].some((row) => !row.asset
         || !selected.has(scope({ ...row, asset: row.asset })))
       const reporting = reportAmounts(rates, state.cash.map((row) => ({ asset: row.asset, value: row.portfolioValue })), currency, asOf, preference)
       const qualified = { ...reporting, completeValue: missingObserved ? null : reporting.completeValue,

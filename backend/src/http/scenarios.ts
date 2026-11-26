@@ -1,4 +1,4 @@
-import { loadFx, reportingCurrency, selectRate } from '../fx/reference.js'
+import { fxReferenceSource, loadFx, reportingCurrency, selectRate } from '../fx/reference.js'
 import { Decimal } from 'decimal.js'
 import { randomBytes } from 'node:crypto'
 import { evaluationResponse, comparisonResponse } from '../scenarios/contracts.js'
@@ -171,10 +171,11 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
     validateSource(value)
     const [collection] = await db.select({ owner: portfolios.ownerId, independent: portfolios.simulationOnly })
       .from(portfolios).where(eq(portfolios.id, portfolioId)).limit(1)
+    if (!collection) throw new ScenarioError('scenario_source_unavailable')
     const sourceId = value.mode === 'actual' ? value.sourcePortfolioId ?? portfolioId : portfolioId
-    if (value.mode === 'actual' && (collection?.independent || sourceId !== portfolioId)) {
+    if (value.mode === 'actual' && (collection.independent || sourceId !== portfolioId)) {
       const [eligible] = await db.select({ id: portfolios.id }).from(portfolios)
-        .where(and(eq(portfolios.id, sourceId), eq(portfolios.ownerId, collection!.owner), eq(portfolios.simulationOnly, false))).limit(1)
+        .where(and(eq(portfolios.id, sourceId), eq(portfolios.ownerId, collection.owner), eq(portfolios.simulationOnly, false))).limit(1)
       if (!eligible) throw new ScenarioError('scenario_source_unavailable')
     }
     if (!frozenPublic && value.publicOutcomes.length && !resolvePublic) throw new ScenarioError('provider_live_disabled')
@@ -201,14 +202,12 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
     return db.transaction(async (tx) => {
       const frozen = await baseline(tx, sourceId, value, resolved)
       validateInstrumentIdentities(frozen.instruments)
-      if (value.reportingCurrency) {
-        const asOf = new Date(value.asOf).toISOString()
-        const rates = await loadFx(tx, asOf, asOf, { assets: [value.asset], currency: value.reportingCurrency })
-        const [preference] = await tx.select({ fiatSource: users.fiatReferenceSource, stablecoinSource: users.stablecoinReferenceSource })
-          .from(portfolios).innerJoin(users, eq(users.id, portfolios.ownerId)).where(eq(portfolios.id, sourceId)).limit(1)
-        frozen.reportingBasis = { currency: value.reportingCurrency, asOf,
-          reference: selectRate(rates, value.asset, value.reportingCurrency, asOf, preference) }
-      }
+      const [preference] = await tx.select({ currency: users.reportingCurrency, fiatSource: users.fiatReferenceSource,
+        stablecoinSource: users.stablecoinReferenceSource }).from(users).where(eq(users.id, collection.owner)).limit(1)
+      const currency = value.reportingCurrency ?? preference?.currency ?? 'USD'
+      const asOf = new Date(value.asOf).toISOString()
+      const rates = await loadFx(tx, asOf, asOf, { assets: [value.asset], currency })
+      frozen.reportingBasis = { currency, asOf, reference: selectRate(rates, value.asset, currency, asOf, preference) }
       return frozen
     }, { isolationLevel: 'repeatable read', accessMode: 'read only' })
   }
@@ -324,7 +323,7 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
   const denominationEvaluation = z.object({
     components: z.array(z.object({ baselineToken: z.string().length(64), input }).strict()).min(2).max(4),
     reportingCurrency: reportingCurrency.optional(),
-    reportingSource: z.string().min(1).max(120).optional(),
+    reportingSource: fxReferenceSource.optional(),
     assumedUsdPerUnit: z.partialRecord(z.enum(['USDC', 'PUSD']), cashAmount.refine((value) => new Decimal(value).gt(0))).optional(),
   }).strict()
   async function freezeDenominations(portfolioId: string, value: z.infer<typeof denominationEvaluation>): Promise<FrozenDenominationScenario> {

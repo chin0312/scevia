@@ -2,17 +2,16 @@ import { and, eq } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import type { Database } from '../db/client.js'
 import { portfolios, users } from '../db/schema.js'
-import { fxEvidenceMode, loadFx, reportingCurrency, selectRate } from '../fx/reference.js'
+import { fiatReferenceSource, fxEvidenceMode, fxReferenceSource, loadFx, referenceFamily, reportingCurrency, selectRate, stablecoinReferenceSource } from '../fx/reference.js'
 import { z } from 'zod'
 
 const reportingPreference = { currency: users.reportingCurrency, fiatSource: users.fiatReferenceSource,
   stablecoinSource: users.stablecoinReferenceSource }
-const preferredSource = z.string().min(1).max(120).nullable().optional()
 
 export function registerOwnerPreferences(app: FastifyInstance, db: Database) {
   app.get('/fx/reference', async (request, reply) => {
     const query = z.object({ base: z.enum(['USD', 'SGD', 'EUR', 'GBP', 'MYR', 'USDC', 'PUSD']),
-      currency: reportingCurrency, mode: fxEvidenceMode.optional(), source: z.string().max(120).optional(), asOf: z.iso.datetime({ offset: true }).optional() }).strict().safeParse(request.query)
+      currency: reportingCurrency, mode: fxEvidenceMode.optional(), source: fxReferenceSource.optional(), asOf: z.iso.datetime({ offset: true }).optional() }).strict().safeParse(request.query)
     if (!query.success) return reply.code(422).send({ error: { code: 'invalid_fx_scope' } })
     const asOf = new Date(query.data.asOf ?? Date.now()).toISOString()
     const [preference] = await db.select(reportingPreference).from(users).where(eq(users.id, request.principalId!)).limit(1)
@@ -41,14 +40,16 @@ export function registerOwnerPreferences(app: FastifyInstance, db: Database) {
   })
   app.get('/preferences/reporting', async (request) => {
     const [row] = await db.select(reportingPreference).from(users).where(eq(users.id, request.principalId!)).limit(1)
-    return { currency: row?.currency ?? 'USD', fiatSource: row?.fiatSource ?? null, stablecoinSource: row?.stablecoinSource ?? null, methodology: 'point_in_time_reference' }
+    const stablecoin = stablecoinReferenceSource.safeParse(row?.stablecoinSource).data
+    return { currency: row?.currency ?? 'USD', fiatSource: fiatReferenceSource.safeParse(row?.fiatSource).data ?? null,
+      stablecoinSource: stablecoin ? referenceFamily(stablecoin) : null, methodology: 'point_in_time_reference' }
   })
   app.put('/preferences/reporting', async (request, reply) => {
-    const parsed = z.object({ currency: reportingCurrency, fiatSource: preferredSource, stablecoinSource: preferredSource }).strict().safeParse(request.body)
+    const parsed = z.object({ currency: reportingCurrency, fiatSource: fiatReferenceSource.nullable().optional(), stablecoinSource: stablecoinReferenceSource.nullable().optional() }).strict().safeParse(request.body)
     if (!parsed.success) return reply.code(422).send({ error: { code: 'invalid_reporting_currency' } })
     const [row] = await db.update(users).set({ reportingCurrency: parsed.data.currency,
       ...(parsed.data.fiatSource !== undefined ? { fiatReferenceSource: parsed.data.fiatSource } : {}),
-      ...(parsed.data.stablecoinSource !== undefined ? { stablecoinReferenceSource: parsed.data.stablecoinSource } : {}) }).where(eq(users.id, request.principalId!))
+      ...(parsed.data.stablecoinSource !== undefined ? { stablecoinReferenceSource: parsed.data.stablecoinSource && referenceFamily(parsed.data.stablecoinSource) } : {}) }).where(eq(users.id, request.principalId!))
       .returning(reportingPreference)
     return row ?? reply.code(404).send({ error: { code: 'not_found' } })
   })

@@ -31,6 +31,7 @@ import {
   instruments,
   markets,
   portfolios,
+  portfolioAccountingDecisions,
   positionSnapshots,
   priceObservations,
   providerActivityFacts,
@@ -254,8 +255,11 @@ describe('migrations and canonical persistence', () => {
     expect(selectRate(archive, 'PUSD', 'USD', historical).rate).toBeNull()
     const app = await createTestApp()
     const headers = { authorization: `Bearer ${TOKEN}` }
-    await app.inject({ method: 'PUT', url: '/v1/preferences/reporting', headers,
-      payload: { currency: 'USD', stablecoinSource: 'different_source' } })
+    const set = (stablecoinSource: string) => app.inject({ method: 'PUT', url: '/v1/preferences/reporting', headers,
+      payload: { currency: 'USD', stablecoinSource } })
+    expect((await set('different_source')).statusCode).toBe(422)
+    expect((await set('coingecko_polygon_pusd_usd_daily')).json()).toMatchObject({ stablecoinSource: 'coingecko_polygon_pusd_usd' })
+    expect((await set('kraken_usdc_usd_ohlc')).statusCode).toBe(200)
     const read = await app.inject({ method: 'GET', url: '/v1/fx/reference?base=PUSD&currency=USD', headers })
     expect(read.json()).toMatchObject({ rate: '0.97', fallback: true, legs: [{ source: 'coingecko_polygon_pusd_usd',
       tokenIdentity: { chain: 'polygon-pos', contract: polygonPusd, quoteBasis: 'vendor_aggregated_fiat_usd' } }] })
@@ -286,7 +290,24 @@ describe('migrations and canonical persistence', () => {
     expect(history.json().points.at(-1).reporting.completeValue).toBe('130')
     expect(analytics.json()).toMatchObject({ evidenceMode: 'retrospective', ending: { completeValue: '130' }, twr: '0' })
     const strict = await app.inject({ method: 'GET', url: prefix + '/analytics/reporting-performance?' + query + '&evidenceMode=knowledge', headers })
-    expect(strict.json()).toMatchObject({ ending: { completeValue: null }, twr: null })
+    expect(strict.json()).toMatchObject({ financialKnowledge: 'conservative_current_evidence_only', ending: { completeValue: null }, twr: null })
+    const single = () => app.inject({ method: 'GET', url: prefix + '/analytics/performance?' + query
+      + '&asset=USD&accounts=annual&evidenceMode=knowledge', headers })
+    expect((await single()).json()).toMatchObject({ error: { code: 'financial_knowledge_time_unavailable' } })
+
+    await database.update(financialImportBatches).set({ confirmedAt: new Date('2025-01-01T03:00:00Z') })
+      .where(eq(financialImportBatches.id, batchId))
+    const known = await single()
+    expect(known.statusCode, known.body).toBe(200)
+    const current = await app.inject({ method: 'GET', url: prefix + '/tracking/valuation', headers })
+    await database.insert(providerAccounts).values({ portfolioId: PORTFOLIO_ID, providerCode: 'polymarket', label: 'Unsynchronized',
+      kind: 'public_wallet', externalAccountId: '0x' + 'c'.repeat(40) })
+    const partial = await app.inject({ method: 'GET', url: prefix + '/tracking/valuation', headers })
+    expect(current.json().reporting).toMatchObject({ completeValue: '100' })
+    expect(partial.json().reporting).toMatchObject({ completeValue: null, knownSubtotal: '100', coverage: 'partial_or_unavailable' })
+    await database.insert(portfolioAccountingDecisions).values({ portfolioId: PORTFOLIO_ID,
+      recordKey: 'import:' + batchId + ':2', revision: 1, decision: { membership: 'excluded' } })
+    expect((await single()).json()).toMatchObject({ error: { code: 'financial_knowledge_time_unavailable' } })
   })
 
   it('loads daily FX once and keeps stablecoin assumptions, eligibility and fiat cross rates explicit', async () => {
@@ -316,10 +337,10 @@ describe('migrations and canonical persistence', () => {
     const collection = (await app.inject({ method: 'POST', url: '/v1/simulations', headers })).json().collection.id
     const root = '/v1/simulations/' + collection + '/scenarios'
     const preview = await app.inject({ method: 'POST', url: root + '/baseline', headers, payload: {
-      mode: 'scratch', asOf: now, asset: 'USDC', reportingCurrency: 'SGD',
+      mode: 'scratch', asOf: now, asset: 'USDC',
       buckets: [{ id: 'virtual', venue: 'polymarket', account: 'virtual', cash: '100' }],
     } })
-    expect(preview.json()).toMatchObject({ reportingBasis: { reference: { rate: '1.176' } } })
+    expect(preview.json()).toMatchObject({ reportingBasis: { currency: 'SGD', reference: { rate: '1.176' } } })
     const saved = await app.inject({ method: 'POST', url: root, headers, payload: { name: 'Frozen FX',
       source: preview.json().baselineSource, baselineToken: preview.json().baselineToken, input: {} } })
     expect(saved.statusCode, saved.body).toBe(201)
@@ -337,6 +358,8 @@ describe('migrations and canonical persistence', () => {
       payload: { ...bundle, name: 'Frozen mixed', previewDigest: evaluation.json().previewDigest } })
     expect(stored.statusCode, stored.body).toBe(201)
     await app.inject({ method: 'PUT', url: '/v1/preferences/reporting', headers, payload: { currency: 'GBP' } })
+    const savedSingle = await app.inject({ method: 'GET', url: root + '/' + saved.json().id, headers })
+    expect(savedSingle.json()).toMatchObject({ baseline: { reportingBasis: { currency: 'SGD', reference: { rate: '1.176' } } } })
     const read = await app.inject({ method: 'GET', url: root + '/denomination-scenarios/' + stored.json().id, headers })
     expect(read.json()).toMatchObject({ result: { reporting: { currency: 'SGD', endingValue: '237.6' } } })
 

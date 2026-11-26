@@ -1,5 +1,6 @@
 import { consolidatePerformance } from '../src/fx/consolidated.js'
-import { selectRate } from '../src/fx/reference.js'
+import { reportAmounts, selectRate } from '../src/fx/reference.js'
+import { polygonPusd } from '../src/providers/polymarket/collateral.js'
 import { describe, expect, it } from 'vitest'
 import { analyzePerformance } from '../src/analytics/performance.js'
 import type { Evidence } from '../src/accounting/model.js'
@@ -47,6 +48,26 @@ describe('reporting performance', () => {
     expect(selectRate([archived], 'EUR', 'USD', '2026-01-01T00:00:00.000Z', { mode: 'retrospective' }).rate).toBeNull()
   })
 
+  it('prefers an eligible daily pUSD reference over a newer stale current observation', () => {
+    const asOf = '2026-01-02T12:00:00.000Z'
+    const common = { base: 'PUSD', quote: 'USD', methodology: 'stablecoin_market_reference',
+      tokenIdentity: { chain: 'polygon-pos', contract: polygonPusd, quoteBasis: 'vendor_aggregated_fiat_usd' } }
+    const daily = { ...common, revision: 'daily', source: 'coingecko_polygon_pusd_usd_daily', rate: '0.98',
+      observedAt: new Date('2026-01-02T00:00:00Z'), retrievedAt: new Date('2026-01-02T01:00:00Z') }
+    const current = { ...common, revision: 'current', source: 'coingecko_polygon_pusd_usd', rate: '0.99',
+      observedAt: new Date('2026-01-02T04:00:00Z'), retrievedAt: new Date('2026-01-02T04:05:00Z') }
+    expect(selectRate([current, daily], 'PUSD', 'USD', asOf, { stablecoinSource: current.source })).toMatchObject({
+      rate: '0.98', fallback: false, legs: [{ source: daily.source }],
+      lastKnown: { rate: '0.99', source: current.source, qualification: 'stale_reference_only' },
+    })
+    expect(selectRate([current, daily], 'PUSD', 'USD', asOf, { stablecoinSource: 'kraken_usdc_usd_ohlc' })).toMatchObject({
+      rate: '0.98', fallback: true,
+    })
+    expect(selectRate([current, daily, { ...current, rate: '1.1', revision: 'conflict' }], 'PUSD', 'USD', asOf)).toMatchObject({
+      availability: 'conflict', rate: null,
+    })
+  })
+
   it('calculates consolidated return and drawdown from converted external-flow boundaries', () => {
     const opened = '2026-01-01T00:00:00.000Z'
     const deposited = '2026-01-02T00:00:00.000Z'
@@ -81,6 +102,22 @@ describe('reporting performance', () => {
     expect(consolidated.opening.completeValue).toBe('100')
     expect(consolidated.ending?.completeValue).toBe('136')
     expect(Number(consolidated.twr)).toBeCloseTo(-4 / 140)
+    const withoutOpeningFx = consolidatePerformance(funded, [
+      { ...rates[0]!, observedAt: new Date(deposited) }, rates[1]!,
+    ], ['USD', 'USDC'], 'USD', opened, through, 'retrospective')
+    expect(withoutOpeningFx.opening).toMatchObject({ completeValue: '100', fxCoverage: 'eligible' })
+    expect(Number(withoutOpeningFx.twr)).toBeCloseTo(-4 / 140)
+
+    const exit = { ...stablecoinDeposit, observation: { ...stablecoinDeposit.observation, id: 'stablecoin withdrawal',
+      type: 'withdrawal' as const, amount: '100' } }
+    const exited = consolidatePerformance([...evidence, exit], rates.slice(0, 1), ['USD', 'USDC'], 'USD', opened, through, 'retrospective')
+    expect(exited.ending).toMatchObject({ completeValue: '120', twr: '0',
+      components: expect.arrayContaining([{ asset: 'USDC', value: '0', reportingValue: '0',
+        reference: expect.objectContaining({ rate: null }) }]) })
+    const unknown = reportAmounts([], [{ asset: 'USD', value: '100' }, { asset: 'USDC', value: null }, { asset: 'PUSD', value: '0' }], 'USD', opened)
+    expect(unknown).toMatchObject({ completeValue: null, knownSubtotal: '100', components: [
+      { reportingValue: '100' }, { reportingValue: null }, { reportingValue: '0' },
+    ] })
     const incomplete = funded.filter((row) => row.observation.asset !== 'USDC' || row.observation.type !== 'opening_inventory')
     expect(consolidatePerformance(incomplete, rates, ['USD', 'USDC'], 'USD', opened, through, 'retrospective').twr).toBeNull()
   })
