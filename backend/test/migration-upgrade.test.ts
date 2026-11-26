@@ -91,4 +91,30 @@ describe('sync integrity migration upgrade', () => {
     expect(String(cashCoverage.rows[0]?.snapshot_as_of)).toContain('2026-11-21')
     expect(zeroClosedPosition?.is_current).toBe(true)
   })
+
+  it('adds scenario storage to a populated Phase 4 schema', async () => {
+    const upgraded = new PGlite()
+    try {
+      const { readdir } = await import('node:fs/promises')
+      const directory = new URL('../drizzle/', import.meta.url)
+      const scenarioMigration = '0013_robust_hedge_knight.sql'
+      const migrations = (await readdir(directory)).filter((file) => file.endsWith('.sql') && file < scenarioMigration).sort()
+      for (const file of migrations) await upgraded.exec(await readFile(new URL(file, directory), 'utf8'))
+      await upgraded.exec(`
+        INSERT INTO scevia.users (id, auth_subject) VALUES ('00000000-0000-4000-8000-000000000001', 'existing');
+        INSERT INTO scevia.portfolios (id, owner_id, name)
+        VALUES ('00000000-0000-4000-8000-000000000101', '00000000-0000-4000-8000-000000000001', 'Existing portfolio');
+      `)
+      await upgraded.exec(await readFile(new URL(scenarioMigration, directory), 'utf8'))
+      expect((await upgraded.query('SELECT name FROM scevia.portfolios')).rows).toEqual([{ name: 'Existing portfolio' }])
+      expect((await upgraded.query('SELECT id FROM scevia.portfolio_scenarios')).rows).toEqual([])
+      await upgraded.exec(`
+        INSERT INTO scevia.portfolio_scenarios (portfolio_id, name, baseline, source, input)
+        VALUES ('00000000-0000-4000-8000-000000000101', 'Scenario', '{}', '{}', '{}');
+        DELETE FROM scevia.portfolios WHERE name = 'Existing portfolio';
+      `)
+      expect((await upgraded.query('SELECT id FROM scevia.portfolio_scenarios')).rows).toEqual([])
+    } finally { await upgraded.close() }
+  })
+
 })
