@@ -29,7 +29,7 @@ function Toggle({ label, on, set }: { label: string; on: boolean; set: (v: boole
 /** The rates used to show values in the reporting currency, read from the same exchange-rate service as every
  *  figure. Rates are selected automatically and listed on request. Each rate that can't be used as is gets its own
  *  short warning, shown without opening the list. Legs follow the assets the selected portfolio actually holds. */
-function RatesInUse({ currency }: { currency: ReportingCurrency }) {
+export function RatesInUse({ currency, open = false }: { currency: ReportingCurrency; open?: boolean }) {
   const { fx } = useReporting()
   const accounts = useActiveWorkspace().snapshot.data?.accounts ?? []
   const assets = [...new Set(accounts.map((a) => a.denomination))].filter((a) => a !== 'USD').sort()
@@ -39,7 +39,7 @@ function RatesInUse({ currency }: { currency: ReportingCurrency }) {
   if (legs.length === 0) return <small className="t3">No conversion is needed for this portfolio.</small>
   return (<>
     {warnings.length > 0 && <ul className="set-warn" role="status">{warnings.map((w) => <li key={w} className="stale">{w}</li>)}</ul>}
-    <details className="adv set-adv">
+    <details className="adv set-adv" open={open}>
       <summary>Rates in use</summary>
       <ul className="fx-legs" aria-label="Exchange rates in use">
         {legs.map((r) => <li key={`${r.base}${r.quote}`}><span>{assetLabel(r.base)} to {assetLabel(r.quote)}</span><span>{phrase(r.rate == null ? 'Unavailable' : r.rate.toFixed(4), sourceName(r), r.fallback && 'fallback source', r.observedAt && date(r.observedAt))}</span></li>)}

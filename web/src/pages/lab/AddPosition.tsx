@@ -79,7 +79,7 @@ function Holdings({ baseline, inScenario, isPicked, toggle }: PickProps & { base
       <input data-autofocus autoFocus className="text-input" style={{ flex: 1, minWidth: 200 }} type="search" placeholder="Filter your holdings" aria-label="Filter your holdings" value={q} onChange={(e) => setQ(e.target.value)} />
       <button type="button" className="link" disabled={!free.length} onClick={() => free.forEach((p) => { if (isPicked(p) === allOn) toggle(p) })}>{allOn ? 'Clear these' : `Select all ${free.length}`}</button>
     </div>
-    {baseline === 'scratch' && <p className="t3 note">This scenario starts from an empty portfolio: a holding is added from zero, and your actual quantity is not copied.</p>}
+    {baseline === 'scratch' && <p className="t3 note">Holdings are added from zero. Your actual quantities aren’t copied.</p>}
     <div className="addpos-list" role="list">
       {list.length === 0 && <div className="empty"><p>No holdings match “{q}”.</p></div>}
       {picks.map((pk) => {
@@ -166,7 +166,7 @@ function PasteLink({ inScenario, isPicked, toggle }: PickProps) {
       <input data-autofocus autoFocus className="text-input" style={{ flex: 1, minWidth: 220 }} inputMode="url" placeholder="Market link, or a Polymarket / Kalshi market id" aria-label="Market link" value={url} onChange={(e) => { setUrl(e.target.value); seq.current++; setState({ loading: false, res: null }) }} />
       <Button type="submit" disabled={!url.trim() || state.loading}>{state.loading ? 'Resolving market…' : 'Find market'}</Button>
     </form>
-    <p className="t3 note">Supported: Polymarket and Kalshi market links. Scevia doesn’t open the link. It only reads the market reference. {MARKET_CATALOG.live ? '' : `Links resolve only against the ${MARKET_CATALOG.label.toLowerCase()}.`}</p>
+    <p className="t3 note">Supported: Polymarket and Kalshi market links. {MARKET_CATALOG.live ? '' : `Links resolve only against the ${MARKET_CATALOG.label.toLowerCase()}.`}</p>
     <div aria-live="polite">
       {state.loading && <div className="skeleton" style={{ height: 80 }} />}
       {state.failed && <Callout tone="warn" icon="alert">The link couldn’t be looked up. <button type="button" className="link" onClick={() => void resolve()}>Try again</button></Callout>}

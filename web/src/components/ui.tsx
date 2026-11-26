@@ -114,10 +114,10 @@ export function Legend({ items }: { items: { label: string; color?: string; kind
   )
 }
 
-export function PageHead({ caption, title, actions }: { caption: ReactNode; title: ReactNode; actions?: ReactNode }) {
+export function PageHead({ caption, title, actions }: { caption?: ReactNode; title: ReactNode; actions?: ReactNode }) {
   return (
     <section className="page-head anchor" id="summary">
-      <div><div className="caps">{caption}</div><h1>{title}</h1></div>
+      <div>{caption && <div className="caps">{caption}</div>}<h1>{title}</h1></div>
       {actions && <div className="actions">{actions}</div>}
     </section>
   )

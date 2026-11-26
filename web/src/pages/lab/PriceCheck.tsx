@@ -39,7 +39,7 @@ export function PriceCheckModal({ adjs, baseAsOf, latest: latestF, titleOf, onCl
   const noLatest = checks?.filter((c) => c.status === 'no-latest').length ?? 0
   const moved = checks?.filter((c) => c.status === 'moved' || c.status === 'no-frozen').length ?? 0
   return (
-    <Modal title="Check latest prices" sub="Compare the prices saved with this scenario with the latest ones. Nothing changes unless you confirm." onClose={onClose} width={680}
+    <Modal title="Check latest prices" sub="Nothing changes unless you confirm." onClose={onClose} width={680}
       footer={<><Button variant="ghost" onClick={onClose}>{moved ? 'Keep saved prices' : 'Close'}</Button>{moved > 0 && <Button variant="primary" onClick={() => onApply(checks!)}>Update {count(moved, 'reference price')}</Button>}</>}>
       {error ? <div className="empty"><p>Latest prices couldn’t be loaded. The scenario is unchanged.</p></div> : !checks ? <div className="skeleton" style={{ height: 160 }} aria-busy="true" aria-label="Loading latest prices" /> : (<>
         <p className="t2" style={{ marginBottom: 'var(--space-3)' }}>{checks.length === 0 ? 'This scenario has no positions with reference prices to check yet.' : sentences(

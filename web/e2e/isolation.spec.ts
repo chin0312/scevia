@@ -31,7 +31,7 @@ test('isolation: two workspaces show their own holdings, value, accounts, record
   await expect(page.locator('.hero-card')).toContainText(hero(B.account('all').totalValue))
   await expect(page.locator('.hero-card')).not.toContainText(hero(sampleAccount('all').totalValue))
   await expect(page.locator('#holdings tbody tr')).toHaveCount(3)
-  await expect(page.getByLabel('Valuation basis')).toContainText('pUSD')
+  await expect(page.locator('#coverage')).toContainText('pUSD')
 
   const menu = async () => { await page.getByRole('button', { name: /^Portfolio:/ }).click(); return page.getByRole('menu', { name: 'Portfolio' }) }
   const m = await menu()
@@ -165,9 +165,12 @@ test('reporting currency: a global setting that converts portfolio money but not
   await page.getByRole('button', { name: 'Done' }).click()
   await expect(page.locator('.hero-fig')).toContainText('€')
   // Native amounts keep their own units; only the portfolio total is converted.
-  await expect(page.getByLabel('Valuation basis')).toContainText('24,768.00 USDC')
-  await expect(page.getByLabel('Valuation basis')).toContainText('Shown in EUR (1 USDC = 0.9200 EUR, 1 USD = 0.9200 EUR)')
-  await page.reload()
+  await expect(page.locator('#coverage')).toContainText('24,768.00 USDC')
+  // No exchange-rate equation on the dashboard; the rates stay in Settings and Data coverage.
+  await expect(page.locator('main')).not.toContainText('1 USDC =')
+  await page.goto('/portfolio/coverage')
+  await expect(page.getByLabel('Exchange rates in use')).toContainText('USD to EUR0.9200')
+  await page.goto('/overview')
   await expect(page.locator('.hero-fig')).toContainText('€')
   await page.getByRole('button', { name: 'Settings' }).click()
   await page.getByLabel('Reporting currency').selectOption('GBP')

@@ -39,8 +39,6 @@
 .ws-state-card p { margin: 0; }
 
 /* ── As-of line (Overview, Analytics) ── */
-.asof { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-3); font-size: var(--font-size-xs); color: var(--color-text-tertiary); }
-.asof b { color: var(--color-text-secondary); font-weight: var(--font-weight-medium); }
 
 /* ── Analytics period control ── */
 .period-ctl { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
@@ -119,3 +117,7 @@
 .lab-note { margin: 0 0 var(--space-3); font-size: var(--font-size-xs); }
 .set-warn { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-1); font-size: var(--font-size-xs); }
 .fx-legs li > span:first-child { white-space: nowrap; }
+.data-issues { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-3); margin-top: var(--space-2); font-size: var(--font-size-xs); }
+.help-policies { margin: var(--space-2) 0 var(--space-3); padding-left: var(--space-5); display: grid; gap: var(--space-1); color: var(--color-text-secondary); }
+.privacy-state { margin-bottom: var(--space-3); }
+.history-from { font-size: var(--font-size-xs); align-self: center; }

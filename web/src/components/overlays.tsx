@@ -104,15 +104,15 @@ export function Menu({ trigger, children, align = 'right', width = 260, label }:
   )
 }
 
-/* ⓘ "How calculated" popover — hover or focus; Esc dismisses. */
+/* ⓘ "About this" popover: hover, focus or tap opens it; blur or Esc dismisses. */
 export function InfoTip({ text }: { text: string }) {
   const [open, setOpen] = useState(false)
   const id = useId()
   return (
     <span className="itip-wrap" onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)}>
-      <button type="button" className="itip" aria-label="How this is calculated" aria-describedby={open ? id : undefined}
-        onFocus={() => setOpen(true)} onBlur={() => setOpen(false)} onKeyDown={(e) => e.key === 'Escape' && setOpen(false)}>i</button>
-      {open && <span className="itip-pop" role="tooltip" id={id}><b>How calculated</b>{text}</span>}
+      <button type="button" className="itip" aria-label="About this figure" aria-describedby={open ? id : undefined}
+        onClick={() => setOpen(true)} onFocus={() => setOpen(true)} onBlur={() => setOpen(false)} onKeyDown={(e) => e.key === 'Escape' && setOpen(false)}>i</button>
+      {open && <span className="itip-pop" role="tooltip" id={id}><b>About this</b>{text}</span>}
     </span>
   )
 }

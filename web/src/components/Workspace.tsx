@@ -7,8 +7,7 @@
    Switching or refreshing never changes a scenario, a record or an input. */
 import { useEffect, useState, type ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { FRESHNESS_LABEL, assetLabel, sourceName } from '../lib/fx'
-import { phrase } from '../lib/text'
+import { assetLabel } from '../lib/fx'
 import { useReporting } from '../lib/reporting'
 import { useMarketCatalog } from '../lib/marketContext'
 import { FIXTURE_ID, MODE_LABEL, type WorkspaceSnapshot } from '../data/workspace'
@@ -19,7 +18,7 @@ import { accountName } from '../lib/useWorkspace'
 import { hasData, useActiveWorkspace } from '../lib/workspaceContext'
 import { Icon, type IconName } from './Icon'
 import { Menu, useToast } from './overlays'
-import { Button, PlatformBadge, cx } from './ui'
+import { Button, Chip, PlatformBadge, cx } from './ui'
 
 export const PORTFOLIO_SECTIONS: { id: string; label: string; icon: IconName; sub: string }[] = [
   { id: 'accounts', label: 'Accounts', icon: 'db', sub: 'wallets and venue logins' },
@@ -36,9 +35,11 @@ function useNow() {
   return now
 }
 
-/** The first word of the portfolio's own name (e.g. "Sample", "Demo"), for narrow screens. The full name is the
- *  button's accessible name and is shown in the menu. */
-const shortName = (s: WorkspaceSnapshot) => s.summary.name.split(/\s+/)[0]
+/** For narrow screens: the data mode for Sample and Demo portfolios, otherwise the first word of the portfolio's
+ *  own name. The full name is the button's accessible name and is shown in the menu. */
+const shortName = (s: WorkspaceSnapshot) => (s.summary.mode === 'actual' ? s.summary.name.split(/\s+/)[0] : MODE_LABEL[s.summary.mode])
+/** The data mode next to the name when the name itself doesn't say it (names can be changed). */
+const modeTag = (s: WorkspaceSnapshot) => (s.summary.mode !== 'actual' && !s.summary.name.toLowerCase().includes(MODE_LABEL[s.summary.mode].toLowerCase()) ? MODE_LABEL[s.summary.mode] : null)
 
 export function PortfolioSelector() {
   const nav = useNavigate()
@@ -47,7 +48,7 @@ export function PortfolioSelector() {
   return (
     <Menu label="Portfolio" width={360} trigger={(t) => (
       <button type="button" className="chip accent chip-btn" aria-label={`Portfolio: ${s.summary.name}`} {...t}>
-        <span className="chip-long">{s.summary.name}</span><span className="chip-short">{shortName(s)}</span>
+        <span className="chip-long">{s.summary.name}{modeTag(s) && <span className="chip-mode">{modeTag(s)}</span>}</span><span className="chip-short">{shortName(s)}</span>
         {s.valuationAsOf && <span className="chip-date">as of {fmtDate(s.valuationAsOf.slice(0, 10))}</span>}
       </button>)}>
       {(close) => (<>
@@ -153,29 +154,29 @@ export function WorkspaceGate({ children }: { children: ReactNode }) {
   )
 }
 
-/** The selected portfolio's name and data basis, for page footers ("Sample portfolio (fictional data)"). */
-/** The market data disclosure for Scenario Lab and Historical Replay: the catalog's own label when it isn't live
- *  provider data (e.g. "Sample market data"); nothing when it is. */
+
+/** The market data mode for Scenario Lab and Historical Replay, shown once in the page header: the catalog's own
+ *  label (e.g. "Sample market data") when the catalog isn't live provider data, nothing when it is. */
 export function MarketDataLabel() {
   const c = useMarketCatalog()
-  return c.live ? null : <>{c.label}</>
+  return c.live ? null : <Chip tone="info">{c.label}</Chip>
 }
 
-export function WorkspaceLabel({ suffix }: { suffix?: string }) {
-  const { snapshot: s } = useActiveWorkspace()
-  const basis = s.summary.mode === 'fixture' ? 'fictional data' : s.summary.mode === 'demo' ? 'real markets, virtual capital' : 'your records'
-  return <>{s.summary.name} ({suffix ?? basis})</>
-}
-
-/** How combined figures are converted: each native asset at its own reference into the reporting currency. Shown
- *  when figures mix assets or the reporting currency isn't USD; USD-only figures in USD need none. Provenance (source,
- *  methodology, age) is in the title. Conversion never moves funds. */
-export function ReportingNote({ denominations }: { denominations: string[] }) {
-  const { currency, assetReference, reference } = useReporting()
-  const assets = [...new Set(denominations)]
-  if (currency === 'USD' && assets.every((d) => d === 'USD')) return null
-  const parts = assets.map((d) => { const r = assetReference(d); return r.rate == null ? `no ${assetLabel(d)} rate` : d === currency ? null : `1 ${assetLabel(d)} = ${r.rate.toFixed(4)} ${currency}${r.freshness === 'stale' ? ', out of date' : ''}` })
-  const title = [reference, ...assets.map((d) => assetReference(d))].map((r) => `${assetLabel(r.base)} to ${r.quote}: ${sourceName(r)}, ${r.methodology}${r.observedAt ? `, observed ${r.observedAt}` : ''} (${FRESHNESS_LABEL[r.freshness].toLowerCase()})`).join('\n')
-  const detail = phrase(...parts)
-  return <span title={title}>Shown in {currency}{detail && ` (${detail})`}</span>
+/** Concise, state-specific data issues next to a figure: out-of-date sources and exchange rates that can't be used
+ *  as is. Renders nothing when everything is current, so healthy dashboards carry no provenance strip; the details
+ *  (sources, observation times, rates, providers) live in Data status, Data coverage and Settings › Rates in use.
+ *  A held asset without a rate to USD makes converted totals partial; a missing USD to reporting-currency rate means
+ *  values stay in USD. */
+export function DataIssues({ denominations, stale = [] }: { denominations: string[]; stale?: { label: string; asOf: string }[] }) {
+  const { currency, fx } = useReporting()
+  const assets = [...new Set(denominations)].filter((d) => d !== 'USD')
+  const legs = [...assets.map((a) => fx.reference(a, 'USD')), ...(currency === 'USD' ? [] : [fx.reference('USD', currency)])]
+  const issues = [
+    ...stale.map((x) => `${x.label} data from ${fmtDate(x.asOf.slice(0, 10))}`),
+    ...legs.filter((r) => r.rate == null && r.base !== 'USD').map((r) => `Partial total: no ${assetLabel(r.base)} to USD rate`),
+    ...legs.filter((r) => r.rate == null && r.base === 'USD').map(() => `Shown in USD: no USD to ${currency} rate`),
+    ...legs.filter((r) => r.rate != null && r.freshness === 'stale').map((r) => `${assetLabel(r.base)} to ${assetLabel(r.quote)} rate out of date`),
+  ]
+  if (issues.length === 0) return null
+  return <div className="data-issues" role="status" aria-label="Data issues">{issues.map((x) => <span key={x} className="stale">{x}</span>)}</div>
 }

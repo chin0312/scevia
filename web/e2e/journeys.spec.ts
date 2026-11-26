@@ -147,8 +147,10 @@ test('2c · scenario create, rename, save and revert behave predictably', async 
 test('3 · a hypothetical settlement constraint changes only its own scenario; Risk stays factual', async ({ page }) => {
   await fresh(page, '/risk#rel')
   await expect(page.locator('#rel')).not.toContainText('BTC')
-  await expect(page.locator('#rel')).toContainText('not correlation')
-  const riskWorst = await page.locator('.tile', { hasText: 'Worst feasible outcome' }).locator('.v').innerText()
+  // The relationship semantics are one tap away, not a paragraph on the page.
+  await page.locator('#rel .itip').first().click()
+  await expect(page.getByRole('tooltip')).toContainText('not correlation')
+  const riskWorst = await page.locator('.tile', { hasText: 'Worst-case settlement P&L' }).locator('.v').innerText()
   await page.getByRole('link', { name: 'Scenario Lab' }).click()
   await startCurrent(page)
   await page.getByRole('button', { name: 'Edit assumptions' }).click()
@@ -170,14 +172,14 @@ test('3 · a hypothetical settlement constraint changes only its own scenario; R
   await view(page, 'Compare')
   await expect(page.locator('#c-table')).toContainText('Hypothetical constraints')
   await page.getByRole('link', { name: 'Risk' }).click()
-  await expect(page.locator('.tile', { hasText: 'Worst feasible outcome' }).locator('.v')).toHaveText(riskWorst)
-  await expect(page.locator('#payoffs .foot')).not.toContainText('combinations excluded')
+  await expect(page.locator('.tile', { hasText: 'Worst-case settlement P&L' }).locator('.v')).toHaveText(riskWorst)
+  await expect(page.locator('#payoffs')).not.toContainText('excluded by verified constraints')
 })
 
 test('4 · switching platform and period keeps summaries consistent', async ({ page }) => {
   await fresh(page, '/overview')
   await page.getByRole('radiogroup', { name: 'Platform' }).getByRole('radio', { name: /Polymarket/ }).click()
-  await expect(page.getByText('Sample portfolio, Polymarket only')).toBeVisible()
+  await expect(page.locator('main .page-head .caps').getByText('Polymarket only')).toBeVisible()
   const pm = account('pm')
   const [i, d] = pm.totalValue.toFixed(2).split('.')
   await expect(page.locator('.hero-fig')).toContainText(`$${Number(i).toLocaleString('en-US')}`)
@@ -206,7 +208,7 @@ test('data sources never claim a connection; account actions are unavailable, no
 
 test('Risk: table filters never change portfolio-level metrics', async ({ page }) => {
   await fresh(page, '/risk')
-  const tile = page.locator('.tile', { hasText: 'Worst feasible outcome' }).locator('.v')
+  const tile = page.locator('.tile', { hasText: 'Worst-case settlement P&L' }).locator('.v')
   const portfolioWorst = await tile.innerText()
   await page.getByRole('tab', { name: 'Next 30 days' }).click()
   await expect(tile).toHaveText(portfolioWorst)
@@ -983,7 +985,7 @@ test('settings: workspace preferences take effect; a section reset keeps the oth
   await dlg.getByRole('radiogroup', { name: 'Resolution alerts' }).getByRole('radio', { name: 'Off' }).click()
   await dlg.getByRole('button', { name: 'Done' }).click()
   await page.goto('/overview')
-  await expect(page.getByText('Sample portfolio, Kalshi only')).toBeVisible() // the Notifications reset kept General
+  await expect(page.locator('main .page-head .caps').getByText('Kalshi only')).toBeVisible() // the Notifications reset kept General
   await page.getByRole('button', { name: /^Notifications/ }).click()
   await expect(page.getByRole('menu', { name: 'Notifications' })).not.toContainText('scheduled to resolve')
   await page.keyboard.press('Escape')
@@ -1061,7 +1063,7 @@ test('account: guest state is honest; data clearing is grouped, confirmed and le
   await expect(dlg).toContainText('Your other data stays')
   await dlg.getByRole('button', { name: 'Clear preferences', exact: true }).click()
   await page.goto('/overview')
-  await expect(page.getByText('Sample portfolio, Polymarket only')).toHaveCount(0) // preference gone
+  await expect(page.locator('main .page-head .caps').getByText('Polymarket only')).toHaveCount(0) // preference gone
   await page.goto('/scenario-lab')
   await expect(page.getByRole('listbox', { name: 'Scenarios' })).toContainText('Hedge the shutdown') // scenario kept
 })

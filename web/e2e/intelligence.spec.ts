@@ -86,13 +86,15 @@ test('analytics: presets follow history coverage; a custom range is validated be
   await expect(page.locator('main .page-head')).toContainText('Jan 2, 2026 – Mar 1, 2026')
 })
 
-test('overview: valuation basis, native assets and the market-price display preference', async ({ page }) => {
+test('overview: native assets in coverage, no provenance strip, and the market-price display preference', async ({ page }) => {
   await fresh(page, '/overview')
-  const basis = page.getByLabel('Valuation basis')
-  await expect(basis).toContainText('Prices as of Nov 24, 2026')
-  await expect(basis).toContainText('USDC')
-  await expect(basis).toContainText('USD')
-  await expect(basis).toContainText('Shown in USD (1 USDC = 1.0000 USD)')
+  // Healthy data: no valuation or exchange-rate strip; the only issue shown is the out-of-date Kalshi source.
+  await expect(page.getByLabel('Valuation basis')).toHaveCount(0)
+  await expect(page.locator('.hero-card')).not.toContainText('1 USDC =')
+  await expect(page.getByLabel('Data issues')).toHaveText('Kalshi data from Nov 22')
+  // Native amounts keep their own units where several assets meet.
+  await expect(page.locator('#coverage')).toContainText('24,768.00 USDC')
+  await expect(page.locator('#coverage')).toContainText('USD')
   await expect(page.getByRole('columnheader', { name: 'Entry → Price' })).toBeVisible()
   await page.getByRole('button', { name: 'Settings' }).click()
   await page.getByRole('radiogroup', { name: 'Market prices' }).getByRole('radio', { name: '64%' }).click()
@@ -169,10 +171,10 @@ test('historical replay: virtual funding, trading-close validation, funding stat
   await expect(lines).toContainText('Open, observed')
   await expect(page.locator('#rp-value')).toContainText('Value over time is unavailable')
   // Combined reporting uses reference rates automatically; an override is an explicit, labelled hypothetical rate.
+  await page.locator('#rp-results').getByText('Exchange rates').click()
   await expect(page.locator('#rp-results')).toContainText('Combined using rates saved on')
-  await expect(page.locator('#rp-results')).toContainText('1 USDC = 1 USD. Sample rates.')
+  await expect(page.locator('#rp-results')).toContainText('1 USDC = 1 USD.')
   await expect(page.locator('#rp-results')).not.toContainText('Uses your own rates')
-  await page.locator('#rp-results').getByText('Use your own rates').click()
   await page.getByLabel('USD per 1 USDC').fill('0.9')
   await expect(page.locator('#rp-results')).toContainText('Uses your own rates.')
 
@@ -225,24 +227,52 @@ test('responsive: the selector, data status and replay build fit a phone', async
   expect(overflow).toBeLessThanOrEqual(1)
 })
 
-test('copy: plain sentences on every page, with the critical disclosures kept once', async ({ page }) => {
-  const pages: [string, string[]][] = [
-    ['/overview', ['Sample portfolio (fictional data)', 'Scevia is read-only. It never places trades or holds funds.']],
-    ['/analytics', ['Portfolio performance', 'They don’t predict future ones and aren’t investment advice.']],
-    ['/risk', ['Scevia does not estimate how likely each outcome is.']],
-    ['/scenario-lab', ['Scenario Lab never places trades or changes your accounts.']],
-    ['/scenario-lab/replay?new=1', ['You choose these markets knowing how they turned out.', 'It isn’t your actual performance or a tested strategy.']],
-    ['/portfolio/accounts', ['Sample portfolio (fictional data)']],
-  ]
-  for (const [path, disclosures] of pages) {
+test('information hierarchy: no generic disclaimers on dashboards; modes, policies and methodology stay reachable', async ({ page }) => {
+  for (const path of ['/overview', '/analytics', '/risk', '/scenario-lab', '/scenario-lab/replay?new=1', '/portfolio/accounts', '/portfolio/transactions']) {
     await fresh(page, path)
     const main = page.locator('main')
-    for (const d of disclosures) await expect(main).toContainText(d)
+    await expect(main.locator('.footer-note, .asof')).toHaveCount(0)
     const text = await main.innerText()
-    expect(text, `${path} uses separator dots`).not.toMatch(/ · /)
-    expect(text, `${path} uses statistical notation`).not.toMatch(/\bn ?= ?\d/)
-    expect(text, `${path} uses em-dash separators`).not.toMatch(/ — /)
+    for (const generic of [/investment advice/i, /never places trades/i, /how likely/i, /1 USDC =/, / · /, / — /, /\bn ?= ?\d/]) expect(text, `${path}: ${generic}`).not.toMatch(generic)
   }
+  // The data mode is identified once, at the workspace and market-data level.
+  await fresh(page, '/overview')
+  await expect(page.getByRole('button', { name: /^Portfolio: Sample portfolio/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^Data status/ })).toContainText('Fixed sample')
+  await page.goto('/scenario-lab')
+  await expect(page.locator('main .head-row')).toContainText('Sample market data')
+  await page.goto('/scenario-lab/replay?new=1')
+  await expect(page.locator('main .caps')).toContainText('Sample market data')
+  // Material qualification stays next to the inputs it qualifies.
+  await expect(page.locator('main')).toContainText('Hindsight analysis. Entry and exit prices are your assumptions, not recorded fills.')
+  // Product statements and methodology live in Help, organized by concept.
+  await page.getByRole('button', { name: 'Help' }).click()
+  await page.getByRole('menu', { name: 'Help' }).getByRole('menuitem', { name: 'About Scevia' }).click()
+  const help = page.getByRole('dialog', { name: 'Help' })
+  await help.getByRole('tab', { name: 'About' }).click()
+  await expect(help).toContainText('Scevia is read-only. It never places trades, holds funds or asks for private keys or seed phrases.')
+  await expect(help).toContainText('not forecasts, recommendations or investment advice')
+  await help.getByRole('tab', { name: 'Methodology' }).click()
+  for (const section of ['Portfolio valuation', 'Performance', 'Risk', 'Scenario Lab', 'Historical Replay', 'Data coverage', 'Currency conversion']) await expect(help.getByRole('region', { name: section })).toBeVisible()
+  await expect(help.getByRole('region', { name: 'Risk' })).toContainText('Worst-case settlement P&L')
+  await page.keyboard.press('Escape')
+  // The privacy dialog describes the actual portfolio and capabilities.
+  await page.getByRole('button', { name: 'Account' }).click()
+  await page.getByRole('menuitem', { name: 'Data & privacy' }).click()
+  const privacy = page.getByRole('dialog', { name: 'Data & privacy' })
+  await expect(privacy).toContainText('Sample portfolio (fictional sample data)')
+  await expect(privacy).toContainText('None. This portfolio doesn’t use your accounts.')
+  await expect(privacy).not.toContainText('Polymarket, Kalshi or other account')
+})
+
+test('information hierarchy: another fictional portfolio is still marked as sample data', async ({ page }) => {
+  await devFresh(page, '/overview')
+  await selectWorkspace(page, /Development fixture B/)
+  // Its name doesn't say "sample", so the mode is shown next to it.
+  await expect(page.getByRole('button', { name: /^Portfolio:/ }).locator('.chip-mode')).toHaveText('Sample')
+  await page.getByRole('button', { name: 'Account' }).click()
+  await page.getByRole('menuitem', { name: 'Data & privacy' }).click()
+  await expect(page.getByRole('dialog', { name: 'Data & privacy' })).toContainText('Development fixture B (fictional sample data)')
 })
 
 /* Punctuation and spacing in rendered copy. Checked line by line on visible text, so data such as market titles is
@@ -361,7 +391,7 @@ test('exchange rates: stale, missing and other providers are presented from the 
   await expect(s.getByRole('status').filter({ hasText: 'rate is out of date' })).toHaveText('The USD to EUR rate is out of date (last observed Oct 1, 2026).')
   await expectCleanCopy(s, 'settings with a stale rate')
   await page.getByRole('button', { name: 'Done' }).click()
-  await expect(page.getByLabel('Valuation basis')).toContainText('out of date')
+  await expect(page.getByLabel('Data issues')).toContainText('USD to EUR rate out of date')
   // Missing rates: a missing USD to EUR leg falls back to USD; a missing pUSD leg can't be converted at all.
   await devFresh(page, '/overview', 'missing')
   await selectWorkspace(page, /Development fixture B/)
@@ -369,6 +399,10 @@ test('exchange rates: stale, missing and other providers are presented from the 
   const warnings = s.locator('.set-warn li')
   await expect(warnings).toHaveText(['No pUSD to USD rate is available, so totals that include pUSD can’t be converted.', 'No USD to EUR rate is available, so values are shown in USD.'])
   await expectCleanCopy(s, 'settings with missing rates')
+  // The affected figure says so too: the total is partial without a pUSD rate.
+  await page.getByRole('button', { name: 'Done' }).click()
+  await expect(page.getByLabel('Data issues')).toContainText('Partial total: no pUSD to USD rate')
+  await expect(page.getByLabel('Data issues')).toContainText('Shown in USD: no USD to EUR rate')
   // Other providers: names come from the references, not from a fixed list.
   await devFresh(page, '/overview', 'alt')
   s = await setCurrency(page, 'GBP')

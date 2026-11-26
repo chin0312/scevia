@@ -6,6 +6,8 @@ import { Callout, Card, CardHeader, Seg, cx } from '../../components/ui'
 import { CAT_COLOR, PLATFORM_NAME } from '../../data/labels'
 import type { Category, Platform } from '../../data/types'
 import { fmtDate, holdingsAllocation } from '../../lib/finance'
+import { HELP } from '../../lib/help'
+import { count } from '../../lib/text'
 import { feeLabel } from '../../lib/fees'
 import { fmt, pct, sfmt } from '../../lib/format'
 import * as SC from '../../lib/scenarios'
@@ -42,7 +44,7 @@ export function CompareView({ scenarios, evals, actual, activeKey, onOpen }: { s
   const legendName = (x: (typeof entries)[number]) => <tspan><tspan style={{ fill: x.color }}>● </tspan>{x.name.length > 22 ? `${x.name.slice(0, 21)}…` : x.name}</tspan>
   return (<>
     <Card id="c-pick">
-      <CardHeader title="Scenarios to compare" sub={`Pick up to ${MAX_PICK}. Each is measured against its own starting point.`}
+      <CardHeader title="Scenarios to compare" sub={`Pick up to ${MAX_PICK}`}
         right={<Seg label="Comparison basis" options={['Absolute', 'Change from start', '% of own start'] as const} value={basis} onChange={setBasis} />} />
       <div className="card-b cmp-pick">
         <label className={cx('pick-chip', withActual && 'on')}><input type="checkbox" checked={withActual} onChange={(e) => setWithActual(e.target.checked)} /><i style={{ background: 'var(--color-text-tertiary)' }} />Current portfolio <small>actual</small></label>
@@ -68,7 +70,7 @@ export function CompareView({ scenarios, evals, actual, activeKey, onOpen }: { s
             return { key: x.key, label: legendName(x), text: `${x.name}: ${lo == null || hi == null ? 'unavailable' : `${fmtN(lo)} to ${fmtN(hi)}`}`, lo, hi, ref, color: x.color }
           })} />
           {basis === '% of own start' && entries.some((x) => x.e.B.totalValue == null || x.e.B.totalValue <= 0) && <p className="t3 chart-note">% is unavailable for a scenario whose starting value is zero or unknown (an empty portfolio with no added capital).</p>}
-          <p className="t3 chart-note">Ranges aren’t distributions and aren’t weighted by likelihood. Constraints apply only to their own scenario.</p>
+          
         </div>
       </Card>
       <Card id="c-deploy">
@@ -94,7 +96,7 @@ export function CompareView({ scenarios, evals, actual, activeKey, onOpen }: { s
     </div>
 
     <Card id="c-table" flush>
-      <CardHeader pad title="Detailed comparison" sub="Each value with its change from that scenario’s own start" />
+      <CardHeader pad title="Detailed comparison" sub="Change from each scenario’s own start" info={HELP.compareBasis} />
       <div className="dt-wrap">
         <table className="dt cmp-table">
           <thead><tr>
@@ -135,7 +137,7 @@ export function CompareView({ scenarios, evals, actual, activeKey, onOpen }: { s
           </tbody>
         </table>
       </div>
-      <div className="foot"><span>Changes exclude added capital: each scenario is measured against its own start. Green = better for you, red = worse, grey = a transfer or a count.</span><span>{list.length} of {scenarios.length} scenario{scenarios.length === 1 ? '' : 's'}</span></div>
+      <div className="foot"><span /><span>{list.length} of {count(scenarios.length, 'scenario')}</span></div>
     </Card>
   </>)
 }

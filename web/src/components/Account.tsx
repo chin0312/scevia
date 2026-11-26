@@ -6,6 +6,10 @@ import { DATA_GROUPS, clearGroup, groupKeys, sceviaKeys, clearScevia, type DataG
 import { Icon } from './Icon'
 import { Menu, Modal, useToast } from './overlays'
 import { Button, Callout } from './ui'
+import { useActiveWorkspace } from '../lib/workspaceContext'
+import { PRODUCT_POLICIES } from '../lib/help'
+import { joinList } from '../lib/text'
+import type { WorkspaceMode } from '../data/workspace'
 
 export function AccountMenu({ onPrivacy }: { onPrivacy: () => void }) {
   return (
@@ -20,10 +24,15 @@ export function AccountMenu({ onPrivacy }: { onPrivacy: () => void }) {
   )
 }
 
+/** What this build can actually do. The dialog describes current behaviour from these and the selected portfolio,
+ *  so the integrated product changes the flags (and the portfolio data), not the text. */
+const CAPABILITIES = { accounts: false, serverStorage: false, readUserFiles: false } as const
+const MODE_DESC: Record<WorkspaceMode, string> = { fixture: 'fictional sample data', demo: 'real market data, virtual capital', actual: 'your records' }
+
 const GROUP_DESC: Record<DataGroup, string> = {
   preferences: 'Settings such as default scope, period, sizing, concentration limit and notification preferences.',
   scenarios: 'Saved and unsaved Scenario Lab scenarios.',
-  records: 'Sample accounts, records, decisions, corrections and import history in Portfolio.',
+  records: 'Accounts, records, decisions, corrections and import history in Portfolio.',
   notifications: 'Which notifications you’ve read, and local import activity.',
 }
 
@@ -31,6 +40,8 @@ export function PrivacyDialog({ onClose }: { onClose: () => void }) {
   const toast = useToast()
   const [confirm, setConfirm] = useState<DataGroup | 'all' | null>(null)
   const total = sceviaKeys().length
+  const { snapshot } = useActiveWorkspace()
+  const connected = (snapshot.data?.accounts ?? []).filter((x) => x.kind === 'connected')
   const run = () => {
     if (!confirm) return
     const r = confirm === 'all' ? clearScevia() : clearGroup(confirm)
@@ -40,12 +51,17 @@ export function PrivacyDialog({ onClose }: { onClose: () => void }) {
   }
   const label = confirm === 'all' ? 'everything Scevia keeps in this tab' : confirm ? DATA_GROUPS[confirm].label.toLowerCase() : ''
   return (
-    <Modal title="Data & privacy" sub="Guest workspace in this browser tab" onClose={onClose} width={600}
+    <Modal title="Data & privacy" sub={CAPABILITIES.accounts ? undefined : 'Not signed in'} onClose={onClose} width={600}
       footer={confirm
         ? <><Button variant="ghost" onClick={() => setConfirm(null)}>Cancel</Button><Button variant="primary" onClick={run}>Clear {confirm === 'all' ? 'everything' : DATA_GROUPS[confirm].label.toLowerCase()}</Button></>
         : <><Button variant="ghost" onClick={onClose}>Close</Button><Button onClick={() => setConfirm('all')} disabled={total === 0}>Clear everything…</Button></>}>
-      <p className="t2">You’re viewing a <b>sample portfolio</b>; no Polymarket, Kalshi or other account is connected and no file has been uploaded. Scevia is read-only: it never places trades, holds funds, or asks for private keys or seed phrases.</p>
-      <p className="t2">Everything below is kept only in this browser tab (session storage), isn’t sent to a server, and is removed when the tab closes. Signing in, cloud sync, export and account deletion aren’t available yet.</p>
+      <dl className="kv privacy-state">
+        <dt>Selected portfolio</dt><dd>{snapshot.summary.name} ({MODE_DESC[snapshot.summary.mode]})</dd>
+        <dt>Connected accounts</dt><dd>{snapshot.summary.mode === 'actual' ? (connected.length ? joinList(connected.map((x) => x.label)) : 'None') : 'None. This portfolio doesn’t use your accounts.'}</dd>
+        <dt>Your files</dt><dd>{CAPABILITIES.readUserFiles ? 'Imported files are kept with this portfolio.' : 'Not read. Only bundled sample files can be imported.'}</dd>
+        <dt>Stored data</dt><dd>{CAPABILITIES.serverStorage ? 'Kept with your Scevia account.' : 'Kept only in this browser tab and removed when it closes. Nothing is sent to a server.'}</dd>
+      </dl>
+      <p className="t3">{PRODUCT_POLICIES[0]}{CAPABILITIES.accounts ? '' : ' Signing in, cloud sync, export and account deletion aren’t available yet.'}</p>
       <div className="data-groups">
         {(Object.keys(DATA_GROUPS) as DataGroup[]).map((g) => { const n = groupKeys(g).length; return (
           <div key={g} className="src-row"><div><b>{DATA_GROUPS[g].label}</b><small className="t3">{GROUP_DESC[g]}</small></div>

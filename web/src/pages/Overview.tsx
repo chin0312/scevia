@@ -14,10 +14,9 @@ import { CATEGORIES, CAT_COLOR, PLATFORM_NAME } from '../data/labels'
 import type { Category, Platform } from '../data/types'
 import { PERIODS, fmtDate, tradeNet, type Period, type PlatformFilter, type Position } from '../lib/finance'
 import { fmt, fmtNative, fmtPx, int, kfmt, pct, sfmt } from '../lib/format'
-import { useActiveWorkspace } from '../lib/workspaceContext'
 import { accountName } from '../lib/useWorkspace'
 import { useFinance } from '../lib/financeContext'
-import { ReportingNote, WorkspaceLabel } from '../components/Workspace'
+import { DataIssues } from '../components/Workspace'
 import { count, joinList, phrase } from '../lib/text'
 
 const RAIL: RailSection[] = [
@@ -39,7 +38,6 @@ export default function Overview() {
   const nav = useNavigate()
   const connect = useConnect()
   const { settings } = useSettings()
-  const ws = useActiveWorkspace().snapshot, wsName = ws.summary.name, wsMode = ws.summary.mode
   const px = (v: number) => fmtPx(v, settings.priceDisplay)
   const [plat, setPlat] = useState<PlatformLabel>(settings.defaultScope === 'pm' ? 'Polymarket' : settings.defaultScope === 'ks' ? 'Kalshi' : 'All')
   const [chosen, setPeriod] = useState<Period>(settings.defaultPeriod)
@@ -87,7 +85,6 @@ export default function Overview() {
   const alloc = allocData.segments.map((x) => ({ ...x, label: segLabel(allocBy, x.key), color: segColor(allocBy, x.key) }))
   const allocTotal = allocData.total
   const hot = alloc.find((x) => x.key === hotSlice)
-  const singleHeavy = allocBy === 'Category' && !active ? alloc.find((a) => a.positions.length === 1 && a.share > 0.2) : undefined
   const select = (key: string) => setSel((cur) => (cur && cur.by === allocBy && cur.key === key ? null : { by: allocBy, key }))
   // Programmatic jumps go through the section rail so its active entry follows (and the target is focused + highlighted).
   const showInHoldings = () => { setHoldTab('Open positions'); scrollToSection('holdings') }
@@ -135,7 +132,7 @@ export default function Overview() {
       </SectionRail>
 
       <main>
-        <PageHead caption={f === 'all' ? ws.summary.name : `${ws.summary.name}, ${plat} only`} title="Portfolio overview"
+        <PageHead caption={f === 'all' ? undefined : `${plat} only`} title="Portfolio overview"
           actions={<><Pills label="Platform" options={PLATFORM_FILTER} value={plat} onChange={setPlat} counts={counts} /></>} />
 
         <div className="grid g-21">
@@ -153,11 +150,7 @@ export default function Overview() {
                     <Delta value={periodChange}>{periodChange >= 0 ? '▲' : '▼'} {sfmt(periodChange, 2)}</Delta>
                     <span>{period} net P&amp;L. All time {sfmt(acct.netPnl, 2)} on {fmt(acct.netDeposits)} deposited.</span>
                   </div>
-                  {chartTab === 'Value' && <div className="asof" aria-label="Valuation basis">
-                    <span>Prices as of <b>{fmtDate(TODAY, { month: 'short', day: 'numeric', year: 'numeric' })}</b></span>
-                    {(['pm', 'ks'] as Platform[]).filter((p) => (f === 'all' || f === p) && accountsOn(p).length).map((p) => { const src = sourceOf(p), d = accountsOn(p)[0]?.denomination ?? 'USD'; return <span key={p}>{PLATFORM_NAME[p]} <b>{fmtNative(account(p).totalValue, d)}</b>{src.stale ? <>{' '}<span className="stale">(records from {fmtDate(src.asOf)})</span></> : ''}</span> })}
-                    <ReportingNote denominations={(['pm', 'ks'] as Platform[]).filter((p) => f === 'all' || f === p).flatMap((p) => accountsOn(p).map((a) => a.denomination))} />
-                  </div>}
+                  {chartTab === 'Value' && <DataIssues stale={(['pm', 'ks'] as Platform[]).filter((p) => (f === 'all' || f === p) && accountsOn(p).length && sourceOf(p).stale).map((p) => ({ label: PLATFORM_NAME[p], asOf: sourceOf(p).asOf }))} denominations={(['pm', 'ks'] as Platform[]).filter((p) => f === 'all' || f === p).flatMap((p) => accountsOn(p).map((a) => a.denomination))} />}
                 </div>
                 {chartTab === 'Value' && <div style={{ marginTop: 'var(--space-6)' }}><Legend items={[{ label: 'Portfolio value', color: 'var(--color-gain-fg)', kind: 'ln' }, { label: 'Net deposits', kind: 'dash' }]} /></div>}
               </div>
@@ -223,24 +216,20 @@ export default function Overview() {
                 )}
                 {shownBy && selSeg && (
                   <div className="seg-detail">
-                    <div className="row"><b>{segLabel(shownBy.by, shownBy.key)}</b><span className="t3">· {selSeg.positions.length} position{selSeg.positions.length > 1 ? 's' : ''}</span><span className="spacer" /><button type="button" className="link" onClick={() => setSel(null)}>Clear</button></div>
+                    <div className="row"><b>{segLabel(shownBy.by, shownBy.key)}</b><span className="t3">{count(selSeg.positions.length, 'position')}</span><span className="spacer" /><button type="button" className="link" onClick={() => setSel(null)}>Clear</button></div>
                     {selSeg.positions.slice(0, 3).map(({ p, shareOfSegment }) => (
                       <button type="button" key={p.id} className="seg-pos" onClick={() => openPos(p)}><span>{p.market}</span><span className="t3" title={`Share of ${segLabel(shownBy.by, shownBy.key)}`}>{pct(shareOfSegment * 100, 0)}</span></button>
                     ))}
-                    <p className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>Percentages are shares of {segLabel(shownBy.by, shownBy.key)}, which is {fmt(selSeg.value)} or {pct(selSeg.share * 100, 0)} of open value.</p>
-                    {selSeg.positions.length === 1 && <p className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>A single position: its whole value rides on one contract.</p>}
                     <Button size="sm" onClick={showInHoldings}>{selSeg.positions.length > 3 ? `Show all ${selSeg.positions.length} in Holdings` : 'Show in Holdings'}</Button>
                   </div>
                 )}
-                {!active && singleHeavy && <div style={{ marginTop: 'var(--space-3)' }}><Callout>{singleHeavy.label} is one position: <b>{pct(singleHeavy.share * 100, 0)}</b> of open value rides on a single contract.</Callout></div>}
-                {!active && !singleHeavy && <p className="t3" style={{ fontSize: 'var(--font-size-xs)', marginTop: 'var(--space-2)' }}>Select a segment to see its positions and filter Holdings.</p>}
               </div>
               </>}
             </div>
           </Card>
 
           <Card id="upcoming">
-            <CardHeader title="Upcoming resolutions" sub="Next six events and the capital at stake" right={<Link className="btn btn-sm btn-ghost" to="/risk#calendar" title="Open the resolution calendar in Risk">Full calendar →</Link>} />
+            <CardHeader title="Upcoming resolutions" right={<Link className="btn btn-sm btn-ghost" to="/risk#calendar" title="Open the resolution calendar in Risk">Full calendar →</Link>} />
             <div className="card-b">
               {exps.length === 0 && <div className="empty"><p>No open positions to resolve.</p></div>}
               {[...exps].sort((a, b) => a.days - b.days).slice(0, 6).map((e) => (
@@ -254,18 +243,17 @@ export default function Overview() {
           </Card>
 
           <Card id="coverage">
-            <CardHeader title="Data coverage" sub="What these numbers are based on" />
+            <CardHeader title="Data coverage" />
             <div className="card-b">
-              <p className="t3" style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--space-2)' }}>{wsName}{wsMode === 'fixture' ? '. No account is connected.' : ''}</p>
               {(['pm', 'ks'] as Platform[]).filter((p) => f === 'all' || p === f).map((p) => {
                 const c = coverage(p), src = sourceOf(p)
-                return <div className="cov" key={p}><PlatformBadge p={p} /><span>{accountsOn(p).length > 0 && `${joinList(accountsOn(p).map((a) => accountName(a.id)))}: `}{count(c.fills, 'fill')}, {count(c.settlements, 'settlement')}</span><span className={src.stale ? 'stale' : 't3'} title={src.stale ? 'Older than 24 hours' : undefined}>{src.stale ? 'Out of date, ' : ''}{fmtDate(src.asOf)}</span></div>
+                return <div className="cov" key={p}><PlatformBadge p={p} /><span>{accountsOn(p).length > 0 && `${joinList(accountsOn(p).map((a) => accountName(a.id)))}: `}{accountsOn(p).length > 0 && `${fmtNative(account(p).totalValue, accountsOn(p)[0].denomination)}, `}{count(c.fills, 'fill')}, {count(c.settlements, 'settlement')}</span><span className={src.stale ? 'stale' : 't3'} title={src.stale ? 'Older than 24 hours' : undefined}>{src.stale ? 'Out of date, ' : ''}{fmtDate(src.asOf)}</span></div>
               })}
               {(() => { const ps = (['pm', 'ks'] as Platform[]).filter((p) => f === 'all' || p === f).map(coverage); const t = (k: keyof (typeof ps)[number]) => ps.reduce((a, c) => a + c[k], 0)
                 return <div className="cov-mini"><div><b>{t('open')}</b>open positions</div><div><b>{t('fills')}</b>fills</div><div><b>{t('settlements')}</b>settlements</div><div><b>{t('feeEstimates')}</b>fee estimates</div></div> })()}
               <Link className="link" style={{ display: 'inline-block', marginTop: 'var(--space-3)' }} to="/portfolio/coverage">Full data coverage →</Link>
               {feeEstimateTrades.length > 0 && <div style={{ marginTop: 'var(--space-3)' }}>
-                <Callout tone="warn">{feeEstimateTrades.length} Kalshi settlements have no fee detail, so their fees ({fmt(feeEstimateTrades.reduce((a, t) => a + t.fees, 0), 2)} total) are estimates. <button type="button" className="link" onClick={() => setFeeReview(true)}>Review</button></Callout>
+                <Callout tone="warn">{count(feeEstimateTrades.length, 'settlement')} on {joinList([...new Set(feeEstimateTrades.map((t) => PLATFORM_NAME[t.platform]))])} {feeEstimateTrades.length === 1 ? 'has' : 'have'} no fee detail, so their fees ({fmt(feeEstimateTrades.reduce((a, t) => a + t.fees, 0), 2)} total) are estimates. <button type="button" className="link" onClick={() => setFeeReview(true)}>Review</button></Callout>
               </div>}
             </div>
           </Card>
@@ -316,7 +304,7 @@ export default function Overview() {
                   })}
                 </tbody>
               </table></div>
-              <div className="foot"><span>Mark = last traded price on the platform. Values exclude estimated exit fees. Weight = share of all open-position market value in {scope}, also when Holdings are filtered. Click a row or press Enter for fills and payoff.</span><span>Sorted by {sort.key} {sort.dir === 1 ? '↑' : '↓'}</span></div>
+              <div className="foot"><span /><span>Sorted by {sort.key} {sort.dir === 1 ? '↑' : '↓'}</span></div>
             </>
           )}
           {holdTab === 'Resolved' && (
@@ -338,7 +326,6 @@ export default function Overview() {
           )}
         </Card>
 
-        <div className="footer-note"><span>Scevia is read-only. It never places trades or holds funds. Figures are for analysis, not investment advice.</span><span><WorkspaceLabel /></span></div>
       </main>
 
       {feeReview && (

@@ -264,7 +264,7 @@ export default function ScenarioLab() {
         ) : (<>
           <section className="page-head anchor lab-head" id="summary">
             <div style={{ minWidth: 0 }}>
-              <div className="caps"><span className="accent">Scenario Lab</span> <span className="t3">{SC.statusLabel(active)}</span></div>
+              <div className="caps"><span className="accent">Scenario Lab</span> <span className="t3">{SC.statusLabel(active)}</span> <MarketDataLabel /></div>
               {renaming
                 ? <input className="inline-edit" aria-label="Scenario name" autoFocus defaultValue={active.name} onBlur={(e) => { const v = e.target.value; update((s) => SC.rename(s, v)); setRenaming(false) }} onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') setRenaming(false) }} />
                 : <h1 className="scn-title">{active.name}<button type="button" className="edit-btn" aria-label="Rename scenario" onClick={() => setRenaming(true)}><Icon name="edit" size={16} /></button></h1>}
@@ -302,7 +302,6 @@ export default function ScenarioLab() {
           )}
           {(active.baseline !== 'portfolio' || !!active.frozen) && view === 'Analyze' && <AnalyzeView E={E} onEdit={editRow} />}
           {(active.baseline !== 'portfolio' || !!active.frozen) && view === 'Compare' && <CompareView key={activeKey} scenarios={scenarios} evals={evals} actual={actual} activeKey={activeKey} onOpen={(k) => open(k, 'Compare')} />}
-          <div className="footer-note"><span>Scenario results show what happens under the outcomes and prices you choose. They aren’t forecasts or recommendations.</span><span><MarketDataLabel /></span></div>
         </>)}
       </main>
 
@@ -348,7 +347,7 @@ export default function ScenarioLab() {
       {confirmDelete && active && (
         <Modal title={`Delete “${active.name}”?`} sub="This can’t be undone" onClose={() => setConfirmDelete(false)}
           footer={<><Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancel</Button><Button variant="primary" onClick={remove}>Delete scenario</Button></>}>
-          <p className="t2">This removes the scenario and its {active.adjs.length} position{active.adjs.length === 1 ? '' : 's'}. Your actual portfolio isn’t affected.</p>
+          <p className="t2">This removes the scenario and its {count(active.adjs.length, 'position')}.</p>
         </Modal>
       )}
     </div>

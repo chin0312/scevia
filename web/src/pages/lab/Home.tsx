@@ -38,14 +38,14 @@ export function LabHome({ hasPortfolio, scenarios, evals, onCurrent, onScratch, 
   return (
     <div className="lab-home">
       <section className="page-head anchor" id="summary">
-        <div><h1>Scenario Lab</h1><p className="t2 lab-intro">Test portfolio changes and hypothetical trades with virtual funds. Scenario Lab never places trades or changes your accounts.</p></div>
+        <div><div className="head-row"><h1>Scenario Lab</h1><MarketDataLabel /></div><p className="t2 lab-intro">Build, analyze and compare hypothetical portfolios.</p></div>
       </section>
 
       <div className="start-grid three">
         <section className="start-card" aria-labelledby="start-current">
           <div className="start-ic"><Icon name="layers" size={18} /></div>
           <h2 id="start-current">Modify your current portfolio</h2>
-          <p className="t2">Adjust existing positions or add new ones, and see how the changes affect your portfolio.</p>
+          <p className="t2">Adjust existing positions and see how the changes affect your portfolio.</p>
           {hasPortfolio ? <>
           <dl className="start-facts">
             <div><dt>Portfolio value</dt><dd>{fmt(a.totalValue)}</dd></div>
@@ -53,14 +53,14 @@ export function LabHome({ hasPortfolio, scenarios, evals, onCurrent, onScratch, 
             <div><dt>Positions</dt><dd>{POSITIONS.length}{' '}<small className="t3">in {count(events, 'event')}</small></dd></div>
           </dl>
           <div className="start-accts">{ACCOUNTS.map((x) => <span key={x.id} className="row"><PlatformBadge p={x.venue} size={16} />{accountName(x.id)} on {PLATFORM_NAME[x.venue]}</span>)}</div>
-          <small className="t3">Holdings as of {fmtDate(TODAY)}. Prices are saved when a scenario starts, and your actual holdings never change.</small>
+          <small className="t3">Holdings as of {fmtDate(TODAY)}</small>
           </> : <p className="unavailable" role="status">{ws.status === 'loading' ? `${ws.summary.name} is still loading.` : `${ws.summary.name} has no portfolio data right now.`} Build from scratch and Historical Replay don’t need a portfolio.</p>}
           <Button variant="primary" icon="layers" onClick={onCurrent} disabled={!hasPortfolio}>Modify current portfolio</Button>
         </section>
         <section className="start-card" aria-labelledby="start-scratch">
           <div className="start-ic"><Icon name="plus" size={18} /></div>
           <h2 id="start-scratch">Build from scratch</h2>
-          <p className="t2">Create a hypothetical portfolio using virtual funds. No connected account is needed.</p>
+          <p className="t2">Create a hypothetical portfolio with virtual funds.</p>
           <fieldset className="setup-f"><legend className="l">Starting capital <span className="t3">(optional)</span></legend>
             <div className="row" style={{ gap: 'var(--space-2)', flexWrap: 'wrap' }}>
               {(['pm', 'ks'] as Platform[]).map((p) => (
@@ -68,14 +68,14 @@ export function LabHome({ hasPortfolio, scenarios, evals, onCurrent, onScratch, 
                   <input className="num-input" inputMode="decimal" placeholder={`${PLATFORM_NAME[p]} ${DEFAULT_ASSET[p]}`} aria-label={`Starting capital on ${PLATFORM_NAME[p]}`} value={cap[p]} aria-invalid={parsed[p].state === 'invalid'} onChange={(e) => setCap((c) => ({ ...c, [p]: e.target.value }))} /></label>
               ))}
             </div>
-            <small className={cx(bad ? 'loss' : 't3')}>{bad ? 'Enter amounts such as 5000 or 5,000.50.' : 'Virtual funds for each platform. You can change them later.'}</small>
+            {bad && <small className="loss">Enter amounts such as 5000 or 5,000.50.</small>}
           </fieldset>
           <Button icon="plus" disabled={bad} onClick={() => onScratch(funding)}>Build from scratch</Button>
         </section>
         <section className="start-card" aria-labelledby="start-replay">
           <div className="start-ic"><Icon name="clock" size={18} /></div>
           <h2 id="start-replay">Historical Replay</h2>
-          <p className="t2">Explore how hypothetical trades would have performed in past markets. Positions settle at each market’s recorded outcome.</p>
+          <p className="t2">Test hypothetical trades against past markets and their recorded outcomes.</p>
           <dl className="start-facts">
             <div><dt>Starting capital</dt><dd>Virtual funds</dd></div>
             <div><dt>Entry and exit prices</dt><dd>Set by you</dd></div>
@@ -87,7 +87,7 @@ export function LabHome({ hasPortfolio, scenarios, evals, onCurrent, onScratch, 
 
       <section className="anchor" id="saved" aria-labelledby="saved-h">
         <div className="home-h"><h3 id="saved-h">Your scenarios</h3>{scenarios.length + replays.length > 0 && <small className="t3">{scenarios.length + replays.length} in this browser tab</small>}</div>
-        {scenarios.length + replays.length === 0 ? <p className="t3 home-empty">No scenarios yet. They appear here once you start one, and stay in this browser tab.</p> : (
+        {scenarios.length + replays.length === 0 ? <p className="t3 home-empty">No scenarios yet.</p> : (
           <div className="scn-cards">
             {scenarios.map((s) => {
               const e = evals[s.key], st = SC.status(s)
@@ -118,9 +118,7 @@ export function LabHome({ hasPortfolio, scenarios, evals, onCurrent, onScratch, 
       {EXAMPLES.some((ex) => ex.adjs(F)) && <section className="home-ex" aria-labelledby="ex-h">
         <h3 id="ex-h" className="caps">Or explore an example</h3>
         <div className="row" style={{ flexWrap: 'wrap' }}>{EXAMPLES.map((ex, i) => ex.adjs(F) && <Button key={ex.name} size="sm" variant="ghost" icon="flask" onClick={() => onExample(i)}>{ex.name}</Button>)}</div>
-        <small className="t3">Examples start from your current portfolio and are only added if you open one.</small>
       </section>}
-      <div className="footer-note"><span>Scenario results show what happens under the outcomes and prices you choose. They aren’t forecasts or recommendations.</span><span><MarketDataLabel /></span></div>
     </div>
   )
 }

@@ -1,5 +1,7 @@
 # Calculation methodology
 
+In the app, the short version of each definition is in `web/src/lib/help.ts`: info tips on figures and Help › Methodology (by concept: portfolio valuation, performance, risk, Scenario Lab, Historical Replay, data coverage, currency conversion) use the same text. This document has the full methods. Keep both in step when a calculation changes.
+
 How every figure in Scevia is derived. The implementation is `web/src/lib/finance.ts`; tests are in `web/src/lib/*.test.ts`. If this document and the code disagree, the code is wrong or this file is stale, so fix one of them in the same change.
 
 ## Data model

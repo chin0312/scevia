@@ -194,5 +194,4 @@ table.dt { width: 100%; border-collapse: collapse; }
 .field input, .field .v { width: 100%; border: 0; outline: 0; background: transparent; color: var(--color-text-primary); font: inherit; font-size: var(--font-size-md); font-weight: var(--font-weight-medium); }
 .slider { width: 100%; accent-color: var(--color-accent-solid); cursor: pointer; height: 20px; }
 
-.footer-note { display: flex; justify-content: space-between; gap: var(--space-4); margin-top: var(--space-8); padding-top: var(--space-4); border-top: 1px solid var(--color-border-subtle); font-size: var(--font-size-xs); color: var(--color-text-tertiary); }
 .anchor { scroll-margin-top: 84px; }

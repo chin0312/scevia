@@ -1,7 +1,8 @@
 /* Scenario setup. Essentials (starting portfolio, added capital) sit at the top of Build; less frequent assumptions
    (fees, hypothetical settlement constraints) and the methodology live in a drawer, summarized in one line. */
 import { useEffect, useState } from 'react'
-import { Drawer } from '../../components/overlays'
+import { Drawer, InfoTip } from '../../components/overlays'
+import { HELP } from '../../lib/help'
 import { Button, Card, Chip, PlatformBadge, Seg, cx } from '../../components/ui'
 import { PLATFORM_NAME } from '../../data/labels'
 import { PROVENANCE_TEXT, REL_TEXT } from '../../data/relations'
@@ -42,13 +43,12 @@ export function StartSetup({ s, E, canPortfolio = true, onChange, onBaseline }: 
       <div className="card-b start-setup">
         <fieldset className="setup-f"><legend className="l">Starting portfolio</legend>
           <Seg label="Starting portfolio" options={['Current portfolio', 'Empty portfolio'] as const} value={s.baseline === 'scratch' ? 'Empty portfolio' : 'Current portfolio'} disabled={(o) => (o === 'Current portfolio' && !canPortfolio && s.baseline === 'scratch' ? 'No portfolio data to start from in the selected portfolio' : null)} onChange={(v) => onBaseline(v === 'Empty portfolio' ? 'scratch' : 'portfolio')} />
-          <small className="t3">{s.baseline === 'scratch' ? 'No holdings, cash or history.' : `Your holdings and cash, worth ${fmt(E.B.totalValue ?? 0)}${E.funding ? ' with added capital' : ''}.`}{heldRows > 0 && s.baseline === 'scratch' ? ` ${heldRows} older position${heldRows > 1 ? 's' : ''} can’t be used from scratch.` : ''}</small>
+          <small className="t3">{s.baseline === 'scratch' ? 'No holdings, cash or history.' : E.B.totalValue == null ? 'Your holdings and cash. Value unavailable.' : `Your holdings and cash, worth ${fmt(E.B.totalValue)}${E.funding ? ' with added capital' : ''}.`}{heldRows > 0 && s.baseline === 'scratch' ? ` ${heldRows} older position${heldRows > 1 ? 's' : ''} can’t be used from scratch.` : ''}</small>
         </fieldset>
         <fieldset className="setup-f"><legend className="l">{s.baseline === 'scratch' ? 'Virtual starting capital' : 'Added virtual capital'}</legend>
           <div className="row" style={{ gap: 'var(--space-2)', flexWrap: 'wrap' }}>
             {(['pm', 'ks'] as Platform[]).map((p) => <FundingInput key={p} p={p} value={s.funding[p]} onChange={(v) => onChange({ funding: { ...s.funding, [p]: v } })} />)}
           </div>
-          <small className="t3">Simulated money for this scenario. It isn’t a deposit, it never counts as a gain, and it stays on its platform.</small>
         </fieldset>
       </div>
     </Card>
@@ -76,8 +76,8 @@ function FeeSetup({ value, onChange }: { value: FeeAssumption; onChange: (v: Fee
       <Seg label="Trading fees" options={['Provider estimate', 'Custom', 'Excluded'] as const} value={mode}
         onChange={(v) => onChange(v === 'Excluded' ? { mode: 'excluded' } : v === 'Custom' ? { mode: 'custom', pct: parsed.state === 'ok' ? parsed.value : Number.NaN } : DEFAULT_FEES)} />
       {value.mode === 'provider' && <>
-        <Seg label="Assumed order role" options={['Taker', 'Maker'] as const} value={value.role === 'maker' ? 'Maker' : 'Taker'} onChange={(v) => onChange({ mode: 'provider', role: v === 'Maker' ? 'maker' : 'taker' })} />
-        <small className="t3">Uses each market’s fee parameters. Taker: your order fills against a resting one. Maker: your resting order is filled. Most standard markets charge makers nothing. Markets without parameters show the fee as unavailable, never $0.</small>
+        <span className="row"><Seg label="Assumed order role" options={['Taker', 'Maker'] as const} value={value.role === 'maker' ? 'Maker' : 'Taker'} onChange={(v) => onChange({ mode: 'provider', role: v === 'Maker' ? 'maker' : 'taker' })} /><InfoTip text={HELP.feeRole} /></span>
+        <small className="t3">Markets without fee parameters show fees as unavailable.</small>
       </>}
       {value.mode === 'custom' && <>
         <label className="fund"><input className="num-input" inputMode="decimal" aria-label="Custom fee, % of notional" placeholder="% of notional" value={pctText} aria-invalid={parsed.state === 'invalid' || (parsed.state === 'ok' && !validFeePct(parsed.value))} onChange={(e) => setPct(e.target.value)} /><span className="t3">% of notional</span></label>
@@ -100,14 +100,14 @@ function Constraints({ s, E, onChange }: { s: Scenario; E: Evaluation; onChange:
   const stale = cs.filter((c) => !events.some((e) => e.id === c.a) || !events.some((e) => e.id === c.b))
   return (
     <fieldset className="setup-f drawer-sec"><legend className="l">Settlement constraints <span className="t3">(optional)</span></legend>
-      <small className="t3">Say which joint outcomes can’t happen under the markets’ settlement rules. It changes this scenario’s best/worst cases only. It isn’t a correlation or a probability, and never changes Risk or other scenarios.</small>
+      <small className="t3">Changes this scenario’s best and worst cases only.</small>
       {verified.map((r) => <div className="list-row" key={`${r.a}-${r.b}`}><span>{title(r.a)} × {title(r.b)}</span><span className="r row"><Chip tone={REL_TEXT[r.cls].tone}>{REL_TEXT[r.cls].label}</Chip><small className="t3">{PROVENANCE_TEXT.verified}</small></span></div>)}
       {cs.map((c, i) => (
         <div className="list-row" key={`${c.a}-${c.b}`}><span>{title(c.a)} × {title(c.b)}{stale.includes(c) && <small className="stale"> (not in this portfolio, no effect)</small>}</span>
           <span className="r row"><Chip tone={REL_TEXT[c.cls].tone}>{REL_TEXT[c.cls].label}</Chip><small className="t3">{PROVENANCE_TEXT.hypothetical}</small>
             <button type="button" className="link" onClick={() => onChange(cs.filter((_, k) => k !== i))} aria-label={`Remove constraint ${title(c.a)} × ${title(c.b)}`}>Remove</button></span></div>
       ))}
-      {!cs.length && !verified.length && <small className="t3">None: every combination of different events is possible.</small>}
+      {!cs.length && !verified.length && <small className="t3">None</small>}
       {events.length < 2 ? <small className="t3">Needs at least two events in this scenario.</small> : (
         <div className="adv-add">
           <select className="select" aria-label="Constraint: first event" value={a} onChange={(e) => setA(e.target.value)}><option value="">First event…</option>{events.filter((e) => e.id !== b).map((e) => <option key={e.id} value={e.id}>{e.title}</option>)}</select>
@@ -128,9 +128,9 @@ function Methodology({ baseline }: { baseline: Baseline }) {
       <summary><span>Methodology</span><span className="t3">how results are calculated</span></summary>
       <div className="adv-b t2 method">
         <p>Contracts settle at $1 or $0. Your assumed price applies to the whole quantity. Slippage and order-book depth aren’t modelled. Quantities use a 0.01-share step. Platform lot sizes aren’t enforced.</p>
-        <p>Cost basis is a weighted average including acquisition fees. Sale proceeds are after fees. Cash stays on its venue. Added capital is contributed capital, never a gain.</p>
-        <p>Provider fee estimates follow each market’s parameters (Polymarket charges takers rate × p × (1 − p). Kalshi charges 0.07 × p × (1 − p), rounded up to the cent). In this build the parameters are sample values.</p>
-        <p>{baseline === 'portfolio' ? 'Starts from the sample portfolio’s holdings and cash at their reference marks.' : 'Starts empty: no holdings, cash or history from your accounts.'} Best and worst cases enumerate every feasible joint outcome (up to 16 events); none is weighted by likelihood.</p>
+        <p>Cost basis is a weighted average including acquisition fees. Sale proceeds are after fees. Cash stays on its platform. Added capital is contributed capital, never a gain.</p>
+        <p>Provider fee estimates follow each market’s published fee parameters and the assumed order role. Actual fees can differ.</p>
+        <p>{baseline === 'portfolio' ? 'Starts from the selected portfolio’s holdings and cash at their reference prices.' : 'Starts empty: no holdings, cash or history from your accounts.'} Best and worst cases enumerate every feasible joint outcome (up to 16 events); none is weighted by likelihood.</p>
       </div>
     </details>
   )

@@ -21,6 +21,8 @@ import { fmt, fmtNative, kfmt, pct, qty, sfmt } from '../lib/format'
 import { useReporting } from '../lib/reporting'
 import { assetLabel } from '../lib/fx'
 import { MarketDataLabel } from '../components/Workspace'
+import { InfoTip } from '../components/overlays'
+import { HELP } from '../lib/help'
 import { count, joinList, sentences } from '../lib/text'
 import { BASIS_LABEL } from '../lib/history'
 import type { CatalogEvent, CatalogMarket, LinkResolution } from '../lib/markets'
@@ -103,9 +105,9 @@ export default function ReplayPage() {
     <div className="shell">
       <SectionRail title="Historical Replay" sections={[{ id: 'rp-start', label: 'Start', icon: 'clock' }]} />
       <main className="lab-main">
-        <section className="page-head anchor" id="rp-start"><div><h1>Historical Replay</h1></div></section>
+        <section className="page-head anchor" id="rp-start"><div><div className="head-row"><h1>Historical Replay</h1><MarketDataLabel /></div></div></section>
         <Card><div className="card-b" style={{ display: 'grid', gap: 'var(--space-3)' }}>
-          <p className="t2">Choose a past period, set starting capital in virtual funds and add markets that traded then. Positions settle at each market’s recorded outcome. No connected account is needed.</p>
+          <p className="t2">Test hypothetical trades over a past period, in markets that traded then.</p>
           <div className="row" style={{ gap: 'var(--space-2)' }}><Button variant="primary" icon="clock" onClick={create}>Start a historical replay</Button><Link className="link" to="/scenario-lab">Back to Scenario Lab</Link></div>
         </div></Card>
       </main>
@@ -130,7 +132,7 @@ export default function ReplayPage() {
       <main className="lab-main">
         <section className="page-head anchor lab-head" id="summary">
           <div style={{ minWidth: 0 }}>
-            <div className="caps"><span className="accent">Historical Replay</span></div>
+            <div className="caps"><span className="accent">Historical Replay</span> <MarketDataLabel /></div>
             {renaming
               ? <input className="inline-edit" aria-label="Replay name" autoFocus defaultValue={active.name} onBlur={(e) => { const v = e.target.value.trim(); if (v) update((r) => ({ ...r, name: v.slice(0, 80) })); setRenaming(false) }} onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') setRenaming(false) }} />
               : <h1 className="scn-title">{active.name}<button type="button" className="edit-btn" aria-label="Rename replay" onClick={() => setRenaming(true)}><Icon name="edit" size={16} /></button></h1>}
@@ -154,14 +156,13 @@ export default function ReplayPage() {
         {view === 'Build' && <BuildReplay r={active} issues={issues!} result={result} onChange={update} onAdd={() => setAdding(true)} onAnalyze={() => { setView('Analyze'); window.scrollTo(0, 0) }} valid={valid} />}
         {view === 'Analyze' && (result ? <AnalyzeReplay res={result} onChange={update} currency={currency} latest={capture()} /> : <Callout tone="warn" icon="alert">This replay can’t be analyzed yet: {active.positions.length === 0 ? 'add at least one position.' : `${issueCount} input${issueCount === 1 ? '' : 's'} in Build need${issueCount === 1 ? 's' : ''} attention.`} <button type="button" className="link" onClick={() => setView('Build')}>Go to Build</button></Callout>)}
         {view === 'Compare' && <CompareReplays replays={replays} today={today} activeKey={active.key} />}
-        <div className="footer-note"><span>A replay shows what these trades would have done. It isn’t your actual performance or a tested strategy.</span><span><MarketDataLabel /></span></div>
       </main>
 
       {adding && <AddReplayMarkets r={active} onClose={() => setAdding(false)} onAdd={(ps, buckets) => { update((r) => ({ ...r, buckets: [...r.buckets, ...buckets.filter((b) => !r.buckets.some((x) => x.id === b.id))], positions: [...r.positions, ...ps].slice(0, MAX_REPLAY_POSITIONS) })); setAdding(false); toast(`${ps.length} position${ps.length === 1 ? '' : 's'} added`) }} />}
       {confirmDelete && (
         <Modal title="Delete this replay?" sub={active.name} onClose={() => setConfirmDelete(false)}
           footer={<><Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancel</Button><Button variant="primary" onClick={() => { setReplays((rs) => rs.filter((r) => r.key !== active.key)); setActiveKey(null); setConfirmDelete(false); toast('Replay deleted') }}>Delete replay</Button></>}>
-          <p className="t2">It’s removed from this browser tab. Other replays and scenarios aren’t affected.</p>
+          <p className="t2">It’s removed from this browser tab.</p>
         </Modal>
       )}
     </div>
@@ -174,7 +175,7 @@ function FundingCard({ r, issues, result, onChange }: { r: Replay; issues: Retur
   const missing = (['pm', 'ks'] as Platform[]).flatMap((v) => ASSETS[v].map((d) => ({ venue: v, d }))).filter(({ venue, d }) => !r.buckets.some((b) => b.id === bucketId(venue, d)))
   return (
     <Card id="rp-setup">
-      <CardHeader title="Period and starting capital" sub="Virtual funds for each platform and settlement currency. They don’t move between each other." />
+      <CardHeader title="Period and starting capital" sub="Virtual funds by platform and settlement currency" />
       <div className="card-b" style={{ display: 'grid', gap: 'var(--space-4)' }}>
         <div className="rp-period">
           <label>Start<input className="rp-in date" type="date" max={r.end} value={r.start} aria-invalid={!!issues.period} onChange={(e) => onChange((x) => ({ ...x, start: e.target.value }))} /></label>
@@ -183,7 +184,7 @@ function FundingCard({ r, issues, result, onChange }: { r: Replay; issues: Retur
         </div>
         {issues.period && <small className="rp-err" role="alert">{issues.period}</small>}
         <div className="rp-buckets" role="group" aria-label="Virtual funding">
-          {r.buckets.length === 0 && <p className="t3">No virtual funds yet. They’re added when you add a market, or you can add them here.</p>}
+          {r.buckets.length === 0 && <p className="t3">No virtual funds yet.</p>}
           {r.buckets.map((b) => {
             const used = r.positions.some((p) => p.bucketId === b.id), res = result?.buckets.find((x) => x.bucket.id === b.id)
             return (
@@ -211,7 +212,7 @@ function BuildReplay({ r, issues, result, onChange, onAdd, onAnalyze, valid }: {
   const setPos = (id: string, patch: Partial<ReplayPosition>) => onChange((x) => ({ ...x, positions: x.positions.map((p) => (p.id === id ? { ...p, ...patch } : p)) }))
   const another = (p: ReplayPosition) => onChange((x) => (x.positions.length >= MAX_REPLAY_POSITIONS ? x : { ...x, positions: [...x.positions, { ...p, id: `rp${Date.now().toString(36)}`, entryPrice: null, size: { ...p.size, value: null }, exit: { kind: 'settle' } }] }))
   return (<>
-    <p className="t3 rp-note"><Icon name="info" size={14} /> You choose these markets knowing how they turned out. Results use the prices you enter, which may not have been available at the time.</p>
+    <p className="t3 rp-note">Hindsight analysis. Entry and exit prices are your assumptions, not recorded fills. <InfoTip text={HELP.replayExecution} /></p>
     <FundingCard r={r} issues={issues} result={result} onChange={onChange} />
     <Card id="rp-positions">
       <CardHeader title="Positions" sub={`${r.positions.length} of up to ${MAX_REPLAY_POSITIONS}`} right={<Button icon="plus" onClick={onAdd} disabled={r.positions.length >= MAX_REPLAY_POSITIONS}>Add markets…</Button>} />
@@ -345,7 +346,6 @@ function AddReplayMarkets({ r, onClose, onAdd }: { r: Replay; onClose: () => voi
           )}
       </div>
       {picks.length > 0 && <div className="addpos-basket" aria-label="Selected positions">{picks.map((p) => <span key={p.key} className="chip">{p.m.marketTitle} {p.outcome} ({assetLabel(p.m.denomination ?? '')})<button type="button" className="link" aria-label={`Remove ${p.m.marketTitle} ${p.outcome}`} onClick={() => setPicks((ps) => ps.filter((x) => x.key !== p.key))}>×</button></span>)}</div>}
-      <small className="t3" style={{ display: 'block', marginTop: 'var(--space-3)' }}>Each position uses virtual funds in its market’s settlement currency. They’re added if the replay has none. Resolved markets can be replayed but not traded today.</small>
     </Modal>
   )
 }
@@ -357,17 +357,18 @@ function FrozenRatesLine({ r, latest, needed, onChange }: { r: Replay; latest: F
   const differs = !r.refRates || assets.some((a) => r.refRates![a] !== latest[a])
   return (
     <p className="t3 rp-frozen" role="status">
-      {r.refRates ? <>Combined using rates saved on {fmtDate(r.refRates.capturedAt.slice(0, 10))}: {assets.map((a) => `1 ${assetLabel(a)} = ${r.refRates![a] ?? 'unavailable'} USD`).join(', ')}. Sample rates.</> : <>No rates were saved with this replay, so the combined total is unavailable.</>}
+      {r.refRates ? <>Combined using rates saved on {fmtDate(r.refRates.capturedAt.slice(0, 10))}: {assets.map((a) => `1 ${assetLabel(a)} = ${r.refRates![a] ?? 'unavailable'} USD`).join(', ')}.</> : <>No rates were saved with this replay, so the combined total is unavailable.</>}
       {differs && <> <button type="button" className="link" onClick={() => onChange((x) => ({ ...x, refRates: latest }))}>{r.refRates ? 'Use latest rates' : 'Save current rates'}</button></>}
     </p>
   )
 }
 
-function RatesEditor({ r, onChange, needed }: { r: Replay; onChange: (fn: (r: Replay) => Replay) => void; needed: Denomination[] }) {
+function RatesEditor({ r, onChange, needed, latest }: { r: Replay; onChange: (fn: (r: Replay) => Replay) => void; needed: Denomination[]; latest: FrozenRates }) {
   return (
     <details className="adv rp-rates">
-      <summary>Use your own rates</summary>
-      <p className="t3">By default each stablecoin uses its reference rate. Your own rate is saved with this replay and used for every date. It never moves funds.</p>
+      <summary>Exchange rates</summary>
+      {r.refRates && <FrozenRatesLine r={r} latest={latest} needed={needed} onChange={onChange} />}
+      <p className="t3">Your own rates are saved with this replay and used for every date.</p>
       <div className="rp-grid">
         {(['USDC', 'PUSD'] as const).filter((d) => needed.includes(d)).map((d) => (
           <label key={d} className="rp-field">USD per 1 {d}<input className="rp-in num" type="number" inputMode="decimal" min={0.5} max={2} step={0.0001} placeholder="reference" value={r.rates[d] ?? ''} onChange={(e) => { const v = num(e.target.value); onChange((x) => ({ ...x, rates: { ...x.rates, [d]: v != null && v > 0 && v < 10 ? v : null } })) }} /></label>
@@ -401,8 +402,8 @@ function AnalyzeReplay({ res, onChange, currency, latest }: { res: ReplayResult;
         <div className="rp-kpi"><small>Total in {currency}</small><b>{res.combined ? fmt(res.combined.endValue, 2) : 'Unavailable'}</b>
           <div className="rp-foot">{res.combined ? <>Started with {fmt(res.combined.capital, 2)}. Gain {sfmt(res.combined.netGain, 2)}{res.combined.ret != null ? ` (${res.combined.ret >= 0 ? '+' : ''}${pct(res.combined.ret * 100)})` : ''}.{res.combined.basis !== 'reference' ? ' Uses your own rates.' : ''}</> : res.combinedMissing === 'rate' ? `No ${joinList(nonUsd.map(assetLabel), 'or')} rate. See the results above.` : 'Needs every result above'}</div></div>
       </div>
-      {nonUsd.length > 0 && <FrozenRatesLine r={r} latest={latest} needed={nonUsd} onChange={onChange} />}
-      {nonUsd.length > 0 && <RatesEditor r={r} onChange={onChange} needed={nonUsd} />}
+      {nonUsd.length > 0 && !r.refRates && <FrozenRatesLine r={r} latest={latest} needed={nonUsd} onChange={onChange} />}
+      {nonUsd.length > 0 && <RatesEditor r={r} onChange={onChange} needed={nonUsd} latest={latest} />}
     </section>
 
     <Card id="rp-value">
@@ -423,7 +424,7 @@ function AnalyzeReplay({ res, onChange, currency, latest }: { res: ReplayResult;
     </Card>
 
     <Card id="rp-lines" flush>
-      <CardHeader pad title="Positions" sub="Each position in its settlement currency" />
+      <CardHeader pad title="Positions" />
       <div className="dt-wrap"><table className="dt">
         <thead><tr><th scope="col">Market</th><th scope="col">Outcome</th><th scope="col">Funding</th><th scope="col">Entry</th><th scope="col" className="r">Shares</th><th scope="col" className="r">Cost</th><th scope="col" className="r">Fee</th><th scope="col">End</th><th scope="col" className="r">Proceeds / value</th><th scope="col" className="r">Net P&amp;L</th></tr></thead>
         <tbody>{res.lines.map((l) => {
@@ -447,7 +448,7 @@ function AnalyzeReplay({ res, onChange, currency, latest }: { res: ReplayResult;
     </Card>
 
     <Card id="rp-cash" flush>
-      <CardHeader pad title="Cash flows" sub="Virtual funds by platform and currency, in date order" />
+      <CardHeader pad title="Cash flows" sub="In date order" />
       <div className="dt-wrap"><table className="dt">
         <thead><tr><th scope="col">Date</th><th scope="col">Funding</th><th scope="col">Event</th><th scope="col" className="r">Amount</th><th scope="col" className="r">Fee</th></tr></thead>
         <tbody>{res.cash.map((c, i) => { const b = r.buckets.find((x) => x.id === c.bucketId); return (
@@ -457,7 +458,7 @@ function AnalyzeReplay({ res, onChange, currency, latest }: { res: ReplayResult;
     </Card>
 
     <Card id="rp-evidence" flush>
-      <CardHeader pad title="Evidence" sub="What each market’s history in this replay is based on" />
+      <CardHeader pad title="Evidence" />
       <div className="dt-wrap"><table className="dt">
         <thead><tr><th scope="col">Market</th><th scope="col">Trading opened</th><th scope="col">Trading close</th><th scope="col">Resolution</th><th scope="col" className="r">Recorded prices in period</th></tr></thead>
         <tbody>{res.evidence.map((e) => <tr key={`${e.provider}:${e.marketId}`}><td>{e.title}</td><td className="t2">{e.listed ? 'Recorded' : 'Unknown'}</td><td className="t2">{e.closeRecorded ? 'Recorded' : 'Not recorded'}</td><td className="t2">{e.resolution ? 'Recorded' : 'Not resolved'}</td><td className="r">{e.observationsInPeriod}</td></tr>)}</tbody>
@@ -482,7 +483,7 @@ function CompareReplays({ replays, today, activeKey }: { replays: Replay[]; toda
   const mark = (ok: boolean | undefined, text: string) => (cmp && !ok ? <span className="t3">{text} (not comparable)</span> : text)
   return (
     <Card id="rp-compare">
-      <CardHeader title="Compare replays" sub="Compare up to four replays. Figures are compared only when they’re on the same basis." />
+      <CardHeader title="Compare replays" sub="Up to four replays" />
       <div className="card-b" style={{ display: 'grid', gap: 'var(--space-4)' }}>
         <div className="row" style={{ flexWrap: 'wrap' }}>{replays.map((r) => { const on = picked.includes(r.key); return (
           <button key={r.key} type="button" className={cx('pick-chip', on && 'on')} aria-pressed={on} disabled={!on && picked.length >= 4} onClick={() => setPicked((p) => (on ? p.filter((k) => k !== r.key) : [...p, r.key]))}><i style={{ background: r.color }} />{r.name}</button>
@@ -515,7 +516,6 @@ function CompareReplays({ replays, today, activeKey }: { replays: Replay[]; toda
             </tbody>
           </table></div>
         )}
-        <small className="t3">All replays are hindsight analysis. Current-market scenarios aren’t compared here: a settlement range under outcomes you choose is a different measure from a historical return.</small>
       </div>
     </Card>
   )

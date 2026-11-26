@@ -11,7 +11,8 @@ import { attribution, entryBuckets, fmtDate, insights, tradeNet, type PeriodStat
 import { fmt, kfmt, pct, sfmt } from '../lib/format'
 import type { ClosedTrade } from '../data/types'
 import { useFinance } from '../lib/financeContext'
-import { ReportingNote, WorkspaceLabel } from '../components/Workspace'
+import { DataIssues } from '../components/Workspace'
+import { HELP } from '../lib/help'
 import { count } from '../lib/text'
 
 const RAIL: RailSection[] = [
@@ -84,7 +85,7 @@ function PnlChart({ f, start, end, prior, stats, tab, onMonth }: { f: PlatformFi
 }
 
 export default function Analytics() {
-  const { ACCOUNTS, HISTORY_START, TODAY, periodAvailable, periodRange, periodStats } = useFinance()
+  const { ACCOUNTS, HISTORY_START, periodAvailable, periodRange, periodStats } = useFinance()
   useHashScroll()
   const [plat, setPlat] = useState<PlatformLabel>('All')
   const [chosen, setPeriod] = useState<PeriodValue>(useSettings().settings.defaultPeriod)
@@ -129,7 +130,6 @@ export default function Analytics() {
   return (
     <div className="shell">
       <SectionRail title="Analytics" sections={RAIL}>
-        <div className="rail-card"><b>Definitions</b>Net P&amp;L = realized + change in unrealized (after fees on new purchases). Deposits and withdrawals never count as performance. <span className="t3">History uses weekly snapshots.</span></div>
       </SectionRail>
       <main>
         <PageHead caption={f === 'all' ? range.label : `${range.label}, ${scope}`} title="Portfolio performance"
@@ -139,7 +139,7 @@ export default function Analytics() {
           </>} />
 
         <div className="period-row"><PeriodControl value={period} onChange={setPeriod} />
-          <div className="asof"><span>History from <b>{fmtDate(HISTORY_START, { month: 'short', day: 'numeric', year: 'numeric' })}</b>, prices as of {fmtDate(TODAY)}</span><ReportingNote denominations={ACCOUNTS.map((a) => a.denomination)} /></div></div>
+          <span className="t3 history-from">History from {fmtDate(HISTORY_START, { month: 'short', day: 'numeric', year: 'numeric' })}</span><DataIssues denominations={ACCOUNTS.map((a) => a.denomination)} /></div>
         <p className="summary">
           Over this period you made <b className={stats.netPnl >= 0 ? 'gain' : 'loss'}>{sfmt(stats.netPnl, 2)}</b> net{compare && prior ? <>, <b>{sfmt(stats.netPnl - prior.netPnl)}</b> vs. the prior period</> : ''}: <b>{sfmt(stats.realized)}</b> realized on {count(stats.trades.length, 'trade')} closed in the period, and <b>{sfmt(stats.unrealizedChange)}</b> change in unrealized P&amp;L{stats.openFillFees ? <> (after <b>{fmt(stats.openFillFees, 2)}</b> fees on new purchases)</> : ''}.
           {top && top.net > 0 && <> <a href="#attribution">{top.label}</a> made {gains > 0 ? pct((top.net / gains) * 100, 0) : '—'} of realized gains.</>}
@@ -163,7 +163,7 @@ export default function Analytics() {
 
         <div className="grid g-21 anchor" id="performance">
           <Card id="pnl">
-            <CardHeader title="Cumulative P&L" sub="Cumulative over the period, with realized P&L by month" right={<Tabs label="Chart view" options={['Net', 'Realized', 'By platform'] as const} value={tab} onChange={setTab} />} />
+            <CardHeader title="Cumulative P&L" right={<Tabs label="Chart view" options={['Net', 'Realized', 'By platform'] as const} value={tab} onChange={setTab} />} />
             <div className="card-b">
               <PnlChart f={f} start={range.start} end={range.end} prior={compare ? range.prior : null} stats={stats} tab={tab} onMonth={openMonth} />
               <div style={{ marginTop: 'var(--space-3)' }}>
@@ -174,7 +174,7 @@ export default function Analytics() {
             </div>
           </Card>
           <Card id="attribution">
-            <CardHeader title="Attribution" sub="Realized P&L of closed trades, after fees" right={<Seg label="Group by" options={['Category', 'Platform'] as const} value={attrBy} onChange={setAttrBy} />} />
+            <CardHeader title="Attribution" info={HELP.attribution} right={<Seg label="Group by" options={['Category', 'Platform'] as const} value={attrBy} onChange={setAttrBy} />} />
             <div className="card-b">
               {attr.length === 0 && <div className="empty"><p>No trades closed in this period.</p></div>}
               {attr.map((a) => (
@@ -189,7 +189,6 @@ export default function Analytics() {
               <div className="attr" style={{ fontWeight: 'var(--font-weight-semibold)' }}><span>Realized</span><span /><span /><span className={cx('r', stats.realized >= 0 ? 'gain' : 'loss')}>{sfmt(stats.realized)}</span><span className="r t3">{stats.trades.length}</span></div>
               <div className="attr t2"><span title={stats.openFillFees > 0 ? `Includes −${fmt(stats.openFillFees, 2)} fees on new purchases` : undefined}>Change in unrealized</span><span /><span /><span className={cx('r', stats.unrealizedChange >= 0 ? 'gain' : 'loss')}>{sfmt(stats.unrealizedChange)}</span><span className="r t3">—</span></div>
               <div className="attr" style={{ fontWeight: 'var(--font-weight-semibold)' }}><span>Net P&amp;L</span><span /><span /><span className={cx('r', stats.netPnl >= 0 ? 'gain' : 'loss')}>{sfmt(stats.netPnl)}</span><span className="r t3" /></div>
-              <p className="t3" style={{ fontSize: 'var(--font-size-xs)', marginTop: 'var(--space-3)' }}>Change in unrealized is after fees on new purchases (they’re part of cost basis). Realized counts each trade closed in this period in full, including gains or losses that built up before the period began. That earlier part is reversed in “Change in unrealized”, so the rows add up to the period’s net P&amp;L.</p>
             </div>
           </Card>
         </div>
@@ -220,7 +219,7 @@ export default function Analytics() {
 
         <div className="grid g-2 anchor" id="detail">
           <Card id="entry">
-            <CardHeader title="Entry price vs. outcome" sub="How often your resolved trades won, compared with what the entry price implied" />
+            <CardHeader title="Entry price vs. outcome" info={HELP.calibration} />
             <div className="card-b">
               <div className="bucket t3" style={{ fontSize: 'var(--font-size-xs)', paddingTop: 0 }}><span>Entry price</span><span>Your win rate vs. implied</span><span className="r">Trades</span><span className="r">Net P&amp;L</span></div>
               {buckets.map((b, i) => (
@@ -236,7 +235,7 @@ export default function Analytics() {
               <div style={{ marginTop: 'var(--space-3)' }}>
                 {hotBucket != null && buckets[hotBucket].n
                   ? <Callout>In this bucket you won {pct((buckets[hotBucket].winRate ?? 0) * 100, 0)} of {count(buckets[hotBucket].n, 'resolved trade')}, while the average entry price implied {pct((buckets[hotBucket].implied ?? 0) * 100, 0)}.</Callout>
-                  : <Callout tone="warn">Buckets with fewer than 30 trades can differ from the implied rate by chance. Treat gaps as something to watch, not a verdict.</Callout>}
+                  : buckets.some((b) => b.n > 0 && b.n < 30) ? <Chip tone="warn">Limited sample size</Chip> : null}
               </div>
             </div>
           </Card>
@@ -251,8 +250,6 @@ export default function Analytics() {
             </table></div>
           </Card>
         </div>
-
-        <div className="footer-note"><span>Analytics describe past results. They don’t predict future ones and aren’t investment advice.</span><span><WorkspaceLabel /></span></div>
       </main>
 
     </div>

@@ -258,6 +258,8 @@ The frontend's calculations stay fixture, validation and presentation logic. Aut
 
 ### Public Beta requirements (Phase 11, not frontend work here)
 
+- Final, legally reviewed Terms of Service, Privacy Policy and any jurisdiction-specific disclosures. The UI's product statements (`PRODUCT_POLICIES` in `lib/help.ts`) and the data-driven privacy dialog (`CAPABILITIES` in `components/Account.tsx`) describe current behaviour only; they are not legal policies and haven't been legally reviewed. Link the final documents from Help › About and Data & privacy.
+
 Production identity and authorization, isolation, retention, export and deletion, source revocation, operational readiness and external testing gates must be in place before private financial workspaces are exposed. The Sample portfolio stays development-only; the user-facing Demo uses authorized market evidence, virtual capital and backend results.
 
 ## Adding sources (CSV, providers)

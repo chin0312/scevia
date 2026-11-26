@@ -14,7 +14,8 @@ import { count, sentences } from '../lib/text'
 import { fmt, kfmt, pct, sfmt } from '../lib/format'
 import { useSettings } from '../lib/settings'
 import { useFinance } from '../lib/financeContext'
-import { ReportingNote, WorkspaceLabel } from '../components/Workspace'
+import { DataIssues } from '../components/Workspace'
+import { HELP } from '../lib/help'
 
 const RAIL: RailSection[] = [
   { id: 'summary', label: 'Exposure summary', icon: 'home' },
@@ -36,7 +37,7 @@ function busiestWeek(exps: EventExposure[], days = 90) {
 }
 
 export default function Risk() {
-  const { ACCOUNTS, TODAY, account, baseHoldings, exposures, positionsFor, settlementRangeFor, sourceRelations } = useFinance()
+  const { ACCOUNTS, account, baseHoldings, exposures, positionsFor, settlementRangeFor, sourceRelations } = useFinance()
   useHashScroll()
   const nav = useNavigate()
   const toast = useToast()
@@ -120,14 +121,12 @@ export default function Risk() {
             <li><a href="#conc" onClick={(e) => { e.preventDefault(); setEditLimit(limit) }}><Icon name="shield" />Event ≤ {limit}%<span className="count">edit</span></a></li>
           </ol>
         </div>
-        <div className="rail-card"><b>How risk is measured</b>Deterministic payoffs: what you gain or lose if each event resolves one way or the other. Scevia never assigns probabilities.</div>
       </SectionRail>
 
       <main>
         <PageHead caption={`${count(acct.openCount, 'position')} across ${count(exps.length, 'event')}`} title="Portfolio risk"
           actions={<><Seg label="Group by" options={['By event', 'By category', 'By platform'] as const} value={groupBy} onChange={setGroupBy} /><Button variant="primary" onClick={stressTest} disabled={stressIds.length === 0} title={`Choose a scenario and which of the ${count(stressIds.length, 'position')} behind the payoff table to add`}><Icon name="flask" size={15} />Stress-test in Lab…</Button></>} />
-
-        <div className="asof" style={{ marginBottom: 'var(--space-3)' }}><span>Prices as of <b>{fmtDate(TODAY, { month: 'short', day: 'numeric', year: 'numeric' })}</b></span><span>Settlement ranges use reviewed relationships only. They aren’t probabilities</span><ReportingNote denominations={ACCOUNTS.map((a) => a.denomination)} /></div>
+        <DataIssues denominations={ACCOUNTS.map((a) => a.denomination)} />
         {exps.length === 0 && <Callout icon="info">No open positions in the selected sources, so there is no event exposure to analyse. This is an empty portfolio, not missing data.</Callout>}
         <p className="summary">You have <b>{fmt(committed)}</b> committed across {count(exps.length, 'event')}. {over.length > 0
           ? <><b>{over.length === 1 ? 'One event' : `${count(over.length, 'event')}`}</b> ({over.map((e) => e.event.short).join(', ')}) {over.length === 1 ? 'is' : 'are'} above your <button type="button" className="link" onClick={() => setEditLimit(limit)}>{limit}% limit</button>.</>
@@ -135,7 +134,7 @@ export default function Risk() {
 
         <div className="tiles">
           <Tile label="Capital committed" info="Acquisition cost at risk: cost basis of open positions, fees included. Their current value is shown below and moves with market prices." value={fmt(committed)} foot={`Worth ${fmt(acct.positionsValue)} at current prices`} />
-          <Tile label="Worst feasible outcome" info="Lowest settlement P&L of the whole portfolio across joint outcomes that are possible given confirmed relationships. Unclassified pairs can go either way. Not affected by the table filter below." value={portfolio ? sfmt(portfolio.min) : na} tone={portfolio ? 'loss' : undefined} foot={worstValue != null ? `${sfmt(worstValue - acct.totalValue)} from today’s value` : issue === 'too-many-events' ? `More than ${MAX_JOINT_EVENTS} events to check every combination` : issue === 'no-feasible-outcome' ? 'Recorded relationships leave no possible outcome' : 'Not available for this portfolio'} />
+          <Tile label="Worst-case settlement P&L" info={HELP.worstCase} value={portfolio ? sfmt(portfolio.min) : na} tone={portfolio ? 'loss' : undefined} foot={worstValue != null ? `${sfmt(worstValue - acct.totalValue)} from today’s value` : issue === 'too-many-events' ? `More than ${MAX_JOINT_EVENTS} events to check every combination` : issue === 'no-feasible-outcome' ? 'Recorded relationships leave no possible outcome' : 'Not available for this portfolio'} />
           <Tile label="Largest single event" info="Capital committed to one event (the same outcome across platforms counts once) ÷ total committed." value={top ? pct(shareOf(top.cost)) : 'None'} tone={top && shareOf(top.cost) > limit ? 'warn' : undefined} foot={top ? `${top.event.short}, ${shareOf(top.cost) > limit ? `above your ${limit}% limit` : `within your ${limit}% limit`}` : 'No open positions'} />
           <Tile label="Top-3 concentration" info="Share of committed capital in your three largest events." value={pct(shareOf(top3), 0)} foot={`${fmt(top3)} of capital committed`} />
           <Tile label="Resolving within 30 days" info="Capital committed to events that resolve within 30 days." value={fmt(soon.reduce((a, e) => a + e.cost, 0))} foot={soon.length ? `${count(soon.length, 'event')}, first on ${fmtDate([...soon].sort((a, b) => a.days - b.days)[0].resolves)}` : 'None'} />
@@ -143,7 +142,7 @@ export default function Risk() {
 
         <div className="grid g-21 anchor" id="exposure">
           <Card id="conc">
-            <CardHeader title={`${groupBy.replace('By ', '').replace(/^./, (c) => c.toUpperCase())} concentration`} sub="Capital committed. The same outcome on two platforms counts once."
+            <CardHeader title={`${groupBy.replace('By ', '').replace(/^./, (c) => c.toUpperCase())} concentration`} sub="Capital committed" info={HELP.concentration}
               right={<Legend items={[{ label: 'Within limit', color: 'var(--color-data-1)' }, { label: `Over ${groupLimit}%`, color: 'var(--color-warn-fg)' }]} />} />
             <div className="card-b">
               {groups.map((g) => {
@@ -162,7 +161,7 @@ export default function Risk() {
             </div>
           </Card>
           <Card id="ladder">
-            <CardHeader title="Downside ladder" sub="Potential loss as more events settle against you" />
+            <CardHeader title="Downside ladder" info={HELP.downsideLadder} />
             <div className="card-b">
               <div ref={ladderRef}><svg viewBox={`0 0 ${LW} 220`} width="100%" style={{ overflow: 'visible' }} className="chart" role="group" aria-label={`Downside ladder: largest event ${sfmt(-(byLoss[0]?.maxLoss ?? 0))}, top three ${sfmt(-top3Loss)}, all events ${sfmt(-(ladder.at(-1) ?? 0))}`} onPointerLeave={() => setHotStep(null)}>
                 <g className="axis">{ladderTicks.map((t) => <g key={t}><line className="grid-l" x1={48} x2={LW - 10} y1={10 + (t / ladderMax) * 182} y2={10 + (t / ladderMax) * 182} strokeDasharray="2 4" /><text x={40} y={14 + (t / ladderMax) * 182} textAnchor="end">{t ? `−${kfmt(t)}` : '$0'}</text></g>)}
@@ -190,13 +189,12 @@ export default function Risk() {
                   <div><div className="l">Adds</div><button type="button" className="link v t2" style={{ fontSize: 'var(--font-size-sm)', whiteSpace: 'normal', textAlign: 'left' }} onClick={() => openEvent(byLoss[hotStep].event.id)}>{byLoss[hotStep].event.name}</button></div>
                 </>}
               </div>
-              <p className="t3" style={{ fontSize: 'var(--font-size-xs)', marginTop: 'var(--space-2)' }}>The ladder adds events as if they could all go against you together. It doesn’t say how likely that is.</p>
             </div>
           </Card>
         </div>
 
         <Card id="payoffs" flush>
-          <CardHeader pad title="Outcome payoffs" sub="P&L at settlement against cost basis, including purchase fees" right={<Tabs label="Filter events" options={['All events', 'Next 30 days', 'Above limit'] as const} value={filter} onChange={setFilter} />} />
+          <CardHeader pad title="Outcome payoffs" info={HELP.payoffs} right={<Tabs label="Filter events" options={['All events', 'Next 30 days', 'Above limit'] as const} value={filter} onChange={setFilter} />} />
           <div className="po-row h"><span>Event and side</span><span>Resolves</span><span>Better outcome</span><span>Worse outcome</span><span className="r">Share</span></div>
           {rows.length === 0 && <div className="empty"><p>No events match “{filter}”. This filter only changes the table: the portfolio’s worst feasible outcome is still <b className="loss">{portfolio ? sfmt(portfolio.min) : na}</b>.</p><button type="button" className="link" onClick={() => setFilter('All events')}>Show all events</button></div>}
           {rows.map((e) => {
@@ -216,15 +214,14 @@ export default function Risk() {
             )
           })}
           {table && <div className="po-row t"><span>{filter === 'All events' ? 'Whole portfolio' : `Subtotal for ${count(rows.length, 'event')}`}</span><span /><span className="gain r">{sfmt(table.max)} <small className="t3">best case</small></span><span className="loss r">{sfmt(table.min)} <small className="t3">worst case</small></span><span className="r">{pct(rows.reduce((a, e) => a + shareOf(e.cost), 0), 0)}</span></div>}
-          <div className="foot"><span>
-            Best and worst cases search every joint outcome of the events {filter === 'All events' ? 'in the portfolio' : 'shown'} and skip impossible ones{table?.excluded ? ` (${table.excluded} combinations excluded by verified constraints)` : ''}.{filter !== 'All events' && ` Portfolio-wide: ${portfolio ? `${sfmt(portfolio.min)} to ${sfmt(portfolio.max)}` : na}.`}
-{' '}Related and unclassified events keep every combination possible and are never netted. This is settlement logic, not a statement about how likely outcomes are.
-          </span></div>
+          {(!!table?.excluded || filter !== 'All events') && <div className="foot"><span>{sentences(
+            table?.excluded ? `${count(table.excluded, 'combination')} excluded by verified constraints` : null,
+            filter !== 'All events' && `Portfolio-wide: ${portfolio ? `${sfmt(portfolio.min)} to ${sfmt(portfolio.max)}` : na}`)}</span></div>}
         </Card>
 
         <div className="grid g-12 anchor" id="context">
           <Card id="rel">
-            <CardHeader title="Event relationships" sub="Settlement logic from your sources: which joint outcomes are possible (not correlation)" />
+            <CardHeader title="Event relationships" info={HELP.relationships} />
             <div className="card-b">
               {exps.filter((e) => e.positions.length > 1).map((e) => (
                 <div className="rel" key={e.event.id}><div className="h"><button type="button" className="link" onClick={() => openEvent(e.event.id)}><b>{e.event.name}</b></button><Chip tone="yes">Confirmed equivalent</Chip></div>
@@ -236,11 +233,10 @@ export default function Risk() {
                   <p>{g.events.map((e) => `${e.event.short} (${e.side === 'Mixed' ? 'YES and NO' : e.side})`).join(', ')}. {g.cls === 'related' ? 'They may share drivers, but every combination of outcomes stays possible and nothing is netted.' : g.cls === 'mutex' ? 'Verified: they can’t both resolve YES, so that combination is excluded.' : g.cls === 'equivalent' ? 'Verified: they settle the same way.' : 'No constraint.'}{' '}
                     <button type="button" className="link" onClick={() => nav(handoffPath(g.events.flatMap((e) => e.positions.map((p) => p.id)), `${g.title} in Risk`))} title="Choose a scenario and which of these holdings to add">Model them together in Scenario Lab…</button></p></div>
               ))}
-              <p className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>Only verified constraints change which joint outcomes are possible. Notes never do. Pairs without a recorded relationship keep every combination possible, which is not an assumption that they’re independent. To explore a hypothetical constraint, add it to a scenario in Scenario Lab.</p>
             </div>
           </Card>
           <Card id="calendar">
-            <CardHeader title="Resolution calendar" sub="When capital is released or lost. Larger circles mean more at stake." right={<Seg label="Range" options={['90 days', '12 months'] as const} value={range} onChange={setRange} />} />
+            <CardHeader title="Resolution calendar" sub="Capital committed by scheduled resolution date" info={HELP.calendar} right={<Seg label="Range" options={['90 days', '12 months'] as const} value={range} onChange={setRange} />} />
             <div className="card-b">
               <Calendar exps={exps} range={range} hot={hotCal} setHot={setHotCal} onPick={openEvent} />
               <div className="tl-list cal-list" role="list" aria-label="Next resolutions">
@@ -255,8 +251,6 @@ export default function Risk() {
             </div>
           </Card>
         </div>
-
-        <div className="footer-note"><span>Payoffs assume each contract settles at $1 or $0 as written. Scevia does not estimate how likely each outcome is.</span><span><WorkspaceLabel /></span></div>
       </main>
 
       {editLimit != null && (

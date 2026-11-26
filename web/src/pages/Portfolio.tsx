@@ -20,7 +20,9 @@ import { parseMoney, parsePrice, parseShares } from '../lib/inputs'
 import * as R from '../lib/records'
 import { pushLocalEvent, useWorkspace, type Workspace } from '../lib/useWorkspace'
 import { useFinance } from '../lib/financeContext'
-import { WorkspaceLabel } from '../components/Workspace'
+import { RatesInUse } from '../components/Settings'
+import { useSettings } from '../lib/settings'
+import { useActiveWorkspace } from '../lib/workspaceContext'
 import { count } from '../lib/text'
 
 export const SECTIONS = [
@@ -71,7 +73,6 @@ export default function Portfolio() {
           <li key={s.id}><NavLink to={`/portfolio/${s.id}`} className={({ isActive }) => cx(isActive && 'on')}><Icon name={s.icon} />{s.label}
             {s.id === 'transactions' && <span className="count">{ws.records.length}</span>}{s.id === 'imports' && reviewCount > 0 && <span className="flag">{reviewCount}</span>}</NavLink></li>
         ))}</ol>
-        <div className="rail-card"><b><WorkspaceLabel /></b>Accounts and coverage describe the portfolio behind your figures. Transactions and imports are a record-management sample.</div>
       </aside>
       <main>
         <section className="page-head anchor" id="summary">
@@ -90,7 +91,6 @@ export default function Portfolio() {
         {section === 'transactions' && <Transactions ws={ws} commit={commit} />}
         {section === 'imports' && <Imports ws={ws} reviewCount={reviewCount} onImport={(file, accountId) => setImporting({ file, accountId })} />}
         {section === 'coverage' && <Coverage ws={ws} />}
-        <div className="footer-note"><span>Original records stay available. Decisions can be undone and never delete source data.</span><span><WorkspaceLabel /></span></div>
       </main>
       {importing && <ImportFlow ws={ws} preset={importing} onClose={() => setImporting(null)} onDone={(label, next, review, batchId) => {
         commit(label, next); setImporting(null)
@@ -108,7 +108,7 @@ function Accounts({ ws, onRename, onImport, onManual }: { ws: Workspace; onRenam
   const [renaming, setRenaming] = useState<WorkspaceAccount | null>(null)
   return (<>
     <Card id="accounts">
-      <CardHeader title="Financial accounts" sub="One wallet or venue login each. Several can share a platform, and one account can have several sources." info="A venue (Polymarket, Kalshi) is where positions are held. An account is one wallet or login there. A source (API sync, CSV file, manual entry) is how its records arrive. Being connected doesn’t mean the history is complete." />
+      <CardHeader title="Financial accounts" info="A venue (Polymarket, Kalshi) is where positions are held. An account is one wallet or login there. A source (API sync, CSV file, manual entry) is how its records arrive. Being connected doesn’t mean the history is complete." />
       <div className="card-b acct-grid">
         {ws.accounts.map((a) => {
           const rs = ws.records.filter((r) => r.accountId === a.id), times = rs.map((r) => R.effective(r).time).sort()
@@ -157,7 +157,7 @@ function Sources({ ws, onImport, onManual }: { ws: Workspace; onImport: () => vo
   const connected = ws.accounts.filter((a) => a.kind === 'connected')
   return (<>
     <Card id="sources" flush>
-      <CardHeader pad title="Sources in this portfolio" sub="How each account’s records arrive. A source isn’t a venue: one account can combine several." />
+      <CardHeader pad title="Sources in this portfolio" />
       <div className="src-list">
         {connected.map((a) => (
           <div className="src-row" key={a.id}><PlatformBadge p={a.venue} />
@@ -173,12 +173,12 @@ function Sources({ ws, onImport, onManual }: { ws: Workspace; onImport: () => vo
       </div>
     </Card>
     <Card id="add-source" flush>
-      <CardHeader pad title="Add a source" sub="You choose which sources Scevia reads. It never places trades, moves funds, or asks for private keys or seed phrases." />
+      <CardHeader pad title="Add a source" sub="Read-only. Scevia never places trades, moves funds or asks for private keys or seed phrases." />
       <div className="src-list">
         <div className="src-row"><PlatformBadge p="pm" /><div><b>Track a Polymarket wallet</b><small className="t3">Read-only, by public address. An address identifies a wallet. It isn’t proof you own it.</small></div><Button size="sm" disabled title="Not available yet">Connect</Button></div>
         <div className="src-row"><PlatformBadge p="ks" /><div><b>Connect a Kalshi account</b><small className="t3">Read-only access, with your explicit consent.</small></div><Button size="sm" disabled title="Not available yet">Connect</Button></div>
       </div>
-      <div className="foot"><span>Connections aren’t available yet. CSV import and manual entry work with the sample records.</span><span /></div>
+      <div className="foot"><span>Connections aren’t available yet.</span><span /></div>
     </Card>
   </>)
 }
@@ -212,7 +212,7 @@ function Transactions({ ws, commit }: { ws: Workspace; commit: (label: string, w
   const active = JSON.stringify(f) !== JSON.stringify(R.NO_FILTER)
   return (<>
     <Card id="transactions" flush>
-      <CardHeader pad title="Records" sub="Original records from each source with your decisions applied. Search here filters records. Use ⌘K to find anything else." />
+      <CardHeader pad title="Records" />
       <div className="rec-filters" role="search" aria-label="Filter records">
         <input className="text-input" type="search" placeholder="Search market, outcome, type, reference…" aria-label="Search records" value={f.q} onChange={(e) => setFilter({ q: e.target.value })} />
         <select className="select" aria-label="Account" value={f.account} onChange={(e) => setFilter({ account: e.target.value })}><option value="all">All accounts</option>{ws.accounts.map((a) => <option key={a.id} value={a.id}>{a.label} on {PLATFORM_NAME[a.venue]}</option>)}</select>
@@ -279,7 +279,7 @@ function ConfirmBulk({ action, keys, ws, onCancel, onConfirm }: { action: R.Acti
   const p = R.preview(ws.records, keys, action)
   const cash = Object.entries(p.cash), q = Object.values(p.qty)
   return (
-    <Modal title={`${R.ACTION_LABEL[action]}: ${keys.length} selected record${keys.length === 1 ? '' : 's'}?`} sub="Preview in this sample workspace" onClose={onCancel}
+    <Modal title={`${R.ACTION_LABEL[action]}: ${keys.length} selected record${keys.length === 1 ? '' : 's'}?`} onClose={onCancel}
       footer={<><Button variant="ghost" onClick={onCancel}>Cancel</Button><Button variant="primary" disabled={p.changed.length === 0} onClick={() => onConfirm(p)}>{p.changed.length ? `${R.ACTION_LABEL[action]} (${p.changed.length})` : 'Nothing to change'}</Button></>}>
       <p className="t2">{R.ACTION_HELP[action]}</p>
       <div className="effect">
@@ -369,13 +369,13 @@ function Imports({ ws, reviewCount, onImport }: { ws: Workspace; reviewCount: nu
   const dups = Object.keys(R.duplicateCandidates(ws.records)).filter((k) => { const r = ws.records.find((x) => x.key === k)!; return !r.duplicateOf && !r.identity }).length
   return (<>
     <div className="grid g-2 anchor" id="review">
-      <Card><CardHeader title="Needs review" sub="Overlapping or unresolved rows that don’t count until you decide" />
+      <Card><CardHeader title="Needs review" sub="These rows don’t count until you decide" />
         <div className="card-b"><div className="big-n">{reviewCount}</div><Button size="sm" disabled={!reviewCount} onClick={() => nav('/portfolio/transactions?status=review')}>Review records</Button></div></Card>
-      <Card><CardHeader title="Possible duplicates" sub="Same account, type and terms. You decide whether they are one transaction" />
+      <Card><CardHeader title="Possible duplicates" />
         <div className="card-b"><div className="big-n">{dups}</div><Button size="sm" disabled={!dups} onClick={() => nav('/portfolio/transactions?duplicates=1')}>Review duplicates</Button></div></Card>
     </div>
     <Card id="imports" flush>
-      <CardHeader pad title="Import history" sub="Each import is a batch with its own identity. Importing a file again into the same account replaces it and carries your decisions." right={<Button size="sm" icon="download" onClick={() => onImport()}>Import CSV…</Button>} />
+      <CardHeader pad title="Import history" sub="Importing a file again into the same account replaces it and keeps your decisions" right={<Button size="sm" icon="download" onClick={() => onImport()}>Import CSV…</Button>} />
       <div className="dt-wrap"><table className="dt">
         <thead><tr><th scope="col">File</th><th scope="col">Account</th><th scope="col">Relationship</th><th scope="col">Imported</th><th scope="col" className="r">Rows</th><th scope="col" className="r">Included</th><th scope="col" className="r">Review</th><th scope="col">Status</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
         <tbody>
@@ -501,7 +501,7 @@ function ManualRecord({ ws, preset, onClose, onAdd }: { ws: Workspace; preset: s
     onAdd({ ...ws, accounts, records: [...ws.records, ...R.fromRecords([rec])] }, `Added a manual ${R.TYPE_LABEL[type].toLowerCase()} to ${acct === 'new' ? newLabel.trim() : ws.accounts.find((a) => a.id === acct)?.label}`)
   }
   return (
-    <Modal title="Add a record" sub="A manual record supplements any account, including a connected one" onClose={onClose} width={560}
+    <Modal title="Add a record" onClose={onClose} width={560}
       footer={<><small className="t3" style={{ marginRight: 'auto' }}>{errs[0] ?? ''}</small><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" disabled={errs.length > 0} onClick={add}>Add record</Button></>}>
       <label className="add-field"><span className="l">Account</span><select data-autofocus className="select" style={{ maxWidth: 'none' }} value={acct} onChange={(e) => { setAcct(e.target.value); setMarketId('') }} aria-label="Record account">{ws.accounts.map((a) => <option key={a.id} value={a.id}>{a.label} on {PLATFORM_NAME[a.venue]}</option>)}<option value="new">New manual account…</option></select></label>
       {acct === 'new' && <div className="row" style={{ flexWrap: 'wrap', alignItems: 'flex-end' }}>
@@ -531,12 +531,13 @@ function ManualRecord({ ws, preset, onClose, onAdd }: { ws: Workspace; preset: s
 /* ── Data coverage ────────────────────────────────────────── */
 function Coverage({ ws }: { ws: Workspace }) {
   const { HISTORY_START, TODAY, account, coverage, sourceOf } = useFinance()
+  const { settings } = useSettings(), wsName = useActiveWorkspace().snapshot.summary.name
   const a = account('all')
   const est = ws.records.filter((r) => R.statusOf(r, ws.records) === 'included' && R.cashEffect(R.effective(r)) == null).length
   const review = ws.records.filter((r) => R.statusOf(r, ws.records) === 'review').length
   return (<>
     <Card id="coverage" flush>
-      <CardHeader pad title={<WorkspaceLabel />} sub={`What Overview, Analytics and Risk are based on. History from ${fmtDate(HISTORY_START, { month: 'short', day: 'numeric', year: 'numeric' })}`} />
+      <CardHeader pad title={wsName} sub={`History from ${fmtDate(HISTORY_START, { month: 'short', day: 'numeric', year: 'numeric' })}`} />
       <div className="dt-wrap"><table className="dt">
         <thead><tr><th scope="col">Account</th><th scope="col">Source</th><th scope="col">Observed</th><th scope="col" className="r">Open positions</th><th scope="col" className="r">Fills</th><th scope="col" className="r">Settlements</th><th scope="col" className="r">Estimated fees</th><th scope="col">Opening state</th></tr></thead>
         <tbody>{ws.accounts.filter((x) => x.inAnalytics).map((x) => { const c = coverage(x.venue), s = sourceOf(x.venue); return (
@@ -544,10 +545,11 @@ function Coverage({ ws }: { ws: Workspace }) {
             <td className={cx(s.stale ? 'stale' : 't2')}>{fmtDate(s.asOf)}{s.stale ? ' (out of date)' : ''}</td><td className="r">{c.open}</td><td className="r">{c.fills}</td><td className="r">{c.settlements}</td>
             <td className={cx('r', c.feeEstimates > 0 && 'warn-fg')}>{c.feeEstimates}</td><td>{x.openingDeclared ? 'Declared' : 'Unknown'}</td></tr>) })}</tbody>
       </table></div>
-      <div className="foot"><span>Portfolio value {fmt(a.totalValue)} at prices as of {fmtDate(TODAY)}. Estimated fees are labelled where they’re used.</span><span /></div>
+      <div className="foot"><span>Portfolio value {fmt(a.totalValue)} at prices as of {fmtDate(TODAY)}</span><span /></div>
     </Card>
+    <Card><CardHeader title="Exchange rates" /><div className="card-b"><RatesInUse currency={settings.reportingCurrency} open /></div></Card>
     <div className="grid g-2">
-      <Card><CardHeader title="How values are labelled" sub="The same states are used wherever a figure appears" />
+      <Card><CardHeader title="How values are labelled" />
         <div className="card-b"><dl className="kv">
           <dt>Known</dt><dd>From complete source records.</dd>
           <dt>Estimated</dt><dd>A source didn’t report it, such as a fee. It’s estimated and counted.</dd>
@@ -557,9 +559,9 @@ function Coverage({ ws }: { ws: Workspace }) {
           <dt>Stale</dt><dd>The source’s latest observation is older than 24 hours.</dd>
           <dt>Unavailable</dt><dd>Can’t be calculated reliably. Never shown as $0.</dd>
         </dl></div></Card>
-      <Card><CardHeader title="Record-management sample" sub="The sample records in Transactions and Imports" />
+      <Card><CardHeader title="Record-management sample" />
         <div className="card-b"><div className="cov-mini"><div><b>{ws.records.length}</b>records</div><div><b>{ws.batches.filter((b) => b.status === 'active').length}</b>active imports</div><div><b className={cx(est > 0 && 'warn-fg')}>{est}</b>included with unknown amounts</div><div><b className={cx(review > 0 && 'warn-fg')}>{review}</b>need review</div></div>
-          <p className="t3 chart-note">These records don’t feed the figures above. With a Scevia account, coverage, discrepancies and provider-reported vs. reconstructed values will come from your own records. <Link to="/portfolio/imports">Imports & reconciliation →</Link></p></div></Card>
+          <p className="t3 chart-note">These records don’t feed the figures above. <Link to="/portfolio/imports">Imports & reconciliation →</Link></p></div></Card>
     </div>
   </>)
 }

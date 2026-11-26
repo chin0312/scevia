@@ -9,6 +9,8 @@ import { CAT_COLOR, PLATFORM_NAME } from '../../data/labels'
 import type { Category, Platform } from '../../data/types'
 import { MAX_JOINT_EVENTS, daysBetween, eventProfiles, fmtDate, holdingsAllocation, type AllocationBy, type EventProfile, type Holding } from '../../lib/finance'
 import { fmt, pct, qty, sfmt } from '../../lib/format'
+import { HELP } from '../../lib/help'
+import { count } from '../../lib/text'
 import { fmtPrice } from '../../lib/inputs'
 import { PairBars, RangeRows, StackBars, Waterfall, type StackSeg } from './charts'
 import { Dumbbell, OutcomeMatrix } from './Impact'
@@ -53,7 +55,7 @@ export function AnalyzeView({ E, onEdit }: { E: Evaluation; onEdit: (id: string)
 
     <div className="grid g-lab anchor" id="a-value">
       <Card id="a-bridge">
-        <CardHeader title="Value bridge" sub="Start → scenario value at reference marks" info="Starting value (before added capital) + added capital + (mark − assumed price) × traded shares − estimated fees = scenario value. Purchases and sales themselves are transfers between cash and contracts, not gains or losses." />
+        <CardHeader title="Value bridge" sub="From start to scenario value at reference prices" info={HELP.valueBridge} />
         <div className="card-b">{bridge == null ? <p className="t3">Unavailable: a position has no reference price, so value at mark can’t be computed.</p> : (<>
           <Waterfall label="Value bridge" steps={[
             { label: 'Start', value: bridge.before, kind: 'total' },
@@ -62,11 +64,11 @@ export function AnalyzeView({ E, onEdit }: { E: Evaluation; onEdit: (id: string)
             { label: 'Est. fees', value: -bridge.fees, kind: 'step', note: bridge.feesUnavailable ? '+ unavailable' : undefined, muted: !bridge.fees },
             { label: 'Scenario', value: bridge.after, kind: 'total' },
           ]} />
-          <p className="t3 chart-note">Buying above the reference price or selling below it lowers value by the difference. Added capital raises value and is never counted as a gain.{bridge.feesUnavailable ? ` ${bridge.feesUnavailable} trade fee${bridge.feesUnavailable > 1 ? 's are' : ' is'} unavailable and not included.` : ''}</p>
+          {bridge.feesUnavailable > 0 && <p className="t3 chart-note stale">{count(bridge.feesUnavailable, 'trade fee')} unavailable and not included.</p>}
         </>)}</div>
       </Card>
       <Card id="a-range">
-        <CardHeader title="Settlement range" sub="Worst and best feasible value at settlement, before and after" />
+        <CardHeader title="Settlement range" sub="Worst and best value at settlement, before and after" info={HELP.settlementRange} />
         <div className="card-b">
           <RangeRows label="Settlement range" rows={[
             { key: 'b', label: 'Start', text: rangeText('Start', B.worstValue, B.bestValue), lo: B.worstValue, hi: B.bestValue, ref: B.totalValue, color: 'var(--color-text-tertiary)' },
@@ -77,7 +79,7 @@ export function AnalyzeView({ E, onEdit }: { E: Evaluation; onEdit: (id: string)
             <tbody>{([['Start', B], ['Scenario', A]] as const).map(([l, m]) => <tr key={l}><th scope="row">{l}</th><td className="r">{m.worstValue == null ? 'Unavailable' : fmt(m.worstValue)}</td><td className="r">{m.totalValue == null ? 'Unavailable' : fmt(m.totalValue)}</td><td className="r">{m.bestValue == null ? 'Unavailable' : fmt(m.bestValue)}</td></tr>)}</tbody>
           </table></div>
           <div className="legend chart-note"><span><i style={{ background: 'var(--color-accent-solid)' }} />worst ○ to ● best</span><span><i className="ln" style={{ background: 'var(--color-text-primary)' }} />value at reference marks</span></div>
-          <p className="t3 chart-note">The range isn’t a distribution: outcomes between the ends aren’t more likely, and the middle isn’t an expected value.{A.excluded ? ` ${A.excluded} impossible joint outcome${A.excluded > 1 ? 's' : ''} excluded by constraints.` : ''}</p>
+          {A.excluded > 0 && <p className="t3 chart-note">{count(A.excluded, 'impossible joint outcome')} excluded by constraints.</p>}
         </div>
       </Card>
     </div>
@@ -134,7 +136,7 @@ function Allocation({ E, focus, onFocus }: { E: Evaluation; focus: { key: string
   return (
     <Card id="a-alloc">
       <CardHeader title="Allocation" sub={withCash ? '% of total value at reference marks (cash + positions)' : '% of open-position value at reference marks (cash excluded)'}
-        info="Market-value allocation at reference marks. It differs from capital committed (cost) and from settlement exposure, and a more even allocation isn’t necessarily less risk. Select a segment to list its positions."
+        info="Market-value allocation at reference marks. It differs from capital committed (cost) and from settlement exposure, and a more even allocation isn’t necessarily less risk."
         right={<div className="row" style={{ flexWrap: 'wrap' }}><Seg label="Allocation basis" options={['Open positions', 'Incl. cash'] as const} value={basis} onChange={setBasis} /><Seg label="Allocation by" options={['Category', 'Platform', 'Event'] as const} value={by} onChange={(v) => { setBy(v); onFocus(null) }} /></div>} />
       <div className="card-b">
         {negCash ? <p className="t3">Cash-inclusive allocation is unavailable: purchases exceed cash (a funding requirement), so there is no positive cash share. Use “Open positions”.</p> : (<>
@@ -241,7 +243,7 @@ function PositionDetail({ E, focus, onClear, onEdit }: { E: Evaluation; focus: {
     .sort((p, q) => Number(!!q.t) - Number(!!p.t) || ((q.a?.shares ?? 0) * (q.a?.mark ?? 0)) - ((p.a?.shares ?? 0) * (p.a?.mark ?? 0)))
   return (
     <Card id="a-positions" flush>
-      <CardHeader pad title="Positions in detail" sub="The exact quantities, prices and fees behind the charts" />
+      <CardHeader pad title="Positions in detail" />
       {focus && <div className="filter-bar"><span>Showing <b>{focus.label}</b></span><button type="button" className="link" onClick={onClear}>Show all</button></div>}
       <div className="dt-wrap"><table className="dt">
         <thead><tr><th scope="col">Position</th><th scope="col" className="r">Start</th><th scope="col" className="r">Scenario</th><th scope="col" className="r">Trade</th><th scope="col" className="r">Notional</th><th scope="col" className="r">Est. fee</th><th scope="col" className="r">Value at mark</th><th scope="col" className="r">Cost basis</th><th scope="col"><span className="sr-only">Edit</span></th></tr></thead>
@@ -261,7 +263,7 @@ function PositionDetail({ E, focus, onClear, onEdit }: { E: Evaluation; focus: {
           )
         })}</tbody>
       </table></div>
-      <div className="foot"><span>Cost basis includes acquisition fees. Sale proceeds are after fees. Reference marks are sample values, not quotes.</span><span>{rows.length} position{rows.length === 1 ? '' : 's'}</span></div>
+      <div className="foot"><span /><span>{count(rows.length, 'position')}</span></div>
     </Card>
   )
 }
