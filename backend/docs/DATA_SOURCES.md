@@ -80,3 +80,5 @@ All live assignments below are conditional on permission and an approved test sa
 | Public search and link resolution | Gamma search and explicit supported venue URL resolution | A managed catalog is a fallback only if it preserves venue-native IDs and link semantics. Share cache across authorized requests. |
 | Market fee schedules | Venue market-specific schedule | Allow user assumptions for simulation. Keep actual historical fees and rebate eligibility separate. |
 | Reference and historical prices | CLOB midpoint and venue price history | Managed candles are fallback observations with their own timestamps and aggregation. Midpoints are references and carry no execution guarantee. |
+
+Kalshi account and market contracts are validated using synthetic input. Live permission, populated validation and approved processing are release dependencies. [Kalshi authorization and acquisition](KALSHI.md)

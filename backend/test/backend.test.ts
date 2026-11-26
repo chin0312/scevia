@@ -1,3 +1,6 @@
+import { KalshiAdapter } from '../src/providers/kalshi/adapter.js'
+import { KalshiClient } from '../src/providers/kalshi/client.js'
+import { KalshiMarketDataService } from '../src/providers/kalshi/market-data.js'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { and, eq, sql } from 'drizzle-orm'
 import { Pool } from 'pg'
@@ -114,6 +117,100 @@ afterAll(async () => {
 })
 
 describe('migrations and canonical persistence', () => {
+  it('reconciles Kalshi fixture fills and Polymarket imports in separate denominations', async () => {
+    const nativeMarket = { ticker: 'KX-FIXTURE', event_ticker: 'KX-EVENT', title: 'Synthetic fixture?', market_type: 'binary',
+      status: 'active', last_price_dollars: '0.4' }
+    const fill = { fill_id: 'fixture-fill', market_ticker: nativeMarket.ticker, action: 'buy', side: 'no', outcome_side: 'no',
+      count_fp: '2.5', yes_price_dollars: '0.6', no_price_dollars: '0.4', fee_cost: '0.1', created_time: '2026-11-25T01:00:00Z' }
+    let emptyPositions = false
+    const seen: string[] = []
+    const client = new KalshiClient(async (url, request) => {
+      expect(request.method).toBe('GET')
+      seen.push(url.pathname)
+      const path = url.pathname.replace('/trade-api/v2', '')
+      if (path === '/markets') return Response.json({ markets: [nativeMarket], cursor: '' })
+      if (path === '/markets/KX-FIXTURE') return Response.json({ market: nativeMarket })
+      if (path === '/portfolio/fills' || path === '/historical/fills') return Response.json({ fills: [fill], cursor: '' })
+      if (path === '/portfolio/positions') return Response.json({ market_positions: emptyPositions ? [] :
+        [{ ticker: nativeMarket.ticker, position_fp: '-2.5', market_exposure_dollars: '1' }], cursor: '' })
+      if (path === '/portfolio/balance') return Response.json({ balance: 9890, updated_ts: 1795568400 })
+      if (path === '/portfolio/settlements') return Response.json({ settlements: [], cursor: '' })
+      throw new Error('Unexpected fixture endpoint')
+    })
+    const app = await buildApp({ config: testConfig(), database, registry: new ProviderRegistry([new KalshiAdapter(() => client)]),
+      kalshiMarketData: new KalshiMarketDataService(client) })
+    openApps.push(app)
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const fresh = await app.inject({ method: 'POST', url: '/v1/portfolios', headers, payload: { name: 'Two denominations' } })
+    const portfolioId = fresh.json().id
+    expect(fresh.statusCode).toBe(201)
+    const [account] = await database.insert(providerAccounts).values({ portfolioId, providerCode: 'kalshi', externalAccountId: 'kalshi-fixture',
+      label: 'Kalshi fixture', kind: 'fixture' }).returning()
+    const prefix = '/v1/portfolios/' + portfolioId
+    const sync = () => app.inject({ method: 'POST', url: '/v1/provider-accounts/' + account!.id + '/sync', headers })
+    const first = await sync()
+    expect(first.statusCode, first.body).toBe(200)
+    expect(seen).toContain('/trade-api/v2/historical/fills')
+    expect(await database.select().from(fills).where(eq(fills.providerAccountId, account!.id))).toHaveLength(1)
+    const current = await app.inject({ method: 'GET', url: prefix + '/positions', headers })
+    expect(current.json().items).toMatchObject([{ quantity: '2.500000000000000000' }])
+    emptyPositions = true
+    expect((await sync()).statusCode).toBe(200)
+    expect((await app.inject({ method: 'GET', url: prefix + '/positions', headers })).json().items).toEqual([])
+    expect(await database.select().from(positionSnapshots).where(and(eq(positionSnapshots.providerAccountId, account!.id),
+      eq(positionSnapshots.isCurrent, true)))).toEqual([])
+    const catalog = await app.inject({ method: 'POST', url: '/v1/market-catalog/kalshi/resolve', payload: { url: 'https://kalshi.com/events/KX-EVENT' } })
+    expect(catalog.json()).toMatchObject({ items: [{ eventTicker: 'KX-EVENT', outcomes: [{ side: 'yes' }, { side: 'no' }] }] })
+    const [no] = await database.select().from(instruments).where(eq(instruments.externalId, 'KX-FIXTURE:no'))
+    const [observedFill] = await database.select().from(fills).where(eq(fills.providerAccountId, account!.id))
+    const mappedImport = await app.inject({ method: 'POST', url: prefix + '/imports/preview', headers, payload: {
+      csv: 'id,time,market,side,action,lots,price,fee\nfixture-fill,2026-11-25T01:00:00Z,KX-FIXTURE,no,buy,2.5,0.4,0.1',
+      providerAccountId: account!.id, sourceLinks: { 'fixture-fill': observedFill!.sourceRecordId },
+      kalshiMapping: { format: 'kalshi_activity', account: 'mapped', activity: 'fill', units: 'dollars',
+        columns: { id: 'id', timestamp: 'time', ticker: 'market', side: 'side', action: 'action', quantity: 'lots', price: 'price', fee: 'fee' } },
+    } })
+    expect(mappedImport.statusCode, mappedImport.body).toBe(200)
+    expect(mappedImport.json()).toMatchObject({ rows: [{ id: 'fixture-fill', instrument: no!.id }] })
+    const markAt = new Date().toISOString()
+    const csv = [
+      'venue,account,id,timestamp,sequence,type,instrument,asset,quantity,price,amount,fee,fee_asset,canonical_instrument_id',
+      `kalshi,${account!.id},opening,2026-11-24T00:00:00Z,,opening_cash,,USD,,,100,,,`,
+      `kalshi,${account!.id},inventory,2026-11-24T00:00:00Z,,opening_inventory,,USD,,,,,,`,
+      `kalshi,${account!.id},mark,${markAt},,mark,${no!.id},USD,,0.6,,,,${no!.id}`,
+      'polymarket,independent,opening,2026-11-24T00:00:00Z,,opening_cash,,USDC,,,50,,,',
+      'polymarket,independent,inventory,2026-11-24T00:00:00Z,,opening_inventory,,USDC,,,,,,',
+    ].join('\n')
+    const preview = await app.inject({ method: 'POST', url: prefix + '/imports/preview', headers, payload: { csv } })
+    expect(preview.statusCode, preview.body).toBe(200)
+    const review = preview.json()
+    const confirmed = await app.inject({ method: 'POST', url: prefix + '/imports/' + review.batchId + '/confirm?reviewRevision=' + review.reviewRevision, headers })
+    expect(confirmed.statusCode, confirmed.body).toBe(200)
+    const asOf = new Date(Date.now() + 1000).toISOString()
+    const denominations = prefix + '/analytics/denominations?asOf=' + encodeURIComponent(asOf)
+    const native = await app.inject({ method: 'GET', url: denominations, headers })
+    expect(native.json()).toMatchObject({ groups: [{ asset: 'USD', value: '100.4' }, { asset: 'USDC', value: '50' }], indicativeUsd: null })
+    const reporting = await app.inject({ method: 'GET', url: denominations + '&assumedUsdPerUsdc=0.98', headers })
+    expect(reporting.json().indicativeUsd).toMatchObject({ value: '149.4', methodology: 'user_assumed_rate', fundsTransferable: false })
+    const risk = await app.inject({ method: 'GET', url: prefix + '/analytics/exposure?asset=USD&venue=kalshi&asOf=' + encodeURIComponent(asOf), headers })
+    expect(risk.json()).toMatchObject({ exposure: { instruments: [{ quantity: '2.5', basis: '1.1' }] },
+      settlement: { result: { status: 'unavailable' } } })
+    const scenario = await app.inject({ method: 'POST', url: prefix + '/scenarios/evaluate', headers, payload: {
+      source: { mode: 'actual', accounts: [account!.id], venue: 'kalshi', asOf, asset: 'USD' },
+      input: { operations: [{ bucket: JSON.stringify(['kalshi', account!.id]), instrument: no!.id, kind: 'sell', amount: '1',
+        price: '0.6', fee: { mode: 'excluded' } }] },
+    } })
+    expect(scenario.statusCode, scenario.body).toBe(200)
+    expect(scenario.json()).toMatchObject({ hypotheticalRealized: '0.16', bridge: { startingValue: '100.4', endingValue: '100.4' } })
+    const publicScenario = await app.inject({ method: 'POST', url: prefix + '/scenarios/evaluate', headers, payload: {
+      source: { mode: 'scratch', asset: 'USD', asOf, buckets: [{ id: 'usd', account: 'scratch', venue: 'kalshi', cash: '10' }],
+        publicOutcomes: [{ url: 'https://kalshi.com/markets/KX-FIXTURE', assetId: 'KX-FIXTURE:no',
+          assetIdType: 'kalshi_outcome', captureCurrentQuote: true }] },
+      input: { operations: [{ bucket: 'usd', instrument: 'kalshi:KX-FIXTURE:no', kind: 'buy', amount: '1', price: '0.6', fee: { mode: 'excluded' } }] },
+    } })
+    expect(publicScenario.statusCode, publicScenario.body).toBe(200)
+    expect(publicScenario.json()).toMatchObject({ positions: [{ instrument: no!.id, value: '0.6' }], bridge: { endingValue: '10' } })
+  })
+
   it('returns authorized performance and reviewed settlement risk from persisted accounting evidence', async () => {
     await new IngestionService(database, providerRegistry).syncProviderAccount(SNAPSHOT_ACCOUNT_ROW_ID)
     const legs = await database.select({ id: instruments.id, external: instruments.externalId, market: instruments.marketId })
@@ -1050,6 +1147,24 @@ describe('migrations and canonical persistence', () => {
     const failure = await failureApp.inject({ method: 'POST', url: `/v1/provider-accounts/${accountId}/sync`, headers: auth })
     expect(failure.statusCode).toBe(502)
     expect(failure.body).toContain('sync_failed')
+
+    const kalshiId = '00000000-0000-4000-8000-000000000299'
+    await addProviderAccount('kalshi', 'native-kalshi-fixture', kalshiId)
+    const secondVenue = new KalshiClient(async (url) => {
+      if (url.pathname.endsWith('/balance')) return Response.json({ balance_dollars: '125.50', updated_ts: 1795568400 })
+      if (url.pathname.endsWith('/positions')) return Response.json({ market_positions: [], cursor: '' })
+      throw new Error('Unexpected fixture endpoint')
+    })
+    const mixedApp = await buildApp({ config: testConfig(), database,
+      registry: new ProviderRegistry([new PolymarketAdapter(new PolymarketHttpClient(fetcher)), new KalshiAdapter(() => secondVenue)]) })
+    openApps.push(mixedApp)
+    const mixedSync = await mixedApp.inject({ method: 'POST', url: '/v1/provider-accounts/' + kalshiId + '/sync?scope=current', headers: auth })
+    expect(mixedSync.statusCode, mixedSync.body).toBe(200)
+    const mixedCoverage = await mixedApp.inject({ method: 'GET', url: `/v1/portfolios/${PORTFOLIO_ID}/coverage`, headers: auth })
+    expect(mixedCoverage.json().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerCode: 'polymarket', entityType: 'fills' }),
+      expect.objectContaining({ providerCode: 'kalshi', entityType: 'cash_balances', status: 'complete' }),
+    ]))
 
   })
 

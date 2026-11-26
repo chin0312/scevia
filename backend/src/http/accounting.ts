@@ -1,3 +1,4 @@
+import { kalshiCsvMapping, parseMappedKalshiCsv } from '../accounting/kalshi-csv.js'
 import { registerScenarioRoutes } from './scenarios.js'
 import { methodology, scopedReference, ScenarioError, type ScenarioBaseline } from '../scenarios/engine.js'
 import { canonicalInstrumentKeys, instrumentKey } from '../analytics/scope.js'
@@ -59,18 +60,18 @@ function concurrentWrite(error: unknown): boolean {
 }
 
 
-export function registerAccountingRoutes(app: FastifyInstance, database: Database, resolvePublic?: (url: string) => Promise<unknown>) {
+export function registerAccountingRoutes(app: FastifyInstance, database: Database, resolvePublic?: (url: string, type: import('../scenarios/public-market.js').PublicSelection['assetIdType']) => Promise<unknown>) {
   async function owned(portfolioId: string, ownerId: string) {
     const [row] = await database.select({ id: portfolios.id }).from(portfolios)
       .where(and(eq(portfolios.id, portfolioId), eq(portfolios.ownerId, ownerId))).limit(1)
     return row !== undefined
   }
-  app.post<{ Params: { portfolioId: string }; Body: { csv: string; providerAccountId?: string; sourceLinks?: Record<string, string>; replaces?: string; acceptUnlinked?: boolean } }>(prefix + '/imports/preview', {
+  app.post<{ Params: { portfolioId: string }; Body: { csv: string; kalshiMapping?: unknown; providerAccountId?: string; sourceLinks?: Record<string, string>; replaces?: string; acceptUnlinked?: boolean } }>(prefix + '/imports/preview', {
     bodyLimit: 512 * 1024,
     schema: {
       ...auth, tags: ['accounting'], summary: 'Validate a canonical CSV and create an expiring preview',
       params: portfolioParams,
-      body: { type: 'object', required: ['csv'], additionalProperties: false, properties: { csv: { type: 'string', maxLength: 500000 }, providerAccountId: uuid, replaces: uuid, acceptUnlinked: { type: 'boolean' }, sourceLinks: { type: 'object', maxProperties: 2000, additionalProperties: uuid } } },
+      body: { type: 'object', required: ['csv'], additionalProperties: false, properties: { csv: { type: 'string', maxLength: 500000 }, kalshiMapping: { type: 'object', additionalProperties: true }, providerAccountId: uuid, replaces: uuid, acceptUnlinked: { type: 'boolean' }, sourceLinks: { type: 'object', maxProperties: 2000, additionalProperties: uuid } } },
     },
   }, async (request, reply) => {
     const { portfolioId } = request.params
@@ -88,8 +89,28 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     if (association && !account) return reply.code(404).send(missing)
     if (!association && (acceptUnlinked || Object.keys(sourceLinks).length)) return reply.code(422).send({ error: { code: 'source_links_require_account' } })
     let parsed: ReturnType<typeof parseFinancialCsv>
-    try { parsed = parseFinancialCsv(request.body.csv) }
+    try {
+      if (request.body.kalshiMapping === undefined) parsed = parseFinancialCsv(request.body.csv)
+      else {
+        const mapping = kalshiCsvMapping.safeParse(request.body.kalshiMapping)
+        if (!mapping.success) throw new Error('kalshi_csv_mapping_invalid')
+        parsed = parseMappedKalshiCsv(request.body.csv, mapping.data)
+      }
+    }
     catch (error) { return reply.code(422).send({ error: { code: (error as Error).message } }) }
+    if (request.body.kalshiMapping !== undefined && !parsed.issues.length) {
+      const nativeIds = [...new Set(parsed.rows.flatMap((row) => row.instrument ? [row.instrument] : []))]
+      if (nativeIds.length > 2000) return reply.code(422).send({ error: { code: 'kalshi_mapping_scope_limit' } })
+      const matched = nativeIds.length ? await database.select({ id: instruments.id, native: instruments.externalId, ticker: markets.externalId })
+        .from(instruments).innerJoin(markets, eq(instruments.marketId, markets.id))
+        .where(and(eq(markets.providerCode, 'kalshi'), inArray(instruments.externalId, nativeIds))) : []
+      const canonical = new Map(matched.filter((row) => row.native === row.ticker + ':yes' || row.native === row.ticker + ':no')
+        .map((row) => [row.native, row.id]))
+      parsed.rows = parsed.rows.map((row) => {
+        const id = row.instrument ? canonical.get(row.instrument) : undefined
+        return id ? { ...row, instrument: id, canonicalInstrumentId: id } : row
+      })
+    }
     const unresolvedRows = parsed.rows.filter((row) => !row.id || ((row.type === 'split' || row.type === 'merge') && !row.completeSet)).length
     if (parsed.issues.length) return reply.code(422).send({ ...parsed, unresolvedRows, batchId: null })
     if (account && parsed.rows.some((row) => row.venue !== account.venue)) {
@@ -758,7 +779,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const { mode, asset, local } = source
     const publicMatches = publicInstruments.length ? await tx.select({ id: instruments.id, token: instruments.externalId,
       market: markets.externalId, provider: markets.providerCode }).from(instruments).innerJoin(markets, eq(instruments.marketId, markets.id))
-      .where(and(eq(markets.providerCode, 'polymarket'), inArray(instruments.externalId, publicInstruments.map((row) => row.nativeInstrument!)))) : []
+      .where(and(inArray(markets.providerCode, ['polymarket', 'kalshi']), inArray(instruments.externalId, publicInstruments.map((row) => row.nativeInstrument!)))) : []
     const aliases: Record<string, string> = {}
     const normalizedPublic = publicInstruments.map((row) => {
       const exact = publicMatches.find((entry) => entry.provider === row.provider && entry.market === row.nativeMarket && entry.token === row.nativeInstrument)
@@ -862,6 +883,40 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
         : { public: digest(publicInstruments), catalog: digest(model.metadata.map((row) => ({ ...row, resolvesAt: row.resolvesAt?.toISOString() ?? null })).sort((a, b) => a.instrument.localeCompare(b.instrument))),
           settlement: digest([rules.sort((a, b) => a.id.localeCompare(b.id)), constraints.sort((a, b) => a.left.localeCompare(b.left) || a.right.localeCompare(b.right))]) } }
   }, resolvePublic)
+
+  app.get<{ Params: { portfolioId: string }; Querystring: unknown }>(prefix + '/analytics/denominations', {
+    schema: { ...auth, tags: ['analytics'], params: portfolioParams, summary: 'Report native denominations and optional indicative USD value' },
+  }, async (request, reply) => {
+    const { portfolioId } = request.params
+    if (!await owned(portfolioId, request.principalId!)) return reply.code(404).send(missing)
+    const query = z.object({ asOf: z.iso.datetime({ offset: true }), assumedUsdPerUsdc: z.string()
+      .regex(/^\d{1,8}(?:\.\d{1,12})?$/).refine((rate) => new AnalyticalDecimal(rate).gt(0)).optional() }).strict().safeParse(request.query)
+    if (!query.success) return reply.code(422).send({ error: { code: 'invalid_denomination_scope' } })
+    const asOf = new Date(query.data.asOf).toISOString()
+    const input = await loadEvidence(portfolioId, asOf)
+    if (input.truncated) return reply.code(422).send({ error: { code: 'provider_evidence_limit' } })
+    const state = replayAccounting(input.evidence, asOf)
+    const assets = [...new Set(state.cash.map((row) => row.asset))].sort()
+    const accounts = new Map([...input.accounts, ...input.evidence.map((row) => row.observation)]
+      .map((row) => [JSON.stringify([row.venue, row.account]), { venue: row.venue, account: row.account }]))
+    const groups = assets.map((asset) => {
+      const rows = state.cash.filter((row) => row.asset === asset)
+      const known = rows.filter((row) => row.portfolioValue !== null)
+      const sum = known.reduce((value, row) => value.plus(row.portfolioValue!), new AnalyticalDecimal(0)).toFixed()
+      return { asset, knownValue: known.length ? sum : null, value: known.length === rows.length ? sum : null,
+        coverage: known.length === rows.length ? 'selected_asset_buckets' : 'partial',
+        accounts: rows.map(({ venue, account, balance, portfolioValue }) => ({ venue, account, balance, portfolioValue })) }
+    })
+    const unknownAccounts = [...accounts.values()].filter((scope) => !state.cash.some((row) => row.account === scope.account && row.venue === scope.venue))
+    const rate = query.data.assumedUsdPerUsdc
+    const supported = groups.length > 0 && !unknownAccounts.length && groups.every((group) =>
+      (group.asset === 'USD' || group.asset === 'USDC') && group.value !== null)
+    return { asOf, scope: 'selected_financial_evidence_only', groups, unknownAccounts,
+      indicativeUsd: rate && supported ? { value: groups.reduce((total, group) =>
+        total.plus(new AnalyticalDecimal(group.value!).mul(group.asset === 'USDC' ? rate : 1)), new AnalyticalDecimal(0)).toFixed(),
+        usdPerUsdc: rate, methodology: 'user_assumed_rate', asOf, fundsTransferable: false } : null,
+      conversionAvailability: !rate ? 'assumption_required' : supported ? 'indicative' : 'incomplete_or_unsupported_evidence' }
+  })
 
   app.get<{ Params: { portfolioId: string }; Querystring: unknown }>(prefix + '/analytics/exposure', {
     schema: { ...auth, tags: ['analytics'], summary: 'Read allocation, resolution timeline and reviewed settlement risk',

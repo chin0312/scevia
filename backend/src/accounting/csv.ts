@@ -63,7 +63,7 @@ export function parseFinancialCsv(input: string) {
   return { rows, issues, totalRows: table.length }
 }
 
-function csvRows(input: string): string[][] {
+export function csvRows(input: string): string[][] {
   const rows: string[][] = []
   let row: string[] = []
   let cell = ''

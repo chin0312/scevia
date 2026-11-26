@@ -3,8 +3,13 @@ import { ScenarioError, type ScenarioInstrument } from './engine.js'
 
 const timestamp = z.iso.datetime({ offset: true })
 const decimal = z.string().regex(/^\d{1,20}(?:\.\d{1,18})?$/)
-export const publicSelection = z.object({ url: z.string().min(1).max(2048), assetId: z.string().regex(/^\d{1,100}$/),
-  assetIdType: z.enum(['position_id', 'clob_token_id']), captureCurrentQuote: z.boolean().optional() }).strict()
+const publicLink = z.string().min(1).max(2048)
+export const publicSelection = z.union([
+  z.object({ url: publicLink, assetId: z.string().regex(/^\d{1,100}$/),
+    assetIdType: z.enum(['position_id', 'clob_token_id']), captureCurrentQuote: z.boolean().optional() }).strict(),
+  z.object({ url: publicLink, assetId: z.string().regex(/^[A-Z0-9][A-Z0-9_-]{0,127}:(yes|no)$/),
+    assetIdType: z.literal('kalshi_outcome'), captureCurrentQuote: z.boolean().optional() }).strict(),
+])
 export type PublicSelection = z.infer<typeof publicSelection>
 const result = z.object({ item: z.object({ eventId: z.string().nullable().optional(), markets: z.array(z.object({
   providerMarketId: z.string(), conditionId: z.string(), lifecycle: z.string(), endDate: z.string().nullable(),
@@ -15,6 +20,7 @@ const result = z.object({ item: z.object({ eventId: z.string().nullable().option
 })) }) })
 
 export function selectPublicOutcome(raw: unknown, selection: PublicSelection, asset: string, asOf: string): ScenarioInstrument {
+  if (selection.assetIdType === 'kalshi_outcome') return selectKalshiOutcome(raw, selection, asset, asOf)
   if (asset !== 'USDC') throw new ScenarioError('public_market_asset_mismatch')
   const parsed = result.safeParse(raw)
   if (!parsed.success) throw new ScenarioError('public_market_evidence_unavailable')
@@ -41,4 +47,27 @@ export function selectPublicOutcome(raw: unknown, selection: PublicSelection, as
     venue: 'polymarket', provider: 'polymarket', nativeMarket: market.conditionId, nativeInstrument: selection.assetId, outcome: outcome.name, providerMarket: market.providerMarketId, lifecycle: market.lifecycle,
     settlementAsset: asset, latestPrice: latest?.value ?? null, latestPriceAt: markAt, resolvesAt: market.endDate,
     ...(feeSchedule ? { feeSchedule } : {}) }
+}
+
+
+const kalshiEnvelope = z.object({ items: z.array(z.object({ marketTicker: z.string(), eventTicker: z.string(), lifecycle: z.string(),
+  settlementAsset: z.literal('USD'), outcomes: z.array(z.object({ id: z.string(), side: z.enum(['yes', 'no']),
+    name: z.string(), quote: z.object({ value: decimal, retrievedAt: timestamp, observedAt: z.null(), provenance: z.string() }).nullable() })) })) })
+
+function selectKalshiOutcome(raw: unknown, selection: PublicSelection, asset: string, asOf: string): ScenarioInstrument {
+  if (asset !== 'USD') throw new ScenarioError('public_market_asset_mismatch')
+  const parsed = kalshiEnvelope.safeParse(raw)
+  if (!parsed.success) throw new ScenarioError('public_market_evidence_unavailable')
+  const matches = parsed.data.items.flatMap((item) => item.outcomes.filter((outcome) => outcome.id === selection.assetId).map((outcome) => ({ item, outcome })))
+  if (matches.length !== 1) throw new ScenarioError('public_market_outcome_not_unique')
+  const { item, outcome } = matches[0]!
+  const markAt = outcome.quote?.retrievedAt ? new Date(outcome.quote.retrievedAt).toISOString() : null
+  if (selection.captureCurrentQuote && !outcome.quote) throw new ScenarioError('current_quote_unavailable')
+  const usable = markAt !== null && (markAt <= asOf || selection.captureCurrentQuote)
+  return { id: 'kalshi:' + outcome.id, venue: 'kalshi', provider: 'kalshi', nativeMarket: item.marketTicker,
+    nativeInstrument: outcome.id, nativeOutcomeIndex: outcome.side === 'yes' ? 0 : 1,
+    market: 'kalshi:' + item.marketTicker, event: 'kalshi:' + item.eventTicker, outcome: outcome.name,
+    lifecycle: item.lifecycle, settlementAsset: 'USD', mark: usable ? outcome.quote!.value : null, markAt: usable ? markAt : null,
+    latestPrice: outcome.quote?.value ?? null, latestPriceAt: markAt,
+    ...(usable ? { markSource: markAt > asOf ? 'assumed_current_quote' as const : 'public_retrieval_at_cutoff' as const } : {}) }
 }

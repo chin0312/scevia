@@ -99,3 +99,5 @@ The accounting API supports independent imported accounts, manual records, trans
 For return quality, chart-ready periods, settlement component coverage and baseline revisions, see [Phase 4 analytics](docs/ANALYTICS.md).
 
 [Phase 5 scenario methodology and endpoints](docs/SCENARIOS.md) cover frozen baselines, what-if calculation, and saved comparisons.
+
+Phase 6 adds a [restricted Kalshi backend](docs/KALSHI.md), explicit activity CSV mapping and native denomination reporting. Kalshi live access and credential submission are disabled in the server configuration.

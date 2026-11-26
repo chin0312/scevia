@@ -105,3 +105,5 @@ Record inspection exposes `original` source values, revision-applicable `adjuste
 Large portfolios can hit the current provider evidence and replay work limits. Phase 4 should evaluate scoped evidence loading and pagination while keeping truncation explicit. Coverage describes the selected evidence, opening declarations, and provider observations separately. Integration should preserve those distinctions and leave full-account metrics unavailable where coverage is unverified. Historical daily valuations currently replay the bounded evidence at each cutoff. Evaluate incremental replay or checkpoints in Phase 4 while preserving cutoff accuracy and correction semantics.
 
 Cash-inclusive analytical allocation also requires authoritative opening inventory across the selected cash buckets. Known cash stays inspectable when the complete selected denominator is unavailable. See [Phase 4 methodology](ANALYTICS.md).
+
+The denominations endpoint groups eligible selected values by native asset and preserves partial bucket results. An explicit USD-per-USDC rate can produce an indicative display valuation. The assumption has no ledger or funding effects.

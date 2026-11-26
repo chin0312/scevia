@@ -55,3 +55,5 @@ Conditional binary payouts retain established provider units. A declaration over
 `sameActualValuationReferences` covers holding-specific marks and `sameValuationAssumptions` covers instrument references and scenario overrides. `sameFeeMethodology` compares formula categories and `sameFeeAssumptions` includes amounts, rates and material provider parameters. Underfunded and partially funded drafts retain known values and shortfalls. Their normalized change is unavailable.
 
 The scenario settlement result can report `no_open_exposure` with zero gross payout when inventory is established and all open quantities are zero. Eligible cash plus pending entitlements then gives the same modeled minimum and maximum. Incomplete inventory retains unavailable exposure.
+
+Kalshi catalog choices use a provider-native ticker and explicit outcome ID. A scenario can capture a labeled retrieved quote through its frozen preview. Native USD and USDC funding remain isolated and the indicative denomination display rate does not fund trades or rewrite scenario results.

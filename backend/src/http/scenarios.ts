@@ -150,7 +150,7 @@ function run(baseline: ScenarioBaseline, changes: ScenarioInput) {
 export function registerScenarioRoutes(app: FastifyInstance, db: Database,
   owned: (portfolioId: string, ownerId: string) => Promise<boolean>,
   baseline: (tx: Read, portfolioId: string, source: BaselineSource, publicInstruments: ScenarioInstrument[]) => Promise<ScenarioBaseline>,
-  resolvePublic?: (url: string) => Promise<unknown>) {
+  resolvePublic?: (url: string, type: import('../scenarios/public-market.js').PublicSelection['assetIdType']) => Promise<unknown>) {
   const path = '/portfolios/:portfolioId/scenarios'
   const previews = new Map<string, { portfolioId: string; source: BaselineSource; baseline: ScenarioBaseline; expires: number }>()
   const previewLimit = 64
@@ -160,8 +160,9 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
     if (!frozenPublic && value.publicOutcomes.length && !resolvePublic) throw new ScenarioError('provider_live_disabled')
     const pending = new Map<string, Promise<unknown>>()
     const resolved = frozenPublic ?? await Promise.all(value.publicOutcomes.map(async (selection) => {
-      if (!pending.has(selection.url)) pending.set(selection.url, resolvePublic!(selection.url))
-      return selectPublicOutcome(await pending.get(selection.url), selection, value.asset, new Date(value.asOf).toISOString())
+      const key = selection.assetIdType === 'kalshi_outcome' ? 'kalshi:' + selection.url : 'polymarket:' + selection.url
+      if (!pending.has(key)) pending.set(key, resolvePublic!(selection.url, selection.assetIdType))
+      return selectPublicOutcome(await pending.get(key), selection, value.asset, new Date(value.asOf).toISOString())
     }))
     return db.transaction(async (tx) => {
       const frozen = await baseline(tx, portfolioId, value, resolved)
@@ -303,7 +304,7 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
     const constraints = [...original.constraints, ...added.constraints.filter((edge) => newIds.has(edge.left) || newIds.has(edge.right))]
     if (rules.length + missingRules.length > 256 || constraints.length > 1000) throw new ScenarioError('instrument_extension_graph_limit')
     const expanded = { ...original, instruments, rules, constraints, missingRules,
-      publicInstruments: [...(original.publicInstruments ?? original.instruments.filter((row) => row.id.startsWith('polymarket:'))), ...(added.publicInstruments ?? [])],
+      publicInstruments: [...(original.publicInstruments ?? original.instruments.filter((row) => (row.id.startsWith('polymarket:') || row.id.startsWith('kalshi:')))), ...(added.publicInstruments ?? [])],
       instrumentAliases: { ...original.instrumentAliases, ...added.instrumentAliases },
       reservedRules: [...new Map([...(added.reservedRules ?? []), ...(original.reservedRules ?? [])].map((row) => [row.id, row])).values()],
       settlementGraphLimited: original.settlementGraphLimited === true || added.settlementGraphLimited === true,
@@ -331,7 +332,7 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
       catalog: [...new Set([...current.source.catalog, ...current.baseline.instruments.filter((row) => z.uuid().safeParse(row.id).success)
         .map((row) => row.id)])] }
     const candidate = await capture(portfolioId, updatedSource, current.baseline.publicInstruments
-      ?? current.baseline.instruments.filter((row) => row.id.startsWith('polymarket:')))
+      ?? current.baseline.instruments.filter((row) => (row.id.startsWith('polymarket:') || row.id.startsWith('kalshi:'))))
     const currentIds = new Set(candidate.instruments.map((row) => row.id))
     for (const instrument of current.baseline.instruments) {
       if (!currentIds.has(instrument.id) && instrument.id.startsWith('holding:')) {
