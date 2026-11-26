@@ -50,6 +50,8 @@ export interface RiskEvent { id: string; name: string; short: string; category: 
 export type ClosedOutcome = 'Won' | 'Lost' | 'Closed early'
 export interface ClosedTrade {
   id: string; market: string; category: Category; platform: Platform; side: Side
+  /** Canonical market identity and account, when the source provides them. Grouping uses these over the title. */
+  marketId?: string; accountId?: string
   opened: string; closed: string; shares: number; entry: number; exit: number
   /** Total fees for the round trip. */
   fees: number

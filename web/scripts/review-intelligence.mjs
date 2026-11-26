@@ -110,6 +110,8 @@ await at(1440, 900, async (p) => {
 })
 // Analytics and Risk depth: performance, attribution, patterns, trade analysis; concentration basis, settlement paths, timing.
 for (const [w, h] of [[1440, 900], [768, 1024], [375, 812]]) await at(w, h, async (p) => {
+  await fresh(p, '/analytics'); await p.locator('#activity').waitFor(); await shot(p, `analytics-full-${w}`, true)
+  await fresh(p, '/risk'); await p.locator('#calendar').waitFor(); await shot(p, `risk-full-${w}`, true)
   await fresh(p, '/analytics'); await p.locator('#returns').scrollIntoViewIfNeeded(); await shot(p, `analytics-returns-${w}`)
   await p.locator('#patterns').scrollIntoViewIfNeeded(); await shot(p, `analytics-patterns-${w}`)
   await p.locator('#largest').scrollIntoViewIfNeeded(); await shot(p, `analytics-trades-${w}`)

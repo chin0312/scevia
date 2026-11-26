@@ -21,52 +21,78 @@ const ok = (value: number, quality: MetricQuality = 'estimate'): QualityMetric =
 const na = (reason: string): QualityMetric => ({ value: null, availability: 'unavailable', reason, quality: 'unavailable' })
 
 export interface IndexPoint { date: string; index: number | null; drawdown: number | null }
-export interface PeriodReturn { period: string; value: number | null; partial: boolean }
+/** A sampled calendar-month return: the compounded returns of the sampled intervals that END in the month.
+ *  `crossesBoundary` is true when one of them started in the previous month, so the value isn't an exact
+ *  calendar-month return (no month-boundary valuation exists in the sample, and none is invented). */
+export interface PeriodReturn { period: string; value: number | null; partial: boolean; crossesBoundary: boolean; intervals: number }
+/** Peak, trough and recovery of the maximum drawdown, all on the flow-adjusted index at the sampled dates. */
+export interface DrawdownDetail { peakDate: string; troughDate: string; recoveredOn: string | null }
 export interface PerformanceReadModel {
   sampling: 'daily' | 'weekly'
   twr: QualityMetric; annualizedMwr: QualityMetric; annualizedVolatility: QualityMetric; maximumDrawdown: QualityMetric
+  /** Same basis as maximumDrawdown; null when it's unavailable or there was no drawdown. */
+  drawdownDetail: DrawdownDetail | null
   /** Flow-adjusted index (start = 1) and drawdown from its prior peak at each sampled date. */
   index: IndexPoint[]
   monthly: PeriodReturn[]
 }
 
+const BROKEN = 'A valuation in the period is zero or negative, so the return chain breaks'
+const SHORT = 'Needs at least two valuations in the period'
+
 /** Flow-adjusted returns from sampled valuations. Each interval's return is (closing value − net external flow) ÷
  *  opening value − 1, so a deposit is never a gain. With weekly snapshots the flow is assumed at the interval end,
  *  which makes this an estimate; the backend uses values immediately before and after each flow. An interval with a
- *  nonpositive opening value breaks the chain: everything after it is unavailable, never patched. */
+ *  nonpositive opening value breaks the chain: the period's return and maximum drawdown are unavailable (a prefix
+ *  isn't presented as the whole period) and later index points are null, never patched or interpolated. Drawdown is
+ *  measured at the sampled dates only, so it can understate a deeper intraperiod fall. */
 export function performanceFromSeries(pts: SeriesPoint[], sampling: 'daily' | 'weekly' = 'weekly'): PerformanceReadModel {
   const index: IndexPoint[] = []
-  const intervals: { end: string; r: number | null }[] = []
+  const intervals: { start: string; end: string; r: number | null }[] = []
   let idx: number | null = pts.length ? 1 : null, peak = 1, broken = false
   pts.forEach((p, i) => {
     if (i > 0) {
       const prev = pts[i - 1], flow = p.deposits - prev.deposits
-      const r = !broken && prev.value > 0 ? (p.value - flow) / prev.value - 1 : null
+      const r = !broken && prev.value > 0 && Number.isFinite(p.value) ? (p.value - flow) / prev.value - 1 : null
       if (r == null) broken = true
-      intervals.push({ end: p.date, r })
+      intervals.push({ start: prev.date, end: p.date, r })
       idx = r == null || idx == null ? null : idx * (1 + r)
     }
     if (idx != null) peak = Math.max(peak, idx)
     index.push({ date: p.date, index: idx, drawdown: idx == null ? null : idx / peak - 1 })
   })
   const last = index.at(-1)?.index ?? null
-  const dds = index.map((x) => x.drawdown).filter((x): x is number => x != null)
   const short = pts.length < 2
-  const monthsMap = new Map<string, (number | null)[]>()
-  for (const iv of intervals) { const m = iv.end.slice(0, 7); monthsMap.set(m, [...(monthsMap.get(m) ?? []), iv.r]) }
+  // Maximum drawdown with its own peak, trough and recovery, all from the index above.
+  let detail: DrawdownDetail | null = null
+  if (!short && !broken) {
+    let troughI = -1, worst = 0
+    index.forEach((x, i) => { if ((x.drawdown as number) < worst) { worst = x.drawdown as number; troughI = i } })
+    if (troughI >= 0) {
+      let peakI = troughI
+      while (peakI > 0 && (index[peakI].drawdown as number) < 0) peakI--
+      const rec = index.slice(troughI + 1).find((x) => (x.drawdown as number) >= 0)
+      detail = { peakDate: index[peakI].date, troughDate: index[troughI].date, recoveredOn: rec?.date ?? null }
+    }
+  }
+  const monthsMap = new Map<string, { rs: (number | null)[]; crossing: boolean }>()
+  for (const iv of intervals) {
+    const m = iv.end.slice(0, 7), g = monthsMap.get(m) ?? { rs: [], crossing: false }
+    g.rs.push(iv.r); g.crossing ||= iv.start.slice(0, 7) !== m; monthsMap.set(m, g)
+  }
   const keys = [...monthsMap.keys()]
   const monthly: PeriodReturn[] = keys.map((m, i) => {
-    const rs = monthsMap.get(m)!
+    const { rs, crossing } = monthsMap.get(m)!
     const value = rs.some((r) => r == null) ? null : rs.reduce<number>((a, r) => a * (1 + (r as number)), 1) - 1
-    return { period: m, value, partial: i === 0 || i === keys.length - 1 }
+    return { period: m, value, partial: i === 0 || i === keys.length - 1, crossesBoundary: crossing, intervals: rs.length }
   })
   return {
     sampling,
-    twr: short ? na('Needs at least two valuations in the period') : last == null ? na('A valuation in the period is zero or negative, so the return chain breaks') : ok(last - 1),
+    twr: short ? na(SHORT) : broken ? na(BROKEN) : ok((last as number) - 1),
     annualizedMwr: na('Needs dated investor cash flows from the accounting service'),
     annualizedVolatility: sampling === 'daily' && !broken && intervals.length >= 2 ? ok(stdev(intervals.map((x) => x.r as number)) * Math.sqrt(365)) : na(sampling === 'daily' ? 'Needs two or more complete daily intervals' : 'Needs daily valuations'),
-    maximumDrawdown: short ? na('Needs at least two valuations in the period') : dds.length < 2 ? na('A valuation in the period is zero or negative, so the return chain breaks') : ok(Math.min(0, ...dds)),
-    index, monthly,
+    maximumDrawdown: short ? na(SHORT) : broken ? na(BROKEN) : ok(Math.min(0, ...index.map((x) => x.drawdown as number))),
+    drawdownDetail: detail, index, monthly,
   }
 }
 function stdev(xs: number[]) {
@@ -88,20 +114,27 @@ export interface Cohort {
   /** Entry-price cohorts only: the average entry price of resolved trades (the market's price, not a forecast). */
   impliedWinRate: number | null
 }
-const ENTRY: [number, number][] = [[0, 0.2], [0.2, 0.4], [0.4, 0.6], [0.6, 0.8], [0.8, 1.0001]]
+const ENTRY: [number, number, string][] = [[0, 0.2, 'Under $0.20'], [0.2, 0.4, '$0.20 to under $0.40'], [0.4, 0.6, '$0.40 to under $0.60'], [0.6, 0.8, '$0.60 to under $0.80'], [0.8, Infinity, '$0.80 and above']]
 const HOLD: [number, number, string][] = [[0, 7, 'Under 7 days'], [7, 31, '7 to 30 days'], [31, 91, '31 to 90 days'], [91, Infinity, 'Over 90 days']]
-const SIZE: [number, number, string][] = [[0, 250, 'Under $250'], [250, 1000, '$250 to $1,000'], [1000, 5000, '$1,000 to $5,000'], [5000, Infinity, 'Over $5,000']]
+/** Entry notional in each trade's own settlement asset (USD, USDC or pUSD), not converted. */
+const SIZE: [number, number, string][] = [[0, 250, 'Under 250'], [250, 1000, '250 to under 1,000'], [1000, 5000, '1,000 to under 5,000'], [5000, Infinity, '5,000 and above']]
 export const notionalOf = (t: ClosedTrade) => t.shares * t.entry
-export const holdingDays = (t: ClosedTrade) => Math.max(0, daysBetween(t.opened, t.closed))
+/** Days from open to close, or null when either date is missing or invalid (never a zero-day holding). */
+export const holdingDays = (t: ClosedTrade): number | null => {
+  const ok = (d: string | undefined) => !!d && !Number.isNaN(Date.parse(d))
+  if (!ok(t.opened) || !ok(t.closed)) return null
+  const d = daysBetween(t.opened, t.closed)
+  return d >= 0 ? d : null
+}
 
 function keyOf(t: ClosedTrade, d: CohortDim): [string, string, number] {
   switch (d) {
-    case 'Entry price': { const i = ENTRY.findIndex(([lo, hi]) => t.entry >= lo && t.entry < hi); const [lo, hi] = ENTRY[i]; return [String(i), `$${lo.toFixed(2)}–${Math.min(hi, 1).toFixed(2)}`, i] }
+    case 'Entry price': { const i = ENTRY.findIndex(([lo, hi]) => t.entry >= lo && t.entry < hi); return i < 0 ? ['unknown', 'Unknown entry price', 99] : [String(i), ENTRY[i][2], i] }
     case 'Side': return [t.side, t.side, t.side === 'YES' ? 0 : 1]
     case 'Category': return [t.category, t.category, 0]
     case 'Platform': return [t.platform, t.platform === 'pm' ? 'Polymarket' : 'Kalshi', t.platform === 'pm' ? 0 : 1]
-    case 'Holding period': { const h = holdingDays(t), i = HOLD.findIndex(([lo, hi]) => h >= lo && h < hi); return [String(i), HOLD[i][2], i] }
-    case 'Position size': { const v = notionalOf(t), i = SIZE.findIndex(([lo, hi]) => v >= lo && v < hi); return [String(i), SIZE[i][2], i] }
+    case 'Holding period': { const h = holdingDays(t); if (h == null) return ['unknown', 'Unknown dates', 99]; const i = HOLD.findIndex(([lo, hi]) => h >= lo && h < hi); return [String(i), HOLD[i][2], i] }
+    case 'Position size': { const v = notionalOf(t); if (!Number.isFinite(v)) return ['unknown', 'Unknown size', 99]; const i = SIZE.findIndex(([lo, hi]) => v >= lo && v < hi); return [String(i), SIZE[i][2], i] }
     case 'Exit type': return [t.outcome, t.outcome === 'Closed early' ? 'Sold before resolution' : t.outcome === 'Won' ? 'Resolved in your favour' : 'Resolved against you', ['Won', 'Lost', 'Closed early'].indexOf(t.outcome)]
   }
 }
@@ -134,10 +167,13 @@ export function activityByMonth(trades: ClosedTrade[]) {
   for (const t of trades) { const k = t.closed.slice(0, 7); m.set(k, [...(m.get(k) ?? []), t]) }
   return [...m.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([month, ts]) => ({ month, n: ts.length, notional: sum(ts, notionalOf), fees: sum(ts, (t) => t.fees), net: sum(ts, tradeNet), trades: ts }))
 }
+/** Stable market identity: the canonical id when the source gives one, otherwise platform + title, so markets with
+ *  the same title on different platforms (or different ids) stay distinct. */
+export const marketKey = (t: ClosedTrade) => (t.marketId ? `${t.platform}:${t.marketId}` : `${t.platform}|${t.market}`)
 export function byMarket(trades: ClosedTrade[]) {
   const m = new Map<string, ClosedTrade[]>()
-  for (const t of trades) m.set(t.market, [...(m.get(t.market) ?? []), t])
-  return [...m.entries()].map(([market, ts]) => ({ market, n: ts.length, net: sum(ts, tradeNet), fees: sum(ts, (t) => t.fees), trades: ts })).sort((a, b) => Math.abs(b.net) - Math.abs(a.net))
+  for (const t of trades) { const k = marketKey(t); m.set(k, [...(m.get(k) ?? []), t]) }
+  return [...m.entries()].map(([key, ts]) => ({ key, market: ts[0].market, platform: ts[0].platform, n: ts.length, net: sum(ts, tradeNet), fees: sum(ts, (t) => t.fees), trades: ts })).sort((a, b) => Math.abs(b.net) - Math.abs(a.net))
 }
 /** Fees ÷ entry notional. Unavailable when any fee is an estimate the source didn't report, or there's no notional. */
 export function feeBurden(trades: ClosedTrade[]): QualityMetric {
@@ -148,16 +184,28 @@ export function feeBurden(trades: ClosedTrade[]): QualityMetric {
 }
 
 /* ───────────── Concentration ───────────── */
-export interface Concentration { denominator: number; hhi: number; effective: number; top: { count: number; weight: number }[]; missing: number }
-/** HHI over positive known values (missing values are counted, never treated as zero), the effective number of
- *  exposures (1 ÷ HHI) and top-N shares. Effective exposures aren't independent risks: it's only a size spread. */
+export interface Concentration {
+  /** Sum of known values. When `missing` > 0 it's a known subtotal, not the whole exposure. */
+  denominator: number; hhi: number; effective: number; top: { count: number; weight: number }[]
+  /** Rows with a confirmed value (zero included) and rows whose value is missing or not a finite number. */
+  known: number; missing: number; complete: boolean
+}
+/** HHI over known values (a confirmed zero is known and weighs nothing; a missing or nonfinite value is counted as
+ *  missing, never as zero), the effective number of exposures (1 ÷ HHI) and top-N shares, all from the same known
+ *  inputs. Effective exposures aren't independent risks: it's only a size spread. Null without a positive total. */
 export function concentration(rows: { value: number | null }[], tops = [1, 3, 5]): Concentration | null {
-  const known = rows.map((r) => r.value).filter((v): v is number => v != null && v > 0)
+  const known = rows.map((r) => r.value).filter((v): v is number => v != null && Number.isFinite(v) && v >= 0)
   const denominator = sum(known, (v) => v)
   if (!known.length || denominator <= 0) return null
   const w = known.map((v) => v / denominator).sort((a, b) => b - a)
-  const hhi = sum(w, (x) => x * x)
-  return { denominator, hhi, effective: 1 / hhi, top: tops.map((n) => ({ count: n, weight: sum(w.slice(0, n), (x) => x) })), missing: rows.length - known.length }
+  const hhi = sum(w, (x) => x * x), missing = rows.length - known.length
+  return { denominator, hhi, effective: 1 / hhi, top: tops.map((n) => ({ count: n, weight: sum(w.slice(0, n), (x) => x) })), known: known.length, missing, complete: missing === 0 }
+}
+/** Sum of a group's values on one basis: the known subtotal, how many values are missing, and whether it's complete.
+ *  Missing or nonfinite values never contaminate the subtotal. */
+export function knownSubtotal(values: (number | null | undefined)[]) {
+  const ok = values.filter((v): v is number => v != null && Number.isFinite(v))
+  return { value: sum(ok, (v) => v), missing: values.length - ok.length, complete: ok.length === values.length }
 }
 
 /* ───────────── Settlement ───────────── */
@@ -187,5 +235,6 @@ export function pathSummary(hs: { eventId: string; side: string; shares: number;
   const payout = sum(inPath, (h) => (h.side === path[h.eventId] ? h.shares : 0))
   const cost = sum(inPath, (h) => h.cost)
   const value = inPath.some((h) => h.mark == null) ? null : sum(inPath, (h) => h.shares * (h.mark as number))
-  return { payout, pnl: payout - cost, change: value == null ? null : payout - value, unsupported: held.length - inPath.length }
+  const unsupported = held.length - inPath.length
+  return { payout, pnl: payout - cost, change: value == null ? null : payout - value, unsupported, complete: unsupported === 0 }
 }

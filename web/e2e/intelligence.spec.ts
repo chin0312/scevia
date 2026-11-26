@@ -421,8 +421,10 @@ test('analytics depth: performance, attribution, trading patterns and trade anal
   await expect(page.locator('#highlights')).toContainText('Time-weighted return')
   await expect(page.locator('#highlights')).toContainText('est.')
   const ret = page.locator('#returns')
-  await expect(ret).toContainText('Needs dated investor cash flows from the accounting service')
-  await expect(ret).toContainText('Needs daily valuations')
+  await expect(ret).toContainText('Not available for this data: annualized money-weighted return, annualized volatility')
+  await ret.locator('.ret-na .itip').click()
+  await expect(page.getByRole('tooltip')).toContainText('Needs dated investor cash flows from the accounting service')
+  await expect(page.getByRole('tooltip')).toContainText('Needs daily valuations')
   await ret.getByRole('tab', { name: 'Drawdown' }).click()
   await expect(ret.locator('svg')).toBeVisible()
   await expect(page.getByRole('list', { name: 'Monthly returns' }).getByRole('listitem').first()).toHaveAccessibleName(/partial month/)
@@ -489,4 +491,98 @@ test('risk depth: basis, concentration metrics, same-path settlement and resolut
   const timing = page.getByRole('list', { name: 'Capital committed by resolution window' })
   await expect(timing.getByRole('listitem').first()).toContainText('Within 30 days')
   await expectCleanCopy(page.locator('main'), 'risk')
+})
+
+/* Layout regressions: separate cards never touch or overlap, the page never scrolls sideways (dense tables scroll
+   inside their own wrapper), and metric tiles never clip their values. */
+const cardLayoutIssues = async (page: Page) => page.evaluate(() => {
+  const issues: string[] = []
+  const cards = [...document.querySelectorAll('main .card')].filter((c) => !c.parentElement?.closest('.card'))
+  const rects = cards.map((c) => ({ id: (c as HTMLElement).id || c.querySelector('h3')?.textContent || '?', r: c.getBoundingClientRect() })).filter((x) => x.r.height > 0)
+  for (const a of rects) {
+    const below = rects.filter((b) => b !== a && b.r.top >= a.r.top + 1 && Math.min(a.r.right, b.r.right) - Math.max(a.r.left, b.r.left) > Math.min(a.r.width, b.r.width) * 0.5)
+      .sort((x, y) => x.r.top - y.r.top)[0]
+    if (below && below.r.top - a.r.bottom < 8) issues.push(`${a.id} → ${below.id}: ${Math.round(below.r.top - a.r.bottom)}px`)
+  }
+  const over = document.documentElement.scrollWidth - window.innerWidth
+  if (over > 1) issues.push(`page overflows by ${over}px`)
+  for (const t of document.querySelectorAll('main .hl-tile, main .tile, main .conc-stats > div, main .timing-b')) {
+    const el = t as HTMLElement
+    if (el.scrollWidth > el.clientWidth + 1) issues.push(`clipped: ${el.innerText.split('\n')[0]}`)
+  }
+  return issues
+})
+
+test('layout: analytical cards keep their spacing and nothing overflows at desktop, laptop, tablet and phone widths', async ({ page }) => {
+  for (const [w, h] of [[1440, 900], [1024, 768], [768, 1024], [375, 812]]) {
+    await page.setViewportSize({ width: w, height: h })
+    for (const path of ['/analytics', '/risk']) {
+      await fresh(page, path)
+      await page.locator(path === '/analytics' ? '#activity' : '#calendar').waitFor()
+      await page.locator('main .card').last().scrollIntoViewIfNeeded()
+      expect(await cardLayoutIssues(page), `${path} at ${w}px`).toEqual([])
+    }
+    // Highlights: 4 columns when the card is wide, 2 when narrower, 1 on a phone.
+    await fresh(page, '/analytics')
+    await page.locator('#highlights .hl-tile').first().waitFor()
+    const tops = await page.locator('#highlights .hl-tile').evaluateAll((els) => els.map((e) => Math.round(e.getBoundingClientRect().top)))
+    const perRow = tops.filter((t) => t === tops[0]).length
+    // By the card's own width: 4 when wide (1024px can be either, depending on the rail), 2 on tablets, 1 on phones.
+    expect(w >= 1440 ? [4] : w >= 1024 ? [2, 4] : w <= 375 ? [1] : [2], `highlight columns at ${w}px`).toContain(perRow)
+  }
+})
+
+test('analytics interaction: pattern chart and table share one cohort result, with a filter applied before grouping', async ({ page }) => {
+  await fresh(page, '/analytics')
+  const pat = page.locator('#patterns')
+  const bars = pat.getByRole('list', { name: /by entry price/ }).getByRole('listitem')
+  await expect(bars).toHaveCount(await pat.locator('tbody tr').count())
+  await pat.getByRole('radiogroup', { name: 'Chart metric' }).getByRole('radio', { name: 'Trades' }).click()
+  const firstBar = await bars.first().getAttribute('aria-label')
+  const firstRowTrades = await pat.locator('tbody tr').first().locator('td').nth(1).innerText()
+  expect(firstBar).toContain(`: ${firstRowTrades}.`)
+  await pat.getByLabel('Only include').selectOption({ label: 'Polymarket' })
+  await bars.first().click()
+  const dlg = page.getByRole('dialog')
+  await expect(dlg).toContainText(/Entry price: .*, Polymarket/)
+  for (const b of await dlg.locator('.plat').all()) await expect(b).toHaveAttribute('aria-label', 'Polymarket')
+  await page.keyboard.press('Escape')
+  await expectCleanCopy(pat, 'patterns with a filter')
+})
+
+test('analytics interaction: comparison includes return metrics, rankings are complete and months keep their year', async ({ page }) => {
+  await fresh(page, '/analytics')
+  const cmp = page.locator('#metrics')
+  await expect(cmp.getByRole('row', { name: /Time-weighted return/ })).toContainText('pts')
+  await expect(cmp.getByRole('row', { name: /Maximum drawdown \(sampled\)/ })).toBeVisible()
+  await expect(cmp.getByRole('row', { name: /P&L drawdown \(weekly\)/ })).toBeVisible()
+  // Every market is reachable: the top of the ranking first, the rest on request.
+  await page.getByRole('radiogroup', { name: 'Period' }).getByRole('radio', { name: 'All' }).click()
+  const markets = page.locator('#by-market tbody tr')
+  await expect(markets).toHaveCount(8)
+  const more = page.locator('#by-market').getByRole('button', { name: /Show all \d+ markets/ })
+  const total = Number((await more.innerText()).match(/\d+/)![0])
+  await more.click()
+  await expect(markets).toHaveCount(total)
+  await page.locator('#by-market').getByRole('radiogroup', { name: 'Sort markets by' }).getByRole('radio', { name: 'Trades' }).click()
+  const counts = await markets.evaluateAll((rs) => rs.map((r) => Number((r.children[1] as HTMLElement).innerText)))
+  expect(counts).toEqual([...counts].sort((a, b) => b - a))
+  await expect(page.locator('#largest').getByRole('button', { name: /^View all \d+$/ })).toBeVisible()
+  // A multi-year period labels months with their year; months are labelled approximate.
+  await expect(page.locator('#monthly')).toContainText('Approximate')
+  await expect(page.locator('#monthly .heat-c').first()).toContainText(/\d{2}/)
+  await expect(page.locator('#activity')).toContainText('Closed-trade activity')
+})
+
+test('analytics and risk in another reporting currency show converted money and no broken numbers', async ({ page }) => {
+  await fresh(page, '/analytics')
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.getByLabel('Reporting currency').selectOption('GBP')
+  await page.getByRole('button', { name: 'Done' }).click()
+  for (const path of ['/analytics', '/risk']) {
+    await page.goto(path)
+    const text = await page.locator('main').innerText()
+    expect(text, path).toContain('£')
+    expect(text, path).not.toMatch(/NaN|Infinity|undefined/)
+  }
 })

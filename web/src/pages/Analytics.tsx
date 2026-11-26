@@ -8,7 +8,7 @@ import { Button, Card, CardHeader, Delta, Legend, PageHead, Pills, Tabs, cx } fr
 import { PLATFORM_NAME } from '../data/labels'
 import type { Platform } from '../data/types'
 import { attribution, fmtDate, tradeNet, type PeriodStats, type PlatformFilter } from '../lib/finance'
-import { performanceFromSeries } from '../lib/analytics'
+import { performanceFromSeries, type QualityMetric } from '../lib/analytics'
 import { AttributionCard, MetricValue, MonthlyReturns, PatternExplorer, ReturnsCard, TradeAnalysis } from './analytics/sections'
 import { fmt, kfmt, pct, sfmt } from '../lib/format'
 import type { ClosedTrade } from '../data/types'
@@ -99,6 +99,7 @@ export default function Analytics() {
   const range = periodRange(period)
   const stats = useMemo(() => periodStats(f, periodRange(period)), [f, period])
   const perf = useMemo(() => performanceFromSeries(series(f, range.start, range.end)), [f, range.start, range.end])
+  const priorPerf = useMemo(() => (range.prior ? performanceFromSeries(series(f, range.prior.start, range.prior.end)) : null), [f, range.prior?.start, range.prior?.end])
   const prior = useMemo(() => { const p = periodRange(period).prior; return p ? periodStats(f, p) : null }, [f, period])
   const compare = compareOn && prior !== null
   const attr = attribution(stats.trades, 'category')
@@ -113,10 +114,10 @@ export default function Analytics() {
     ['Realized P&L (closed trades)', (s) => sfmt(s.realized), (a, b) => ({ text: sfmt(a.realized - b.realized), good: a.realized >= b.realized })],
     ['Fees paid', (s) => fmt(s.fees, 2), (a, b) => ({ text: sfmt(a.fees - b.fees, 2), good: a.fees <= b.fees })],
     ['Closed trades', (s) => String(s.trades.length), null],
-    ['Win rate (resolved)', (s) => (s.winRate == null ? 'No data' : `${pct(s.winRate * 100, 0)} (${count(s.resolved, 'resolved trade')})`), (a, b) => (a.winRate == null || b.winRate == null ? null : { text: `${((a.winRate - b.winRate) * 100).toFixed(0)} pts`, good: a.winRate >= b.winRate })],
+    ['Resolved win rate', (s) => (s.winRate == null ? 'No data' : `${pct(s.winRate * 100, 0)} (${count(s.resolved, 'resolved trade')})`), (a, b) => (a.winRate == null || b.winRate == null ? null : { text: `${((a.winRate - b.winRate) * 100).toFixed(0)} pts`, good: a.winRate >= b.winRate })],
     ['Average win / loss', (s) => `${fmtOpt(s.avgWin, (v) => fmt(v))} / ${fmtOpt(s.avgLoss, (v) => fmt(v))}`, null],
     ['Profit factor', (s) => fmtOpt(s.profitFactor, (v) => v.toFixed(2)), null],
-    ['Largest drawdown (weekly)', (s) => (s.drawdown ? sfmt(-s.drawdown.amount) : 'none'), (a, b) => ({ text: sfmt((b.drawdown?.amount ?? 0) - (a.drawdown?.amount ?? 0)), good: (a.drawdown?.amount ?? 0) <= (b.drawdown?.amount ?? 0) })],
+    ['P&L drawdown (weekly)', (s) => (s.drawdown ? sfmt(-s.drawdown.amount) : 'none'), (a, b) => ({ text: sfmt((b.drawdown?.amount ?? 0) - (a.drawdown?.amount ?? 0)), good: (a.drawdown?.amount ?? 0) <= (b.drawdown?.amount ?? 0) })],
     ['Best month (realized)', (s) => { const m = [...s.months].sort((x, y) => y.realized - x.realized)[0]; return m ? `${monthLabel(m.month)} ${sfmt(m.realized)}` : '—' }, null],
     ['Worst month (realized)', (s) => { const m = [...s.months].sort((x, y) => x.realized - y.realized)[0]; return m ? `${monthLabel(m.month)} ${sfmt(m.realized)}` : '—' }, null],
   ]
@@ -144,14 +145,14 @@ export default function Analytics() {
           {worstMonth && worstMonth.realized < 0 && <> Worst month: {monthLabel(worstMonth.month)} ({sfmt(worstMonth.realized)}).</>}
         </p>
 
-        <section className="anchor" id="performance" aria-label="Performance">
+        <section className="anchor section-stack" id="performance" aria-label="Performance">
         <Card id="highlights">
           <CardHeader title="Highlights" sub={compare ? 'Compared with the prior period' : prior ? undefined : 'No earlier period to compare with'} />
           <div className="card-b hl hl-4">
             <div className={cx('hl-tile', stats.netPnl >= 0 ? 'good' : 'bad')}><div className="l">Net P&amp;L</div><div className={cx('v', stats.netPnl >= 0 ? 'gain' : 'loss')}>{sfmt(stats.netPnl)}</div><div className="f">{compare && prior ? `${stats.netPnl >= prior.netPnl ? '▲' : '▼'} ${sfmt(stats.netPnl - prior.netPnl)} vs. prior` : `${sfmt(stats.realized)} realized`}</div></div>
             <div className="hl-tile neutral"><div className="l">Time-weighted return</div><div className={cx('v', (perf.twr.value ?? 0) > 0 && 'gain', (perf.twr.value ?? 0) < 0 && 'loss')}><MetricValue m={perf.twr} f={(v) => `${v >= 0 ? '+' : '−'}${pct(Math.abs(v) * 100)}`} /></div><div className="f">{perf.twr.value == null ? perf.twr.reason : 'Deposits and withdrawals excluded'}</div></div>
-            <div className={cx('hl-tile', (perf.maximumDrawdown.value ?? 0) < 0 ? 'bad' : 'neutral')}><div className="l">Maximum drawdown</div><div className={cx('v', (perf.maximumDrawdown.value ?? 0) < 0 && 'loss')}><MetricValue m={perf.maximumDrawdown} f={(v) => (v < 0 ? `−${pct(Math.abs(v) * 100)}` : 'None')} /></div><div className="f">{stats.drawdown ? `${sfmt(-stats.drawdown.amount)} of P&L, ${stats.drawdown.recoveredOn ? `recovered ${fmtDate(stats.drawdown.recoveredOn)}` : 'not yet recovered'}` : 'No fall below an earlier peak'}</div></div>
-            <div className="hl-tile neutral"><div className="l">Win rate</div><div className="v">{stats.winRate == null ? 'No data' : pct(stats.winRate * 100, 0)}</div><div className="f">{count(stats.resolved, 'resolved trade')}{stats.resolved < 30 ? '. Limited sample size' : `, profit factor ${fmtOpt(stats.profitFactor, (v) => v.toFixed(2))}`}</div></div>
+            <div className={cx('hl-tile', (perf.maximumDrawdown.value ?? 0) < 0 ? 'bad' : 'neutral')}><div className="l">Maximum drawdown <small className="t3">sampled</small></div><div className={cx('v', (perf.maximumDrawdown.value ?? 0) < 0 && 'loss')}><MetricValue m={perf.maximumDrawdown} f={(v) => (v < 0 ? `−${pct(Math.abs(v) * 100)}` : 'None')} /></div><div className="f">{perf.drawdownDetail ? `${fmtDate(perf.drawdownDetail.peakDate)} to ${fmtDate(perf.drawdownDetail.troughDate)}, ${perf.drawdownDetail.recoveredOn ? `recovered ${fmtDate(perf.drawdownDetail.recoveredOn)}` : 'not yet recovered'}` : perf.maximumDrawdown.value == null ? perf.maximumDrawdown.reason : 'No fall below an earlier peak'}</div></div>
+            <div className="hl-tile neutral"><div className="l">Resolved win rate</div><div className="v">{stats.winRate == null ? 'No data' : pct(stats.winRate * 100, 0)}</div><div className="f">{count(stats.resolved, 'resolved trade')}{stats.resolved < 30 ? '. Limited sample size' : `, profit factor ${fmtOpt(stats.profitFactor, (v) => v.toFixed(2))}`}</div></div>
           </div>
         </Card>
 
@@ -167,7 +168,7 @@ export default function Analytics() {
           </div>
         </Card>
 
-        <div className="grid g-21">
+        <div className="grid g-2 top">
           <ReturnsCard perf={perf} />
           <MonthlyReturns perf={perf} />
         </div>
@@ -176,7 +177,13 @@ export default function Analytics() {
           <CardHeader pad title="Period comparison" sub={compare ? 'This period and the prior period' : prior ? undefined : 'No earlier period to compare with'} />
           <div className="dt-wrap"><table className="dt cmp">
             <thead><tr><th scope="col">Metric</th><th scope="col" className="r">This period</th>{compare && <><th scope="col" className="r">Prior period</th><th scope="col" className="r">Change</th></>}</tr></thead>
-            <tbody>{metrics.map(([k, val, diff]) => {
+            <tbody>{([['Time-weighted return', perf.twr, priorPerf?.twr], ['Maximum drawdown (sampled)', perf.maximumDrawdown, priorPerf?.maximumDrawdown]] as const).map(([k, cur, pri]) => {
+              const show = (m: QualityMetric | undefined) => (m == null ? '—' : m.value == null ? 'Unavailable' : `${m.value >= 0 ? '+' : '−'}${pct(Math.abs(m.value) * 100)}${m.quality === 'estimate' ? ' est.' : ''}`)
+              // Percentage-point change only when both periods are calculated on the same basis.
+              const d = cur.value != null && pri?.value != null && cur.quality === pri.quality ? (cur.value - pri.value) * 100 : null
+              return <tr key={k}><td>{k}</td><td className="r">{show(cur)}</td>{compare && prior && <><td className="r t3">{show(pri)}</td><td className="r">{d == null ? <span className="t3">—</span> : <Delta tone={d >= 0 ? 'gain' : 'loss'}>{`${d >= 0 ? '+' : '−'}${Math.abs(d).toFixed(1)} pts`}</Delta>}</td></>}</tr>
+            })}
+            {metrics.map(([k, val, diff]) => {
               const d = compare && prior && diff ? diff(stats, prior) : null
               return <tr key={k}><td>{k}</td><td className="r">{val(stats)}</td>{compare && prior && <><td className="r t3">{val(prior)}</td><td className="r">{d ? <Delta tone={d.good ? 'gain' : 'loss'}>{d.text}</Delta> : <span className="t3">—</span>}</td></>}</tr>
             })}</tbody>
@@ -186,7 +193,7 @@ export default function Analytics() {
 
         <AttributionCard stats={stats} open={openTrades} initial={useSettings().settings.defaultGrouping === 'platform' ? 'Platform' : 'Category'} />
         <PatternExplorer trades={stats.trades} open={openTrades} scope={f === 'all' ? range.label : `${range.label}, ${scope}`} />
-        <section className="anchor" id="trades" aria-label="Trade analysis">
+        <section className="anchor section-stack" id="trades" aria-label="Trade analysis">
           <TradeAnalysis trades={stats.trades} open={openTrades} openOne={(t) => details.open({ kind: 'trades', title: t.market, sub: `Closed on ${PLATFORM_NAME[t.platform]}, ${fmtDate(t.closed, { month: 'short', day: 'numeric', year: 'numeric' })}`, trades: [t] })} />
         </section>
       </main>

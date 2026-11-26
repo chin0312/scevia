@@ -95,6 +95,10 @@ main { padding: var(--space-6) var(--space-8) var(--space-16) var(--space-4); mi
 .card-b { padding: var(--space-5) var(--space-6) var(--space-6); }
 .divider { height: 1px; background: var(--color-border-subtle); }
 .grid { display: grid; gap: var(--space-4); }
+/* A vertical stack of independent cards inside a page section: the same gap as <main>, so nested sections never
+   let cards touch. Use it for any element that groups cards or grids. */
+.section-stack { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
+.grid.top { align-items: start; }
 .g-2 { grid-template-columns: 1fr 1fr; }
 .g-21 { grid-template-columns: 1.6fr 1fr; }
 .g-12 { grid-template-columns: 1fr 1.4fr; }
