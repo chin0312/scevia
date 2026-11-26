@@ -22,7 +22,8 @@
     "demo:dataset": "tsx scripts/demo-dataset.ts",
     "verify:polygon-receipt": "tsx scripts/verify-polygon-receipt.ts",
     "verify:polymarket-account-receipts": "tsx scripts/verify-polymarket-account-receipts.ts",
-    "fx:import": "tsx scripts/import-fx-references.ts"
+    "fx:import": "tsx scripts/import-fx-references.ts",
+    "fx:archive": "tsx scripts/refresh-fx-archive.ts"
   },
   "dependencies": {
     "@fastify/cors": "11.4.3",

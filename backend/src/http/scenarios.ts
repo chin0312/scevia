@@ -8,7 +8,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify'
 import { z } from 'zod'
 import { digest } from '../accounting/decisions.js'
 import type { Database } from '../db/client.js'
-import { portfolioScenarios as scenarios, portfolioScenarioBundles as bundles, portfolios } from '../db/schema.js'
+import { portfolioScenarios as scenarios, portfolioScenarioBundles as bundles, portfolios, users } from '../db/schema.js'
 import { evaluate, validateScenarioOperations, validateInstrumentIdentities, ScenarioError, type ScenarioBaseline, type ScenarioInput, type ScenarioInstrument } from '../scenarios/engine.js'
 
 const id = z.string().trim().min(1).max(200)
@@ -70,6 +70,7 @@ const evaluation = z.union([z.object({ source, input }).strict(), z.object({ bas
 const ids = z.object({ scenarioIds: z.array(z.uuid()).min(2).max(8) }).strict()
 export type FrozenDenominationScenario = {
   components: Array<{ source: BaselineSource; baseline: ScenarioBaseline; input: ScenarioInput }>
+  reportingBasis?: { currency: string; asOf: string; references: Record<string, ReturnType<typeof selectRate>> }
   assumedUsdPerUnit?: Partial<Record<'USDC' | 'PUSD', string>> | undefined
 }
 
@@ -202,7 +203,7 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
       validateInstrumentIdentities(frozen.instruments)
       if (value.reportingCurrency) {
         const asOf = new Date(value.asOf).toISOString()
-        const rates = await loadFx(tx, asOf, asOf)
+        const rates = await loadFx(tx, asOf, asOf, { assets: [value.asset], currency: value.reportingCurrency })
         frozen.reportingBasis = { currency: value.reportingCurrency, asOf,
           reference: selectRate(rates, value.asset, value.reportingCurrency, asOf) }
       }
@@ -320,16 +321,27 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
   }, evaluationResponse)
   const denominationEvaluation = z.object({
     components: z.array(z.object({ baselineToken: z.string().length(64), input }).strict()).min(2).max(4),
+    reportingCurrency: reportingCurrency.optional(),
+    reportingSource: z.string().min(1).max(120).optional(),
     assumedUsdPerUnit: z.partialRecord(z.enum(['USDC', 'PUSD']), cashAmount.refine((value) => new Decimal(value).gt(0))).optional(),
   }).strict()
-  function freezeDenominations(portfolioId: string, value: z.infer<typeof denominationEvaluation>): FrozenDenominationScenario {
-    return {
+  async function freezeDenominations(portfolioId: string, value: z.infer<typeof denominationEvaluation>): Promise<FrozenDenominationScenario> {
+    const [preference] = await db.select({ currency: users.reportingCurrency }).from(portfolios)
+      .innerJoin(users, eq(users.id, portfolios.ownerId)).where(eq(portfolios.id, portfolioId)).limit(1)
+    const currency = value.reportingCurrency ?? preference?.currency ?? 'USD'
+    const frozen: FrozenDenominationScenario = {
       components: value.components.map(({ baselineToken, input: edits }) => {
         const { baseline, source } = readPreview(portfolioId, baselineToken)
         return { source, baseline, input: edits }
       }).sort((left, right) => left.baseline.asset.localeCompare(right.baseline.asset)),
       assumedUsdPerUnit: value.assumedUsdPerUnit,
     }
+    const asOf = frozen.components[0]!.baseline.asOf
+    const assets = [...new Set(['USD', ...frozen.components.map((item) => item.baseline.asset)])]
+    const references = await loadFx(db, asOf, asOf, { assets, currency })
+    frozen.reportingBasis = { currency, asOf,
+      references: Object.fromEntries(assets.map((asset) => [asset, selectRate(references, asset, currency, asOf, { source: value.reportingSource })])) }
+    return frozen
   }
   function evaluateDenominations(frozen: FrozenDenominationScenario) {
     const components = frozen.components.map(({ baseline, input: edits }) => run(baseline, edits))
@@ -339,7 +351,39 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
     const rates: Record<string, string> = { ...frozen.assumedUsdPerUnit, USD: '1' }
     const comparable = components.every((row) => row.bridge.endingValue !== null && row.additionalCapitalRequired === '0' && rates[row.asset])
     const Report = Decimal.clone({ precision: 70 })
+    const basis = frozen.reportingBasis
+    const refRate = (asset: string) => {
+      const assumed = frozen.assumedUsdPerUnit?.[asset as 'USDC' | 'PUSD']
+      const usd = basis?.references['USD']?.rate
+      return assumed ? usd ? new Report(assumed).mul(usd).toFixed() : null : basis?.references[asset]?.rate ?? null
+    }
+    const converted = (field: (item: typeof components[number]) => string | null) => {
+      if (!components.every((item) => refRate(item.asset) !== null && field(item) !== null)) return null
+      return components.reduce((sum, item) => sum.plus(new Report(field(item)!).mul(refRate(item.asset)!)), new Report(0)).toFixed()
+    }
+    const endingValue = components.every((item) => item.additionalCapitalRequired === '0') ? converted((item) => item.bridge.endingValue) : null
+    const investmentGain = endingValue === null ? null : converted((item) => {
+      const bridge = item.bridge
+      return bridge.endingValue === null || bridge.startingValue === null || bridge.addedCapital === null || bridge.withdrawnCapital === null
+        ? null : new Report(bridge.endingValue).minus(bridge.startingValue).minus(bridge.addedCapital).plus(bridge.withdrawnCapital).toFixed()
+    })
+    const display = components.map((item) => {
+      const rate = refRate(item.asset)
+      const value = (amount: string | null) => rate === null || amount === null ? null : new Report(amount).mul(rate).toFixed()
+      const events = (allocation: typeof item.allocation.before) => ({
+        denominator: value(allocation.cashInclusiveEvent.denominator),
+        rows: allocation.cashInclusiveEvent.rows.map((row) => ({ ...row, value: value(row.value),
+          weight: rate === null ? null : row.weight })),
+      })
+      return { asset: item.asset, rate, events: { before: events(item.allocation.before), after: events(item.allocation.after) },
+        conditionalCashInclusive: item.settlement.conditional.cashInclusive ? {
+          best: value(item.settlement.conditional.cashInclusive.best), worst: value(item.settlement.conditional.cashInclusive.worst),
+        } : null }
+    })
     return {
+      ...(basis ? { reporting: { ...basis, components: display, hypotheticalUsdOverrides: frozen.assumedUsdPerUnit ?? null,
+        startingValue: converted((item) => item.bridge.startingValue), endingValue, investmentGain,
+        fees: converted((item) => item.bridge.fees), hypotheticalRealized: converted((item) => item.hypotheticalRealized) } } : {}),
       components, indicativeUsd: comparable ? { valuationBasis: 'assumed_reporting_conversion', rates,
         value: components.reduce((sum, row) => sum.plus(new Report(row.bridge.endingValue!).mul(rates[row.asset]!)), new Report(0)).toFixed(),
       } : null,
@@ -347,7 +391,7 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
     }
   }
   route('POST', '/evaluate-denominations', denominationEvaluation, async ({ portfolioId }, value) => {
-    const frozen = freezeDenominations(portfolioId, value)
+    const frozen = await freezeDenominations(portfolioId, value)
     const result = evaluateDenominations(frozen)
     return { ...result, previewDigest: digest(frozen) }
   })
@@ -375,7 +419,7 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
   }).from(bundles).where(eq(bundles.portfolioId, portfolioId)).orderBy(desc(bundles.updatedAt)).limit(50) }))
   route('POST', bundlePath, denominationEvaluation.extend({ name, previewDigest: z.string().length(64) }),
     async ({ portfolioId }, value, reply) => {
-      const frozen = freezeDenominations(portfolioId, value)
+      const frozen = await freezeDenominations(portfolioId, value)
       if (digest(frozen) !== value.previewDigest) return stale(reply)
       return reply.code(201).send(await saveBundle(portfolioId, value.name, frozen))
     })
@@ -429,7 +473,8 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
     const compatibleAssets = ordered.every(({ frozen }) => digest(frozen.components.map((row) => row.baseline.asset))
       === digest(ordered[0]!.frozen.components.map((row) => row.baseline.asset)))
     return { compatibleAssets, sameReportingAssumptions: ordered.every(({ frozen }) =>
-      digest(frozen.assumedUsdPerUnit ?? null) === digest(ordered[0]!.frozen.assumedUsdPerUnit ?? null)),
+      digest([frozen.assumedUsdPerUnit ?? null, frozen.reportingBasis ?? null])
+        === digest([ordered[0]!.frozen.assumedUsdPerUnit ?? null, ordered[0]!.frozen.reportingBasis ?? null])),
     compatibility: compatibleAssets ? ordered[0]!.frozen.components.map(({ baseline }, index) => ({
       asset: baseline.asset, ...comparisonDimensions(ordered.map(({ frozen }) => {
         const row = frozen.components[index]!
@@ -524,6 +569,19 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
       eq(scenarios.id, current.id), eq(scenarios.revision, value.revision))).returning()
     return row ?? stale(reply)
   })
+  route('POST', '/:scenarioId/refresh-references', z.object({ revision, asOf: time }).strict(),
+    async ({ portfolioId, scenarioId }, value, reply) => {
+      const current = await find(portfolioId, scenarioId!)
+      if (!current) return notFound(reply)
+      if (current.revision !== value.revision) return stale(reply)
+      if (current.source.mode !== 'scratch') throw new ScenarioError('reference_refresh_requires_scratch_baseline')
+      const source = { ...current.source, asOf: value.asOf }
+      const baseline = await capture(portfolioId, source)
+      run(baseline, current.input)
+      const [updated] = await db.update(scenarios).set({ source, baseline, revision: value.revision + 1, updatedAt: new Date() })
+        .where(and(eq(scenarios.id, current.id), eq(scenarios.portfolioId, portfolioId), eq(scenarios.revision, value.revision))).returning()
+      return updated ?? stale(reply)
+    })
   route('POST', '/:scenarioId/rebase', rebase, async ({ portfolioId, scenarioId }, value, reply) => {
     const current = await find(portfolioId, scenarioId!)
     if (!current) return notFound(reply)

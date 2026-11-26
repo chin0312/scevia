@@ -1,3 +1,4 @@
+import { refreshUsdc } from '../src/fx/kraken.js'
 import { storeReferences } from '../src/fx/reference.js'
 import { refreshEcb } from '../src/fx/ecb.js'
 import { sharedTrackingEvidence } from '../src/tracking/evidence.js'
@@ -134,6 +135,9 @@ describe('migrations and canonical persistence', () => {
   it('discovers an untracked V2 market and keeps mapped research leases and simulations owner scoped', async () => {
     const condition = '0x' + 'a'.repeat(64)
     const transport = vi.fn(async (input: URL | string) => {
+      if (new URL(input).pathname.endsWith('/prices-history')) return Response.json({ data: [
+        { timestamp: 1767312000, price: '0.4', resolution_seconds: 86400 },
+      ] })
       if (new URL(input).pathname === '/midpoints') return Response.json({ 333: '0.45', 444: '0.55' })
       return Response.json([{ conditionId: condition, version: 'v2', negRisk: false, active: true,
         question: 'Untracked market', events: [{ id: 'native-event', title: 'Discovery event' }],
@@ -150,6 +154,18 @@ describe('migrations and canonical persistence', () => {
     expect(first.json()).toMatchObject({ status: 'identified', quoteAvailability: 'observed' })
     const shared = first.json()
     expect((await register(other)).json().marketId).toBe(shared.marketId)
+    const reference = await app.inject({ method: 'GET', url: '/v1/market-references?instruments=' + shared.outcomes[0].id, headers })
+    expect(reference.json().references[0]).toMatchObject({ asset: 'PUSD', availability: 'recent_reference' })
+    expect((await app.inject({ method: 'GET', url: '/v1/market-references?instruments=' + shared.outcomes[0].id,
+      headers: { ...headers, 'if-none-match': reference.headers.etag! } })).statusCode).toBe(304)
+    const backfill = () => app.inject({ method: 'POST', url: '/v1/market-references/history', headers, payload: {
+      instrumentId: shared.outcomes[0].id, from: '2026-01-01T00:00:00Z', through: '2026-01-04T00:00:00Z',
+    } })
+    expect((await backfill()).json()).toMatchObject({ cached: false, coverage: 'observations_only',
+      observations: [{ method: 'historical_sample', observedAt: '2026-01-02T00:00:00.000Z' }] })
+    const requests = transport.mock.calls.length
+    expect((await backfill()).json()).toMatchObject({ cached: true })
+    expect(transport.mock.calls).toHaveLength(requests)
     expect(await database.select().from(marketResearch)).toHaveLength(2)
     expect(await database.select().from(marketInstrumentMappings)).toEqual(expect.arrayContaining([
       expect.objectContaining({ subscriptionToken: '333', asset: 'PUSD', generation: 'v2', instrumentId: shared.outcomes.find((row: { nativePosition: string }) => row.nativePosition === '111').id }),
@@ -170,6 +186,20 @@ describe('migrations and canonical persistence', () => {
     expect((await app.inject({ method: 'GET', url: '/v1/portfolios', headers })).json().items.map((row: { id: string }) => row.id)).not.toContain(collection)
     await database.delete(portfolios).where(eq(portfolios.id, PORTFOLIO_ID))
     expect((await app.inject({ method: 'GET', url: root + '/' + saved.json().id, headers })).statusCode).toBe(200)
+  })
+
+  it('stores committed Kraken USDC/USD references and excludes the open candle', async () => {
+    const time = Math.floor(Date.now() / 1000 / 3600) * 3600
+    const candle = (at: number, rate: string) => [at, rate, rate, rate, rate, rate, '1', 4]
+    await refreshUsdc(database, new AbortController().signal, async (input) => {
+      expect(new URL(String(input)).searchParams.get('pair')).toBe('USDCUSD')
+      return Response.json({ error: [], result: { USDCUSD: [candle(time - 3600, '0.997'), candle(time, '1.025')], last: time } })
+    })
+    const app = await createTestApp()
+    const response = await app.inject({ method: 'GET', url: '/v1/fx/reference?base=USDC&currency=USD',
+      headers: { authorization: `Bearer ${TOKEN}` } })
+    expect(response.json()).toMatchObject({ rate: '0.997',
+      legs: [{ source: 'kraken_usdc_usd_ohlc', observedAt: new Date(time * 1000).toISOString() }] })
   })
 
   it('loads daily FX once and keeps stablecoin assumptions, eligibility and fiat cross rates explicit', async () => {
@@ -202,6 +232,22 @@ describe('migrations and canonical persistence', () => {
       source: preview.json().baselineSource, baselineToken: preview.json().baselineToken, input: {} } })
     expect(saved.statusCode, saved.body).toBe(201)
     expect(saved.json().baseline.reportingBasis.reference.rate).toBe('1.176')
+    const usd = await app.inject({ method: 'POST', url: root + '/baseline', headers, payload: {
+      mode: 'scratch', asOf: now, asset: 'USD', buckets: [{ id: 'virtual', venue: 'kalshi', account: 'virtual', cash: '100' }],
+    } })
+    const bundle = { reportingCurrency: 'SGD', components: [usd, preview].map((item) => ({
+      baselineToken: item.json().baselineToken, input: {},
+    })) }
+    const evaluation = await app.inject({ method: 'POST', url: root + '/evaluate-denominations', headers, payload: bundle })
+    expect(evaluation.json()).toMatchObject({ reporting: { currency: 'SGD', endingValue: '237.6' },
+      fundingTransfers: false, jointSettlement: { status: 'unavailable' } })
+    const stored = await app.inject({ method: 'POST', url: root + '/denomination-scenarios', headers,
+      payload: { ...bundle, name: 'Frozen mixed', previewDigest: evaluation.json().previewDigest } })
+    expect(stored.statusCode, stored.body).toBe(201)
+    await app.inject({ method: 'PUT', url: '/v1/preferences/reporting', headers, payload: { currency: 'GBP' } })
+    const read = await app.inject({ method: 'GET', url: root + '/denomination-scenarios/' + stored.json().id, headers })
+    expect(read.json()).toMatchObject({ result: { reporting: { currency: 'SGD', endingValue: '237.6' } } })
+
   })
 
   it('polls a shared market once and revalues owned mapped portfolios without synchronizing account history', async () => {

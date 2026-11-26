@@ -1,8 +1,9 @@
+import { IdentityConflict, registerInstrumentMappings } from './instrument-mapping.js'
 import { and, eq, gt, sql } from 'drizzle-orm'
 import { z } from 'zod'
 import type { FastifyInstance } from 'fastify'
 import type { Database } from '../db/client.js'
-import { events, instruments, marketInstrumentMappings, marketResearch, markets, marketTracking, sharedMarketObservations, users } from '../db/schema.js'
+import { events, instruments, marketResearch, markets, marketTracking, sharedMarketObservations, users } from '../db/schema.js'
 import { normalizedRecordSchema } from '../domain/model.js'
 import { upsertMarket } from '../ingestion/persistence.js'
 import type { PolymarketMarketDataService } from '../providers/polymarket/market-data.js'
@@ -13,7 +14,6 @@ const selection = z.discriminatedUnion('provider', [
   z.object({ provider: z.literal('kalshi'), market: z.string().regex(/^[A-Z0-9][A-Z0-9_.-]{0,127}$/), follow: z.boolean().default(false) }).strict(),
   z.object({ provider: z.literal('polymarket'), market: z.string().regex(/^0x[0-9a-f]{64}$/i), follow: z.boolean().default(false) }).strict(),
 ])
-class IdentityConflict extends Error {}
 
 type Choice = z.infer<typeof selection>
 
@@ -71,18 +71,9 @@ export function registerMarketEvidence(app: FastifyInstance, db: Database,
       const [entry] = await tx.select({ id: markets.id }).from(markets).where(and(eq(markets.providerCode, input.provider),
         eq(markets.externalId, catalog.externalMarketId))).limit(1)
       const legs = await tx.select().from(instruments).where(eq(instruments.marketId, entry!.id))
-      const mapped = []
-      for (const mapping of mappings) {
-        const instrument = legs.find((leg) => leg.externalId === mapping.position && leg.settlementAssetCode === catalog.settlementAssetCode)
-        if (!instrument || !catalog.settlementAssetCode || !generation) continue
-        const [existing] = await tx.select().from(marketInstrumentMappings).where(eq(marketInstrumentMappings.instrumentId, instrument.id)).limit(1)
-        if (existing && (existing.subscriptionToken !== mapping.clobToken || existing.generation !== generation)) {
-          throw new IdentityConflict('market_identity_conflict')
-        }
-        mapped.push({ instrumentId: instrument.id, provider: input.provider, asset: catalog.settlementAssetCode, generation,
-          subscriptionToken: mapping.clobToken, provenance: 'gamma_exact_condition', retrievedAt: new Date() })
+      if (mappings.length && generation && catalog.settlementAssetCode) {
+        await registerInstrumentMappings(tx, entry!.id, catalog.settlementAssetCode, generation, mappings)
       }
-      if (mapped.length) await tx.insert(marketInstrumentMappings).values(mapped).onConflictDoNothing()
       let eligibleQuotes = 0
       for (const quote of quotes) {
         const leg = legs.find((item) => item.externalId === quote.id && item.settlementAssetCode === quote.asset)

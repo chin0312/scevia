@@ -40,6 +40,8 @@ export interface ServerConfig extends DatabaseConfig {
   polymarketLiveEnabled?: boolean
   polymarketPolygonRpc?: URL
   ecbReferenceAuthorized?: boolean
+  krakenFxAuthorized?: boolean
+  fxReferenceRetentionDays?: number
   polymarketResolutionRpcAuthorized?: boolean
   polymarketStreamAuthorized?: boolean
   nodeEnv: 'development' | 'test' | 'production'
@@ -110,6 +112,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       polymarketResolutionRpcAuthorized: env.POLYMARKET_CTF_RESOLUTION_AUTHORIZED === 'YES' } : {}),
     kalshi,
     ecbReferenceAuthorized: localDevelopment && env.ECB_FX_REFERENCE_AUTHORIZED === 'YES',
+    ...(localDevelopment && env.FX_REFERENCE_RETENTION_DAYS ? { fxReferenceRetentionDays:
+      z.coerce.number().int().min(1).max(366).parse(env.FX_REFERENCE_RETENTION_DAYS) } : {}),
+    krakenFxAuthorized: localDevelopment && env.KRAKEN_USDC_REFERENCE_AUTHORIZED === 'YES',
     polymarketStreamAuthorized: localDevelopment && env.POLYMARKET_MARKET_STREAM_AUTHORIZED === 'YES',
     ...(localDevelopment && env.CONTINUOUS_TRACKING_ENABLED === 'YES' ? { tracking: {
       accountIds: z.array(z.uuid()).max(20).parse((env.TRACKED_PROVIDER_ACCOUNT_IDS ?? '').split(',').map((id) => id.trim()).filter(Boolean)),

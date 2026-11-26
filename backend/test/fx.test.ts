@@ -1,3 +1,5 @@
+import { consolidatePerformance } from '../src/fx/consolidated.js'
+import { selectRate } from '../src/fx/reference.js'
 import { describe, expect, it } from 'vitest'
 import { analyzePerformance } from '../src/analytics/performance.js'
 import type { Evidence } from '../src/accounting/model.js'
@@ -33,4 +35,40 @@ describe('reporting performance', () => {
     expect(missing.twr).toBeNull()
     expect(missing.netInvestmentGain).toBeNull()
   })
+  it('distinguishes late archival FX from knowledge-time publication', () => {
+    const archived = { revision: 'one', source: 'bank', methodology: 'fiat_reference', rate: '1.25', base: 'EUR', quote: 'USD',
+      observedAt: new Date('2026-01-02T00:00:00Z'), retrievedAt: new Date('2026-11-26T00:00:00Z') }
+    const cutoff = '2026-01-03T00:00:00.000Z'
+    expect(selectRate([archived], 'EUR', 'USD', cutoff).rate).toBeNull()
+    expect(selectRate([archived], 'EUR', 'USD', cutoff, { mode: 'retrospective' })).toMatchObject({
+      rate: '1.25', legs: [{ retrievedAt: '2026-11-26T00:00:00.000Z' }],
+    })
+    expect(selectRate([{ ...archived, publishedAt: new Date('2026-01-02T15:00:00Z') }], 'EUR', 'USD', cutoff).rate).toBe('1.25')
+    expect(selectRate([archived], 'EUR', 'USD', '2026-01-01T00:00:00.000Z', { mode: 'retrospective' }).rate).toBeNull()
+  })
+
+  it('calculates consolidated return and drawdown from converted external-flow boundaries', () => {
+    const opened = '2026-01-01T00:00:00.000Z'
+    const deposited = '2026-01-02T00:00:00.000Z'
+    const through = '2026-01-03T00:00:00.000Z'
+    const evidence: Evidence[] = ['USD', 'USDC'].flatMap((asset) => [
+      { type: 'opening_cash' as const, amount: '100', timestamp: opened },
+      { type: 'opening_inventory' as const, amount: null, timestamp: opened },
+      { type: 'history_complete' as const, amount: null, timestamp: opened, coveredThrough: through },
+      ...(asset === 'USD' ? [{ type: 'deposit' as const, amount: '20', timestamp: deposited }] : []),
+    ].map((row, index) => ({ batchId: asset, row: index, observation: { venue: asset, account: asset, asset, id: asset + index,
+      instrument: null, price: null, quantity: null, sequence: null, feeAsset: asset, fee: '0', ...row } })))
+    const rates = [{ at: opened, rate: '1' }, { at: '2026-01-02T12:00:00.000Z', rate: '0.8' }].map(({ at, rate }) => ({
+      revision: at, source: 'fixture', methodology: 'stablecoin_market_reference', base: 'USDC', quote: 'USD',
+      rate, observedAt: new Date(at), retrievedAt: new Date('2026-11-26T00:00:00Z'),
+    }))
+    const result = consolidatePerformance(evidence, rates, ['USD', 'USDC'], 'USD', opened, through, 'retrospective')
+    expect(result.opening.completeValue).toBe('200')
+    expect(result.cashFlowBoundaries[0]).toMatchObject({ valid: true, converted: { completeValue: '20' } })
+    expect(result.ending?.completeValue).toBe('200')
+    expect(Number(result.twr)).toBeCloseTo(-1 / 11)
+    expect(Math.abs(Number(result.maximumDrawdown))).toBeCloseTo(1 / 11)
+    expect(consolidatePerformance(evidence, rates, ['USD', 'USDC'], 'USD', opened, through, 'knowledge').twr).toBeNull()
+  })
+
 })

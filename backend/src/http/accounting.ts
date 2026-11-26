@@ -1,5 +1,6 @@
+import { consolidatePerformance } from '../fx/consolidated.js'
 import { reportingPerformance } from '../fx/performance.js'
-import { loadFx, reportingCurrency, reportAmounts } from '../fx/reference.js'
+import { fxEvidenceMode, loadFx, reportingCurrency, reportAmounts } from '../fx/reference.js'
 import { lifecycleAt } from '../tracking/lifecycle.js'
 import { reconcileHoldingDemand, trackedDemoCapture } from '../tracking/demand.js'
 import { sharedTrackingEvidence } from '../tracking/evidence.js'
@@ -269,14 +270,14 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     return { batchId, confirmedAt: result.confirmedAt }
   })
 
-  function loadEvidence(portfolioId: string, cutoff: string, preview?: Parameters<typeof readEvidence>[3], read?: AccountingRead, replaces?: string, accountScope?: string[], trackingFrom?: string) {
-    return read ? readEvidence(read, portfolioId, cutoff, preview, replaces, accountScope, trackingFrom)
-      : database.transaction((tx) => readEvidence(tx, portfolioId, cutoff, preview, replaces, accountScope, trackingFrom),
+  function loadEvidence(portfolioId: string, cutoff: string, preview?: Parameters<typeof readEvidence>[3], read?: AccountingRead, replaces?: string, accountScope?: string[], trackingFrom?: string, retrospective = false) {
+    return read ? readEvidence(read, portfolioId, cutoff, preview, replaces, accountScope, trackingFrom, retrospective)
+      : database.transaction((tx) => readEvidence(tx, portfolioId, cutoff, preview, replaces, accountScope, trackingFrom, retrospective),
         { isolationLevel: 'repeatable read', accessMode: 'read only' })
   }
 
   async function readEvidence(read: AccountingRead, portfolioId: string, cutoff: string, preview?: Pick<typeof batches.$inferSelect,
-    'id' | 'observations' | 'associatedAccountId' | 'sourceLinks' | 'contentHash'> & { manual?: boolean; acceptUnlinked?: boolean }, replaces?: string, accountScope?: string[], trackingFrom?: string) {
+    'id' | 'observations' | 'associatedAccountId' | 'sourceLinks' | 'contentHash'> & { manual?: boolean; acceptUnlinked?: boolean }, replaces?: string, accountScope?: string[], trackingFrom?: string, retrospective = false) {
     const readAll = async (tx: AccountingRead) => {
       const confirmed = await tx.select().from(batches).where(and(eq(batches.portfolioId, portfolioId),
         isNotNull(batches.confirmedAt), isNull(batches.supersededAt))).orderBy(batches.id)
@@ -361,7 +362,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
         if (observed && row.coveredThrough && observed > row.coveredThrough) item.observation = { ...row, coveredThrough: observed }
       }
     }
-    const tracking = await sharedTrackingEvidence(read, applied.evidence, cutoff, trackingFrom, demoCapture, trackingFrom ? [] : provider.positions)
+    const tracking = await sharedTrackingEvidence(read, applied.evidence, cutoff, trackingFrom, demoCapture, trackingFrom ? [] : provider.positions, retrospective)
     return { ...provider, ...applied, evidence: [...applied.evidence, ...resolutions, ...tracking.evidence], tracking, resolutions, demoCapture, rawEvidence, decisionMap, decisionRevision, replacement,
       recordDecisionRevisions: new Map(latest.map(({ key, revision }) => [key, revision])),
       truncated: provider.truncated || latest.length > 10000,
@@ -645,7 +646,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     asOf: z.iso.datetime({ offset: true }),
     accounts: z.string().max(4000).optional(), venue: z.string().min(1).max(160).optional(),
   })
-  const performanceQuery = analyticsQuery.extend({ currency: reportingCurrency.optional(), from: z.iso.datetime({ offset: true }),
+  const performanceQuery = analyticsQuery.extend({ currency: reportingCurrency.optional(), evidenceMode: fxEvidenceMode.default('knowledge'), from: z.iso.datetime({ offset: true }),
     sampling: z.enum(['daily', 'weekly', 'monthly']).optional() })
   function selectAccounts(input: Awaited<ReturnType<typeof loadEvidence>>, requested?: string, venue?: string) {
     const available = new Set([...input.accounts.filter((account) => !venue || account.venue === venue).map((account) => account.account),
@@ -697,7 +698,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const from = new Date(query.data.from).toISOString()
     if (from >= asOf) return reply.code(422).send({ error: { code: 'invalid_analytics_range' } })
     return database.transaction(async (tx) => {
-      const input = await loadEvidence(portfolioId, asOf, undefined, tx, undefined, query.data.accounts?.split(','), from)
+      const input = await loadEvidence(portfolioId, asOf, undefined, tx, undefined, query.data.accounts?.split(','), from, query.data.evidenceMode === 'retrospective')
       if (input.tracking.truncated) return reply.code(422).send({ error: { code: 'analytics_replay_limit' } })
       if (input.truncated) return reply.code(422).send({ error: { code: 'provider_evidence_limit' } })
       const accounts = selectAccounts(input, query.data.accounts, query.data.venue)
@@ -706,7 +707,8 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       try {
         const data = analyzePerformance(evidence, accounts, query.data.asset, from, asOf, context.accountIdentities)
         const currency = query.data.currency
-        const reporting = currency ? reportingPerformance(await loadFx(tx, from, asOf), data, query.data.asset, currency) : null
+        const reporting = currency ? reportingPerformance(await loadFx(tx, from, asOf, { assets: [query.data.asset], currency }), data,
+          query.data.asset, currency, query.data.evidenceMode) : null
         const canonicalKeys = canonicalInstrumentKeys(evidence, asOf)
         const identified = [...new Set(data.attribution.instruments
           .filter((row) => canonicalKeys.has(instrumentKey(row, row.instrument)) && z.uuid().safeParse(row.instrument).success)
@@ -815,6 +817,67 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       .where(inArray(reviewedBinaryRules.marketId, includedMarkets)) : []
     return { metadata, rules, effective, reported }
   }
+
+  app.get<{ Params: { portfolioId: string } }>(prefix + '/analytics/reporting-performance',
+    { schema: { ...auth, params: portfolioParams } }, async (request, reply) => {
+      const { portfolioId } = request.params
+      if (!await owned(portfolioId, request.principalId!)) return reply.code(404).send(missing)
+      const query = z.object({ from: z.iso.datetime({ offset: true }), asOf: z.iso.datetime({ offset: true }),
+        currency: reportingCurrency.optional(), evidenceMode: fxEvidenceMode.default('retrospective') }).strict().safeParse(request.query)
+      if (!query.success) return reply.code(422).send({ error: { code: 'invalid_reporting_scope' } })
+      const from = new Date(query.data.from).toISOString()
+      const asOf = new Date(query.data.asOf).toISOString()
+      if (from >= asOf || Date.parse(asOf) - Date.parse(from) >= 366 * 86_400_000) {
+        return reply.code(422).send({ error: { code: 'invalid_analytics_range' } })
+      }
+      return database.transaction(async (tx) => {
+        const input = await loadEvidence(portfolioId, asOf, undefined, tx, undefined, undefined, from,
+          query.data.evidenceMode === 'retrospective')
+        if (input.truncated || input.tracking.truncated) return reply.code(422).send({ error: { code: 'analytics_replay_limit' } })
+        const [preference] = await tx.select({ currency: users.reportingCurrency }).from(users)
+          .where(eq(users.id, request.principalId!)).limit(1)
+        const currency = query.data.currency ?? preference?.currency ?? 'USD'
+        const assetScope = (row: { venue: string; account: string; asset: string | null }) => JSON.stringify([row.venue, row.account, row.asset])
+        const reconstructed = new Set(input.evidence.filter(({ observation }) =>
+          ['opening_cash', 'opening_inventory', 'opening_position'].includes(observation.type)).map(({ observation }) => assetScope(observation)))
+        const assets = [...new Set(input.evidence.map(({ observation }) => observation.asset))].sort()
+        const supported = ['USD', 'USDC', 'PUSD']
+        const observedOnly = [...input.positions, ...input.balances].some((row) => !reconstructed.has(assetScope(row)))
+        const unrepresented = input.accounts.some((account) => ['public_wallet', 'authenticated_account'].includes(account.kind)
+          && !input.evidence.some(({ observation }) => observation.account === account.account && observation.venue === account.venue))
+        const unsupported = observedOnly || unrepresented || assets.some((asset) => !supported.includes(asset))
+        const knowledge: Array<{ effective: string; known: string }> = []
+        if (query.data.evidenceMode === 'knowledge') {
+          const sourceIds = [...new Set(input.rawEvidence.flatMap((row) =>
+            'sourceRecordId' in row ? [row.sourceRecordId] : row.linkedSourceRecordId ? [row.linkedSourceRecordId] : []))]
+          const batchIds = [...new Set(input.rawEvidence.flatMap((row) => 'batchId' in row ? [row.batchId] : []))]
+          const sources = sourceIds.length ? await tx.select({ id: sourceRecords.id, retrievedAt: sourceRecords.retrievedAt })
+            .from(sourceRecords).where(inArray(sourceRecords.id, sourceIds)) : []
+          const imports = batchIds.length ? await tx.select({ id: batches.id, confirmedAt: batches.confirmedAt }).from(batches)
+            .where(and(eq(batches.portfolioId, portfolioId), inArray(batches.id, batchIds))) : []
+          const clocks = new Map([...sources.map((row) => [row.id, row.retrievedAt.toISOString()] as const),
+            ...imports.map((row) => [row.id, row.confirmedAt?.toISOString()] as const)])
+          for (const item of input.rawEvidence) {
+            const known = clocks.get('sourceRecordId' in item ? item.sourceRecordId : item.batchId) ?? '~'
+            const linked = item.linkedSourceRecordId ? clocks.get(item.linkedSourceRecordId) ?? '~' : known
+            knowledge.push({ effective: item.observation.timestamp, known: linked > known ? linked : known })
+          }
+          const [lastEdit] = await tx.select({ createdAt: decisions.createdAt }).from(decisions)
+            .where(eq(decisions.portfolioId, portfolioId)).orderBy(desc(decisions.createdAt)).limit(1)
+          if (lastEdit) knowledge.push({ effective: from, known: lastEdit.createdAt.toISOString() })
+        }
+        const financialKnown = (point: string) => !knowledge.some((row) => row.effective <= point && row.known > point)
+        try {
+          return consolidatePerformance(input.evidence, await loadFx(tx, from, asOf, { assets, currency }),
+            assets.filter((asset) => supported.includes(asset)), currency, from, asOf, query.data.evidenceMode, unsupported, financialKnown)
+        } catch (error) {
+          if (error instanceof Error && error.message === 'analytics_replay_limit') {
+            return reply.code(422).send({ error: { code: error.message } })
+          }
+          throw error
+        }
+      }, { isolationLevel: 'repeatable read', accessMode: 'read only' })
+    })
 
   async function loadExposureInputs(tx: AccountingRead, portfolioId: string, asOf: string, asset: string,
     scope: Pick<z.infer<typeof analyticsQuery>, 'accounts' | 'venue'>, selected: string[] = [],
@@ -926,7 +989,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     }
     const lifecycle = await lifecycleAt(tx, [...new Set(model.metadata.map((row) => row.market))], asOf)
     const quotes = catalog.length ? await tx.selectDistinctOn([sharedMarketObservations.instrumentId], {
-      instrument: sharedMarketObservations.instrumentId, price: sharedMarketObservations.price,
+      instrument: sharedMarketObservations.instrumentId, price: sharedMarketObservations.price, effectiveAt: sharedMarketObservations.effectiveAt,
       retrievedAt: sharedMarketObservations.retrievedAt, source: sharedMarketObservations.source,
     }).from(sharedMarketObservations).where(and(inArray(sharedMarketObservations.instrumentId, catalog),
       eq(sharedMarketObservations.asset, asset), lte(sharedMarketObservations.retrievedAt, new Date(asOf))))
@@ -939,7 +1002,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       const observedLifecycle = lifecycle.get(entry.market)?.filter((row) => !row.conflict).at(-1)?.lifecycle
       const meta = { ...metadataFor(entry), ...(observedLifecycle ? { lifecycle: observedLifecycle } : {}) }
       const quote = quotes.find((item) => item.instrument === id)
-      const usable = quote && meta.lifecycle === 'open' && Date.parse(asOf) - quote.retrievedAt.getTime() <= 86_400_000
+      const usable = quote && meta.lifecycle === 'open' && Date.parse(asOf) - quote.effectiveAt.getTime() <= 86_400_000
       baselineInstruments.set(id, { id, mark: usable ? new Decimal(quote.price).toFixed() : null,
         ...(usable ? { markAt: quote.retrievedAt.toISOString(), markSource: 'public_retrieval_at_cutoff' as const } : {}),
         ...baselineInstruments.get(id), ...meta })
@@ -1256,7 +1319,8 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     if (input.truncated || input.tracking.truncated || input.evidence.length * days > 100_000) return reply.code(422).send({ error: { code: 'valuation_work_limit' } })
     const selectedCurrency = reportingCurrency.optional().safeParse(request.query.currency)
     if (!selectedCurrency.success) return reply.code(422).send({ error: { code: 'invalid_reporting_currency' } })
-    const rates = selectedCurrency.data ? await loadFx(database, new Date(start).toISOString(), new Date(end + day - 1).toISOString()) : []
+    const rates = selectedCurrency.data ? await loadFx(database, new Date(start).toISOString(), new Date(end + day - 1).toISOString(),
+      { assets: [...new Set(input.evidence.map(({ observation }) => observation.asset))], currency: selectedCurrency.data }) : []
     const points = Array.from({ length: days }, (_, index) => {
       const asOf = new Date(start + (index + 1) * day - 1).toISOString()
       const state = replay(input, asOf)
@@ -1296,7 +1360,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       const [preference] = await tx.select({ currency: users.reportingCurrency }).from(users)
         .where(eq(users.id, request.principalId!)).limit(1)
       const currency = query.data.currency ?? preference?.currency ?? 'USD'
-      const rates = await loadFx(tx, asOf, asOf)
+      const rates = await loadFx(tx, asOf, asOf, { assets: state.cash.map((row) => row.asset).concat(query.data.asset ?? []), currency })
       const scope = (row: { account: string; venue: string; asset: string }) => JSON.stringify([row.venue, row.account, row.asset])
       const selected = new Set(state.cash.map(scope))
       const missingObserved = [...input.positions, ...input.balances].some((row) => !row.asset
@@ -1325,7 +1389,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
 
   return async (portfolioId: string, asOf = new Date().toISOString()) => reconcileHoldingDemand(database, portfolioId, async (tx) => {
     const input = await loadEvidence(portfolioId, asOf, undefined, tx)
-    const state = replayAccounting([...input.evidence.filter((row) => row.observation.type !== 'mark')], asOf)
+    const state = replayAccounting(input.evidence.filter((row) => row.observation.type !== 'mark'), asOf)
     const canonical = canonicalInstrumentKeys(input.evidence, asOf)
     const disabled = new Set(input.accounts.filter((row) => row.disabledAt && !row.externalId.startsWith('simulation:')).map((row) => row.account))
     const holdings = state.holdings.filter((row) => !disabled.has(row.account)

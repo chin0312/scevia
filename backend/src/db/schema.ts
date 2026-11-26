@@ -748,8 +748,16 @@ export const fxReferences = scevia.table('fx_references', {
   rate: numeric('rate', { precision: 38, scale: 18 }).notNull(),
   source: text('source').notNull(),
   methodology: text('methodology').notNull(),
+  publishedAt: timestamp('published_at', { withTimezone: true }),
   observedAt: timestamp('observed_at', { withTimezone: true }).notNull(),
   retrievedAt: timestamp('retrieved_at', { withTimezone: true }).notNull(),
 }, (table) => [index('fx_references_pair_idx').on(table.base, table.quote, table.observedAt),
   index('fx_references_retention_idx').on(table.retrievedAt),
   check('fx_references_positive', sql`${table.rate} > 0`)])
+
+export const marketHistoryWindows = scevia.table('market_history_windows', {
+  revision: text('revision').primaryKey(),
+  instrumentId: uuid('instrument_id').notNull().references(() => instruments.id, { onDelete: 'cascade' }),
+  retrievedAt: timestamp('retrieved_at', { withTimezone: true }).notNull(),
+  nextCursor: text('next_cursor'),
+}, (table) => [index('market_history_windows_retrieval_idx').on(table.retrievedAt)])

@@ -2,17 +2,18 @@ import { and, eq } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import type { Database } from '../db/client.js'
 import { portfolios, users } from '../db/schema.js'
-import { loadFx, reportingCurrency, selectRate } from '../fx/reference.js'
+import { fxEvidenceMode, loadFx, reportingCurrency, selectRate } from '../fx/reference.js'
 import { z } from 'zod'
 
 export function registerOwnerPreferences(app: FastifyInstance, db: Database) {
   app.get('/fx/reference', async (request, reply) => {
     const query = z.object({ base: z.enum(['USD', 'SGD', 'EUR', 'GBP', 'MYR', 'USDC', 'PUSD']),
-      currency: reportingCurrency, asOf: z.iso.datetime({ offset: true }).optional() }).strict().safeParse(request.query)
+      currency: reportingCurrency, mode: fxEvidenceMode.optional(), source: z.string().max(120).optional(), asOf: z.iso.datetime({ offset: true }).optional() }).strict().safeParse(request.query)
     if (!query.success) return reply.code(422).send({ error: { code: 'invalid_fx_scope' } })
     const asOf = new Date(query.data.asOf ?? Date.now()).toISOString()
     return { base: query.data.base, currency: query.data.currency, asOf,
-      ...selectRate(await loadFx(db, asOf, asOf), query.data.base, query.data.currency, asOf) }
+      ...selectRate(await loadFx(db, asOf, asOf, { assets: [query.data.base], currency: query.data.currency }),
+        query.data.base, query.data.currency, asOf, { mode: query.data.mode, source: query.data.source }), evidenceMode: query.data.mode ?? 'knowledge' }
   })
   app.get('/simulations', async (request) => {
     const [collection] = await db.select({ id: portfolios.id }).from(portfolios).where(and(

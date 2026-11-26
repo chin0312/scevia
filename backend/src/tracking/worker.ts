@@ -1,3 +1,4 @@
+import { registerInstrumentMappings } from './instrument-mapping.js'
 import type { PolymarketCollateralReader } from '../providers/polymarket/collateral.js'
 import { conflictingResolution } from './lifecycle.js'
 import { lifecycleRank } from './demand.js'
@@ -5,7 +6,7 @@ import { Decimal } from 'decimal.js'
 import { randomUUID } from 'node:crypto'
 import { and, asc, eq, exists, gt, inArray, isNull, lt, lte, or } from 'drizzle-orm'
 import type { Database } from '../db/client.js'
-import { accountTracking, automaticMarketWatches, events, instruments, markets, marketLifecycleEvidence, marketResearch, marketTracking, marketWatches, providerAccounts, sharedMarketObservations } from '../db/schema.js'
+import { accountTracking, automaticMarketWatches, events, instruments, marketInstrumentMappings, markets, marketLifecycleEvidence, marketResearch, marketTracking, marketWatches, providerAccounts, sharedMarketObservations } from '../db/schema.js'
 import { digest } from '../accounting/decisions.js'
 import type { IngestionService } from '../ingestion/sync.js'
 import type { KalshiMarketDataService } from '../providers/kalshi/market-data.js'
@@ -13,7 +14,7 @@ import type { PolymarketMarketDataService } from '../providers/polymarket/market
 
 type Inputs = {
   kalshi?: Pick<KalshiMarketDataService, 'lookup'> | undefined
-  polymarket?: Pick<PolymarketMarketDataService, 'trackingSnapshot'> | undefined
+  polymarket?: (Pick<PolymarketMarketDataService, 'trackingSnapshot'> & Partial<Pick<PolymarketMarketDataService, 'discoverCondition'>>) | undefined
   ctf?: Pick<PolymarketCollateralReader, 'standardCtfResolution'> | undefined
   accountIds: string[]
   marketIntervalMs: number
@@ -56,6 +57,7 @@ export class TrackingWorker {
     const taskSignal = AbortSignal.any([signal, AbortSignal.timeout(15_000)])
     const key = and(eq(marketTracking.marketId, job.job.marketId), eq(marketTracking.leaseToken, token))
     try {
+      let verifiedMapping: Awaited<ReturnType<PolymarketMarketDataService['discoverCondition']>> | undefined
       let lifecycle: string
       let metadataAt = new Date()
       let tradingOpensAt: Date | null = null
@@ -80,11 +82,26 @@ export class TrackingWorker {
         quotes = result.quotes
         resolution = 'resolution' in result ? result.resolution ?? null : null
         metadataAt = new Date(resolution?.knownAt ?? metadataAt)
+        if (job.asset === 'PUSD' && lifecycle === 'open' && this.input.polymarket.discoverCondition) {
+          const [existing] = await this.db.select({ id: marketInstrumentMappings.instrumentId }).from(marketInstrumentMappings)
+            .innerJoin(instruments, eq(instruments.id, marketInstrumentMappings.instrumentId))
+            .where(eq(instruments.marketId, job.job.marketId)).limit(1)
+          if (!existing) {
+            try {
+              const candidate = await this.input.polymarket.discoverCondition(job.native, taskSignal)
+              if (candidate.support === 'supported' && candidate.asset === job.asset && candidate.eventId === job.event
+                && candidate.conditionId === job.native.toLowerCase() && candidate.generation === 'v2') verifiedMapping = candidate
+            } catch { taskSignal.throwIfAborted() }
+          }
+        }
       } else throw new Error('tracking_provider_unavailable')
       taskSignal.throwIfAborted()
       await this.db.transaction(async (tx) => {
         const [claimed] = await tx.select().from(marketTracking).where(key).for('update')
         if (!claimed) return
+        if (verifiedMapping?.asset && verifiedMapping.generation) {
+          await registerInstrumentMappings(tx, claimed.marketId, verifiedMapping.asset, verifiedMapping.generation, verifiedMapping.outcomes)
+        }
         const monotonic = (!claimed.metadataAt || metadataAt >= claimed.metadataAt)
           && lifecycleRank(lifecycle) >= lifecycleRank(claimed.lifecycle)
 

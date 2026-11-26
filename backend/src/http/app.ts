@@ -1,3 +1,5 @@
+import { registerMarketReferences } from '../tracking/market-references.js'
+import { refreshUsdc } from '../fx/kraken.js'
 import { registerMarketEvidence } from '../tracking/discovery.js'
 import { registerOwnerPreferences } from './simulations.js'
 import { refreshEcb } from '../fx/ecb.js'
@@ -16,7 +18,7 @@ import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
 import swagger from '@fastify/swagger'
 import swaggerUi from '@fastify/swagger-ui'
-import { and, asc, desc, eq, gt, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, gt, lt, sql } from 'drizzle-orm'
 import { Decimal } from 'decimal.js'
 import type { ServerConfig } from '../config.js'
 import type { Database } from '../db/client.js'
@@ -27,6 +29,7 @@ import {
   dataCoverage,
   events,
   fills,
+  fxReferences,
   instruments,
   markets,
   portfolios,
@@ -588,13 +591,21 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     ]) })
     app.addHook('onClose', async () => { trackingRuntime.running = false; stopping.abort(); await running })
   }
-  if (options.config.ecbReferenceAuthorized && options.config.nodeEnv === 'development' && ['127.0.0.1', '::1'].includes(options.config.host)) {
+  if ((options.config.ecbReferenceAuthorized || options.config.krakenFxAuthorized) && options.config.nodeEnv === 'development' && ['127.0.0.1', '::1'].includes(options.config.host)) {
     const stop = new AbortController()
     let task: Promise<void> | undefined
     const collect = async () => {
       while (!stop.signal.aborted) {
-        try { await refreshEcb(options.database, stop.signal) }
-        catch { app.log.warn('ECB reporting reference was unavailable') }
+        const updates = await Promise.allSettled([
+          ...(options.config.ecbReferenceAuthorized ? [refreshEcb(options.database, stop.signal)] : []),
+          ...(options.config.krakenFxAuthorized ? [refreshUsdc(options.database, stop.signal)] : []),
+        ])
+        if (options.config.fxReferenceRetentionDays) {
+          const cutoff = new Date(Date.now() - options.config.fxReferenceRetentionDays * 86_400_000)
+          try { await options.database.delete(fxReferences).where(lt(fxReferences.observedAt, cutoff)) }
+          catch { app.log.warn('Reporting reference retention sweep was unavailable') }
+        }
+        if (updates.some((result) => result.status === 'rejected')) app.log.warn('A reporting reference source was unavailable')
         await delay(3_600_000, undefined, { signal: stop.signal }).catch(() => undefined)
       }
     }
@@ -672,6 +683,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     })
 
     registerOwnerPreferences(privateApi, options.database)
+    registerMarketReferences(privateApi, options.database,
+      options.config.kalshi?.environment === 'production' || options.config.nodeEnv === 'test' ? kalshiMarketData : undefined,
+      liveAllowed || options.marketData ? marketData : undefined)
     registerMarketEvidence(privateApi, options.database,
       options.config.kalshi?.environment === 'production' || options.config.nodeEnv === 'test' ? kalshiMarketData : undefined,
       liveAllowed || options.marketData ? marketData : undefined)

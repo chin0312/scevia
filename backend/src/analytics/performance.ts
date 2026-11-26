@@ -135,7 +135,7 @@ function valuation(replay: ValuationReplay, accounts: string[], asset: string, o
   }
 }
 
-export function analyzePerformance(evidence: Evidence[], accounts: string[], asset: string, from: string, through: string, selectedScopes?: AccountIdentity[]) {
+export function analyzePerformance(evidence: Evidence[], accounts: string[], asset: string, from: string, through: string, selectedScopes?: AccountIdentity[], requestedCutoffs: string[] = []) {
   const start = Date.parse(from)
   const end = Date.parse(through)
   const days = Math.floor((end - start) / dayMs) + 1
@@ -390,7 +390,7 @@ export function analyzePerformance(evidence: Evidence[], accounts: string[], ass
   const wins = exits.filter((entry) => decimal(entry.realized!).gt(0)).length
   return {
     methodology: { valuation: 'selected_accounting_evidence', return: 'cash_flow_boundary_twr', time: 'UTC', drawdown: 'flow_adjusted_sampled_index' },
-    opening, ending, cashFlowBoundaries: boundaries, work: { replays: replayCount, inputRowsReplayed: replayWork },
+    opening, ending, anchors: requestedCutoffs.map(at), cashFlowBoundaries: boundaries, work: { replays: replayCount, inputRowsReplayed: replayWork },
     bridge: {
       valueChange: qualityMetric(opening.value !== null && ending.value !== null ? decimal(ending.value).minus(opening.value) : null, 'valuation_missing', qualityFor(opening, ending, false)),
       knownNetContributions: netFlows.toFixed(),
