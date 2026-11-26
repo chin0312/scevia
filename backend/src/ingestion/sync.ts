@@ -274,6 +274,7 @@ export class IngestionService {
     const finishedAt = new Date().toISOString()
     await this.finishStream({
       providerAccountId: account.id,
+      stageKalshiPositions: account.providerCode === 'kalshi',
       accountCheckpointId,
       streamCheckpointId,
       leaseToken,
@@ -441,6 +442,7 @@ export class IngestionService {
 
   private async finishStream(input: {
     providerAccountId: string
+    stageKalshiPositions: boolean
     accountCheckpointId: string
     streamCheckpointId: string
     leaseToken: string
@@ -478,6 +480,7 @@ export class IngestionService {
           runId: input.runId,
           stream: input.stream,
           reports: input.reports,
+          stageKalshiPositions: input.stageKalshiPositions,
           finishedAt: new Date(input.finishedAt),
         })
       }

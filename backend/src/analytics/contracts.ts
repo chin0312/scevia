@@ -68,6 +68,12 @@ export const exposureResponse = model({
     cashInclusive: { anyOf: [model({ scope: text, openingCash: text, pendingEntitlements: text, worst: text, best: text }),
       { type: 'null' }] } }),
   reportedExposure: model({ scope: text, effectivePortfolioReplacement: { const: false },
+    cash: list(model({ account: text, venue: text, sourceRecordId: text, observedAt: text, balance: text,
+      availability: { enum: ['eligible', 'uncertain', 'stale'] } })),
+    knownCashSubtotal: nullableText, knownPositionSubtotal: nullableText, knownCombinedSubtotal: nullableText,
+    portfolioNav: { type: 'null' }, valuationScope: { const: 'known_components_only' },
+    eventAllocation: model({ denominator: nullableText, hhi: nullableText,
+      rows: list(model({ id: text, value: text, weight: text })) }),
     rows: list(model({ sourceRecordId: text, quantity: text, observedMarketValue: nullableText })),
     settlement: model({ result: settlementResult }) }),
 })

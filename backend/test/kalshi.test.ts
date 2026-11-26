@@ -61,7 +61,7 @@ describe('restricted Kalshi contracts', () => {
   it('preserves missing historical closes and labels NO complements', async () => {
     const service = new KalshiMarketDataService(new KalshiClient(async (url) => {
       if (url.pathname === '/trade-api/v2/historical/markets/KX-V1') return Response.json({ market: {
-        ticker: 'KX-V1', event_ticker: 'KX-EVENT', title: 'Synthetic archive', market_type: 'binary', status: 'finalized',
+        ticker: 'KX-V1', event_ticker: 'KX-EVENT', title: 'Synthetic archive', market_type: 'binary', status: 'finalized', notional_value_dollars: '1',
       } })
       expect(url.pathname).toBe('/trade-api/v2/historical/markets/KX-V1/candlesticks')
       return Response.json({ ticker: 'KX-V1', candlesticks: [{ end_period_ts: 120, price: { close: '0.41' } },
@@ -70,6 +70,20 @@ describe('restricted Kalshi contracts', () => {
     const result = await service.historicalPrices({ marketTicker: 'KX-V1', side: 'no', from: 60, through: 180, minutes: 1 }, signal)
     expect(result).toMatchObject({ evidence: 'archived_yes_close_complement', items: [{ price: '0.59' }, { price: null }] })
   })
+  it('loads recent candles through the verified event and series association', async () => {
+    const service = new KalshiMarketDataService(new KalshiClient(async (url) => {
+      if (url.pathname.includes('/historical/')) return Response.json({}, { status: 404 })
+      if (url.pathname.endsWith('/markets/RECENT')) return Response.json({ market: {
+        ticker: 'RECENT', event_ticker: 'RECENT-EVENT', title: 'Current fixture', market_type: 'binary', status: 'active', notional_value_dollars: '1',
+      } })
+      if (url.pathname.endsWith('/events/RECENT-EVENT')) return Response.json({ event: { event_ticker: 'RECENT-EVENT', series_ticker: 'SERIES' } })
+      expect(url.pathname).toBe('/trade-api/v2/series/SERIES/markets/RECENT/candlesticks')
+      return Response.json({ ticker: 'RECENT', candlesticks: [{ end_period_ts: 120, price: { close: '0.25' } }] })
+    }))
+    expect(await service.historicalPrices({ marketTicker: 'RECENT', side: 'no', from: 60, through: 180, minutes: 1 }, signal))
+      .toMatchObject({ evidence: 'recent_yes_close_complement', continuousCoverage: 'unverified', items: [{ price: '0.75' }] })
+  })
+
   it('overlaps a recent fill refresh after a two-tier backfill without claiming continuity', async () => {
     const calls: URL[] = []
     const old = new Date(Date.now() - 7 * 86_400_000).toISOString()
@@ -107,6 +121,18 @@ describe('restricted Kalshi contracts', () => {
     expect(result.items[0]?.outcomes[0]?.id).toBe('demo:KX-WEATHER-26NOV26-B66.5:yes')
     await expect(service.resolve('https://kalshi.com/markets/kx-other/daily-weather/kx-weather-26nov26', signal))
       .rejects.toThrow('kalshi_invalid_market_link')
+  })
+
+  it('resolves a selected event outcome directly without reading its first page', async () => {
+    const service = new KalshiMarketDataService(new KalshiClient(async (url) => {
+      expect(url.pathname).toBe('/trade-api/v2/markets/LATER')
+      return Response.json({ market: { ticker: 'LATER', event_ticker: 'PAGED', title: 'Later market',
+        market_type: 'binary', status: 'active', notional_value_dollars: '1',
+        yes_bid_dollars: '0.45', yes_ask_dollars: '0.55', yes_bid_size_fp: '1', yes_ask_size_fp: '1' } })
+    }))
+    const result = await service.resolve('https://kalshi.com/events/paged', signal, 'LATER:yes')
+    expect(result.items[0]?.outcomes[0]?.quote).toMatchObject({ value: '0.5', provenance: 'provider_book_midpoint', observedAt: null })
+    await expect(service.resolve('https://kalshi.com/events/other', signal, 'LATER:yes')).rejects.toThrow('kalshi_market_identity_mismatch')
   })
 
   it('requires known public links and explicitly mapped transaction columns', () => {

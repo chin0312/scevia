@@ -9,7 +9,7 @@ const time = z.iso.datetime({ offset: true })
 const side = z.enum(['yes', 'no'])
 const outcome = (market: string, leg: string) => market + ':' + leg
 const market = z.object({ ticker, event_ticker: ticker, title: z.string().min(1).max(500),
-  market_type: z.string(), status: z.string().max(32), close_time: time.optional(), rules_primary: z.string().max(10000).optional(),
+  market_type: z.string(), result: z.string().optional(), settlement_value_dollars: decimalTextSchema.nullable().optional(), status: z.string().max(32), close_time: time.optional(), rules_primary: z.string().max(10000).optional(),
   notional_value_dollars: decimalTextSchema.optional(), yes_bid_dollars: decimalTextSchema.optional(),
   yes_ask_dollars: decimalTextSchema.optional(), yes_bid_size_fp: decimalTextSchema.optional(), yes_ask_size_fp: decimalTextSchema.optional() })
 const cutoffSchema = z.object({ trades_created_ts: time, market_settled_ts: time,
@@ -31,10 +31,11 @@ const cashActivity = z.object({ id: z.string().min(1).max(128), status: z.string
 const creditActivity = z.object({ credit_id: z.string().min(1).max(128), type: z.string().max(64), status: z.string().max(32),
   amount_dollars: decimalTextSchema, created_time: time })
 const pageEnvelope = z.object({ cursor: z.string().max(4000).optional() }).passthrough()
-const next = z.object({ tier: z.enum(['current', 'historical']), cursor: z.string().max(4000).nullable(), observedAt: time, cutoff: cutoffSchema.optional(), incrementalFrom: z.number().int().optional() }).strict()
+const next = z.object({ tier: z.enum(['current', 'historical']), cursor: z.string().max(4000).nullable(), observedAt: time, cutoff: cutoffSchema.optional(), incrementalFrom: z.number().int().optional(), gap: z.boolean().optional() }).strict()
 const fail = (reason: string): never => { throw new ProviderAdapterError(reason, false) }
 
-function midpoint(row: z.infer<typeof market>, no: boolean) {
+export function kalshiBookMidpoint(raw: unknown, no: boolean) {
+  const row = market.parse(raw)
   if (row.status !== 'active' || row.notional_value_dollars === undefined || !new Decimal(row.notional_value_dollars).eq(1)
     || row.yes_bid_dollars === undefined || row.yes_ask_dollars === undefined
     || !new Decimal(row.yes_bid_size_fp ?? 0).gt(0) || !new Decimal(row.yes_ask_size_fp ?? 0).gt(0)) return null
@@ -67,7 +68,7 @@ export class KalshiAdapter implements ProviderAdapter {
       { name: 'fills', entities: ['fills'], referenceEntities: ['markets'], auxiliaryEntities: ['activity'], strategy: 'full_refresh', snapshotSemantics: {} },
       { name: 'positions', entities: ['positions'], referenceEntities: ['markets'], strategy: 'full_refresh', snapshotSemantics: { positions: 'complete' } },
       { name: 'balance', entities: ['cash_balances'], strategy: 'full_refresh', snapshotSemantics: { cash_balances: 'complete' } },
-      { name: 'settlement_activity', entities: ['activity'], strategy: 'full_refresh', snapshotSemantics: {} },
+      { name: 'settlement_activity', entities: ['activity'], referenceEntities: ['markets'], strategy: 'full_refresh', snapshotSemantics: {} },
       ...(['deposits', 'withdrawals', 'credits'] as const).map((name) => ({
         name, entities: [], auxiliaryEntities: ['activity' as const], strategy: 'full_refresh' as const, snapshotSemantics: {},
       })),
@@ -198,27 +199,34 @@ export class KalshiAdapter implements ProviderAdapter {
         balance: row.balance_dollars ?? new Decimal(row.balance!).div(100).toFixed(), assetCode: 'USD', rawPayload: row }))
     } else if (request.streamName === 'positions') {
       entity = 'positions'
-      query.set('settlement_status', 'unsettled')
+      query.set('settlement_status', this.liveClient ? 'all' : 'unsettled')
       const parsed = pageEnvelope.extend({ market_positions: z.array(position).max(100) }).parse(await get('positions'))
       cursor = parsed.cursor || null
       const supported = await reference(parsed.market_positions.filter(predictionRecord).map((row) => row.ticker))
       for (const row of parsed.market_positions.filter(predictionRecord)) {
         const quantity = new Decimal(row.position_fp)
-        if (quantity.isZero() || !supported.has(row.ticker)) continue
-        const instrument = outcome(row.ticker, quantity.isNegative() ? 'no' : 'yes')
+        if (!supported.has(row.ticker) || (!this.liveClient && quantity.isZero())) continue
         const ref = references.get(row.ticker)
-        const quote = ref && !ref.archived ? midpoint(ref.raw, quantity.isNegative()) : null
-        if (quote && ref && this.liveClient) records.push(normalizedRecordSchema.parse({
-          kind: 'price', externalId: 'book-midpoint:' + instrument, externalMarketId: row.ticker, externalInstrumentId: instrument,
-          observedAt: ref.capturedAt, price: quote, priceKind: 'kalshi_retrieved_book_midpoint', assetCode: 'USD',
-          rawPayload: { ...ref.raw, retrievedAt: ref.capturedAt },
-        }))
-        const basis = row.market_exposure_dollars === undefined ? null : new Decimal(row.market_exposure_dollars).div(quantity.abs())
-        records.push(normalizedRecordSchema.parse({ kind: 'position', externalId: instrument, externalMarketId: row.ticker,
-          externalInstrumentId: instrument, observedAt: state.observedAt, quantity: quantity.abs().toFixed(),
-          averageCostPrice: this.liveClient && basis?.gte(0) && basis.lte(1) ? basis.toDecimalPlaces(18).toFixed() : null,
-          markPrice: quote, markAt: quote && ref ? ref.capturedAt : null, settlementAssetCode: 'USD',
-          origin: 'provider_reported', reconciliationStatus: 'not_started', rawPayload: row }))
+        const closed = this.liveClient && ref?.raw.status === 'finalized'
+        const held = closed || quantity.isZero() ? null : quantity.isNegative() ? 'no' : 'yes'
+        for (const leg of this.liveClient ? ['yes', 'no'] : [held!]) {
+          const instrument = outcome(row.ticker, leg)
+          const quote = leg === held && ref && !ref.archived ? kalshiBookMidpoint(ref.raw, leg === 'no') : null
+          if (quote && ref && this.liveClient) records.push(normalizedRecordSchema.parse({
+            kind: 'price', externalId: 'book-midpoint:' + instrument, externalMarketId: row.ticker, externalInstrumentId: instrument,
+            observedAt: ref.capturedAt, price: quote, priceKind: 'kalshi_retrieved_book_midpoint', assetCode: 'USD',
+            rawPayload: { ...ref.raw, retrievedAt: ref.capturedAt },
+          }))
+          const basis = leg !== held || row.market_exposure_dollars === undefined ? null
+            : new Decimal(row.market_exposure_dollars).div(quantity.abs())
+          records.push(normalizedRecordSchema.parse({ kind: 'position', externalId: instrument, externalMarketId: row.ticker,
+            externalInstrumentId: instrument, observedAt: state.observedAt, quantity: leg === held ? quantity.abs().toFixed() : '0',
+            averageCostPrice: this.liveClient && basis?.gte(0) && basis.lte(1) ? basis.toDecimalPlaces(18).toFixed() : null,
+            markPrice: quote, markAt: quote && ref ? ref.capturedAt : null, settlementAssetCode: 'USD',
+            ...(this.liveClient ? { providerStatus: leg === held ? 'open' : 'closed' } : {}),
+            origin: 'provider_reported', reconciliationStatus: 'not_started',
+            rawPayload: this.liveClient ? { ...row, signed_net_lifecycle: true, finalized_market: closed } : row }))
+        }
       }
     } else if (request.streamName === 'fills') {
       entity = 'fills'
@@ -254,11 +262,38 @@ export class KalshiAdapter implements ProviderAdapter {
       partial = true
       const parsed = pageEnvelope.extend({ settlements: z.array(settlement).max(100) }).parse(await get('settlements'))
       cursor = parsed.cursor || null
-      for (const row of parsed.settlements.filter(predictionRecord)) records.push(normalizedRecordSchema.parse({ kind: 'activity_fact',
-        externalId: 'settlement:' + row.ticker + ':' + row.settled_time, identityKind: 'source_fingerprint',
-        classification: 'unresolved', resolutionReason: 'kalshi_settlement_allocation_unverified', activityType: 'SETTLEMENT_UNRESOLVED',
-        occurredAt: row.settled_time, transactionHash: null, externalMarketId: row.ticker, externalInstrumentId: null,
-        side: null, quantity: null, amount: null, assetCode: 'USD', rawPayload: row }))
+      const rows = parsed.settlements.filter(predictionRecord)
+      if (this.liveClient) await reference(rows.map((row) => row.ticker))
+      for (const row of rows) {
+        const market = references.get(row.ticker)?.raw
+        const yes = new Decimal(row.yes_count_fp ?? -1)
+        const no = new Decimal(row.no_count_fp ?? -1)
+        const onlyYes = yes.gt(0) && no.eq(0)
+        const onlyNo = no.gt(0) && yes.eq(0)
+        const held = onlyYes ? 'yes' : onlyNo ? 'no' : null
+        const quantity = held === 'yes' ? yes : no
+        const price = held === row.market_result ? '1' : '0'
+        const payout = row.revenue === undefined ? null : new Decimal(row.revenue).div(100)
+        const result = row.market_result
+        const verified = Boolean(this.liveClient && held && market?.status === 'finalized'
+          && market.result === result && (result === 'yes' || result === 'no')
+          && market.notional_value_dollars != null && new Decimal(market.notional_value_dollars).eq(1)
+          && market.settlement_value_dollars != null && new Decimal(market.settlement_value_dollars).eq(result === 'yes' ? 1 : 0)
+          && payout?.eq(quantity.mul(price)))
+        for (const receipt of this.liveClient ? [false, true] : [false]) {
+          records.push(normalizedRecordSchema.parse({ kind: 'activity_fact',
+            externalId: 'settlement:' + row.ticker + (receipt ? ':receipt' : ''),
+            identityKind: 'source_fingerprint',
+            classification: !verified && !receipt ? 'unresolved' : 'unreconciled',
+            resolutionReason: verified ? null : 'kalshi_settlement_allocation_unverified',
+            activityType: verified ? receipt ? 'KALSHI_BINARY_PAYOUT' : 'KALSHI_BINARY_ENTITLEMENT'
+              : receipt ? 'KALSHI_PAYOUT_UNVERIFIED' : 'SETTLEMENT_UNRESOLVED',
+            occurredAt: row.settled_time, transactionHash: null, externalMarketId: row.ticker,
+            externalInstrumentId: verified ? outcome(row.ticker, held!) : null,
+            side: verified ? held : null, quantity: verified ? quantity.toFixed() : null,
+            price: verified ? price : null, amount: payout?.toFixed() ?? null, assetCode: 'USD', rawPayload: row }))
+        }
+      }
     } else if (request.streamName === 'deposits' || request.streamName === 'withdrawals' || request.streamName === 'credits') {
       entity = 'activity'
       const stream = request.streamName
@@ -268,13 +303,16 @@ export class KalshiAdapter implements ProviderAdapter {
       const creditRows = stream === 'credits' ? z.array(creditActivity).max(100).parse(body.credits) : []
       const evidence = [
         ...cashRows.map((row) => ({ id: row.id, status: row.status, amount: new Decimal(row.amount_cents).div(100).toFixed(),
-          timestamp: new Date((row.finalized_ts ?? row.created_ts) * 1000).toISOString(), raw: row })),
-        ...creditRows.map((row) => ({ id: row.credit_id, status: row.status, amount: row.amount_dollars, timestamp: row.created_time, raw: row })),
+          timestamp: new Date((row.finalized_ts ?? row.created_ts) * 1000).toISOString(),
+          reconcilable: row.status === 'applied' && row.finalized_ts != null && row.amount_cents > 0, raw: row })),
+        ...creditRows.map((row) => ({ id: row.credit_id, status: row.status, amount: row.amount_dollars, timestamp: row.created_time, reconcilable: false, raw: row })),
       ]
       for (const row of evidence) records.push(normalizedRecordSchema.parse({ kind: 'activity_fact',
         externalId: stream + ':' + row.id, identityKind: 'provider_native',
         classification: row.status === 'applied' ? 'unresolved' : 'unreconciled',
-        resolutionReason: 'kalshi_cash_attribution_unverified', activityType: row.status === 'applied' ? 'CASH_UNRESOLVED' : 'CASH_STATUS_OBSERVATION',
+        resolutionReason: row.reconcilable ? 'kalshi_final_cash_requires_account_attribution' : 'kalshi_cash_attribution_unverified',
+        activityType: row.reconcilable ? stream === 'deposits' ? 'KALSHI_APPLIED_DEPOSIT' : 'KALSHI_APPLIED_WITHDRAWAL'
+          : row.status === 'applied' ? 'CASH_UNRESOLVED' : 'CASH_STATUS_OBSERVATION',
         occurredAt: row.timestamp, transactionHash: null, externalMarketId: null, externalInstrumentId: null,
         side: null, quantity: null, amount: row.amount, assetCode: 'USD', rawPayload: row.raw }))
     } else if (request.streamName === 'settled_observations') {
@@ -293,7 +331,8 @@ export class KalshiAdapter implements ProviderAdapter {
         occurredAt: row.last_updated_ts ?? null, transactionHash: null, externalMarketId: row.ticker, externalInstrumentId: null,
         side: null, quantity: row.position_fp, amount: row.market_exposure_dollars ?? null, assetCode: 'USD', rawPayload: row }))
     } else return fail('kalshi_unknown_stream')
-    const continuation = cursor ? { ...state, cursor } : nextTier ? { ...state, tier: nextTier, cursor: null } : null
+    const continuationState = partial ? { ...state, gap: true } : state
+    const continuation = cursor ? { ...continuationState, cursor } : nextTier ? { ...continuationState, tier: nextTier, cursor: null } : null
     const scopedRecords = this.environment === 'demo' ? records.map((record) => {
       const scoped = { ...record }
       for (const key of ['externalEventId', 'externalMarketId', 'externalInstrumentId'] as const) {
@@ -313,7 +352,7 @@ export class KalshiAdapter implements ProviderAdapter {
       ? {} : { [entity]: { status: reasonCode ? 'partial' : 'complete', sourceAsOf: state.observedAt, reasonCode } }
     if (positionsUnverified) reports.prices = { status: 'partial', sourceAsOf: now, reasonCode: 'kalshi_observed_book_quotes_only' }
     return { payload: scopedRecords, nextCursor: continuation ? JSON.stringify(continuation) : null,
-      checkpoint: historyUnverified && !continuation ? state.observedAt : null, coverage: reports }
+      checkpoint: historyUnverified && !continuation && !state.gap && !partial ? state.observedAt : null, coverage: reports }
   }
   normalizePage(page: ProviderPage) {
     return z.array(normalizedRecordSchema).parse(page.payload)

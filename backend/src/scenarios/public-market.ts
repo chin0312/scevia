@@ -51,7 +51,7 @@ export function selectPublicOutcome(raw: unknown, selection: PublicSelection, as
 
 
 const kalshiEnvelope = z.object({ items: z.array(z.object({ marketTicker: z.string(), eventTicker: z.string(), lifecycle: z.string(),
-  settlementAsset: z.literal('USD'), outcomes: z.array(z.object({ id: z.string(), side: z.enum(['yes', 'no']),
+  settlementAsset: z.literal('USD'), expectedResolutionAt: timestamp.nullable().optional(), establishedPayoutUnit: z.literal('1').nullable().optional(), outcomes: z.array(z.object({ id: z.string(), side: z.enum(['yes', 'no']),
     name: z.string(), quote: z.object({ value: decimal, retrievedAt: timestamp, observedAt: z.null(), provenance: z.string() }).nullable() })) })) })
 
 function selectKalshiOutcome(raw: unknown, selection: PublicSelection, asset: string, asOf: string): ScenarioInstrument {
@@ -68,6 +68,8 @@ function selectKalshiOutcome(raw: unknown, selection: PublicSelection, asset: st
     nativeInstrument: outcome.id, nativeOutcomeIndex: outcome.side === 'yes' ? 0 : 1,
     market: 'kalshi:' + item.marketTicker, event: 'kalshi:' + item.eventTicker, outcome: outcome.name,
     lifecycle: item.lifecycle, settlementAsset: 'USD', mark: usable ? outcome.quote!.value : null, markAt: usable ? markAt : null,
-    latestPrice: outcome.quote?.value ?? null, latestPriceAt: markAt,
+    latestPrice: outcome.quote?.value ?? null, latestPriceAt: markAt, resolvesAt: item.expectedResolutionAt ?? null,
+    ...(outcome.quote ? { quoteProvenance: outcome.quote.provenance } : {}),
+    ...(item.establishedPayoutUnit ? { establishedPayoutUnit: item.establishedPayoutUnit } : {}),
     ...(usable ? { markSource: markAt > asOf ? 'assumed_current_quote' as const : 'public_retrieval_at_cutoff' as const } : {}) }
 }

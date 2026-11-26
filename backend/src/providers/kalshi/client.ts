@@ -8,7 +8,7 @@ export const kalshiPaths = {
   credits: '/portfolio/credit_history', historicalPositions: '/historical/positions',
   markets: '/markets', events: '/events',
 } as const
-export type KalshiRead = keyof typeof kalshiPaths | 'market' | 'historicalMarket' | 'historicalCandles' | 'event'
+export type KalshiRead = keyof typeof kalshiPaths | 'market' | 'historicalMarket' | 'historicalCandles' | 'currentCandles' | 'event'
 export type KalshiTransport = (url: URL, init: RequestInit) => Promise<Response>
 
 export function kalshiSigner(pem: string) {
@@ -22,7 +22,7 @@ export function kalshiSigner(pem: string) {
   throw new ProviderAdapterError('kalshi_signing_key_unsupported', false)
 }
 
-const publicReads = new Set<KalshiRead>(['cutoff', 'markets', 'events', 'market', 'historicalMarket', 'historicalCandles', 'event'])
+const publicReads = new Set<KalshiRead>(['cutoff', 'markets', 'events', 'market', 'historicalMarket', 'historicalCandles', 'currentCandles', 'event'])
 const paginated = ['limit', 'cursor']
 const queryKeys: Partial<Record<KalshiRead, string[]>> = {
   markets: [...paginated, 'event_ticker', 'tickers'], events: [...paginated],
@@ -32,6 +32,7 @@ const queryKeys: Partial<Record<KalshiRead, string[]>> = {
   historicalPositions: [...paginated, 'subaccount'], balance: ['subaccount', 'exchange_index'],
   settlements: [...paginated, 'subaccount'], deposits: paginated, withdrawals: paginated, credits: paginated,
   historicalCandles: ['start_ts', 'end_ts', 'period_interval'],
+  currentCandles: ['start_ts', 'end_ts', 'period_interval'],
 }
 const maxResponseBytes = 4 * 1024 * 1024
 
@@ -42,9 +43,14 @@ export class KalshiClient {
 
   private authorizedUntil = 0
 
-  async read(operation: KalshiRead, query: URLSearchParams, signal: AbortSignal, ticker?: string): Promise<unknown> {
+  async read(operation: KalshiRead, query: URLSearchParams, signal: AbortSignal, ticker?: string, series?: string): Promise<unknown> {
     let path: string
-    if (operation === 'market' || operation === 'historicalMarket' || operation === 'historicalCandles' || operation === 'event') {
+    if (operation === 'currentCandles') {
+      if (!ticker || !series || !/^[A-Z0-9][A-Z0-9_.-]{0,127}$/.test(ticker) || !/^[A-Z0-9][A-Z0-9_.-]{0,127}$/.test(series)) {
+        throw new ProviderAdapterError('kalshi_invalid_ticker', false)
+      }
+      path = '/series/' + series + '/markets/' + ticker + '/candlesticks'
+    } else if (operation === 'market' || operation === 'historicalMarket' || operation === 'historicalCandles' || operation === 'event') {
       if (!ticker || !/^[A-Z0-9][A-Z0-9_.-]{0,127}$/.test(ticker)) throw new ProviderAdapterError('kalshi_invalid_ticker', false)
       path = '/' + (operation === 'historicalMarket' || operation === 'historicalCandles' ? 'historical/markets' : operation === 'market' ? 'markets' : 'events') + '/' + ticker + (operation === 'historicalCandles' ? '/candlesticks' : '')
     } else {

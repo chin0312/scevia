@@ -1,3 +1,4 @@
+import { kalshiCredentialSourceId } from '../src/providers/kalshi/live.js'
 import { generateKeyPairSync } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -127,10 +128,16 @@ describe('migrations and canonical persistence', () => {
     try {
       const keyFile = join(directory, 'signer.pem')
       const { privateKey } = generateKeyPairSync('ed25519')
-      await writeFile(keyFile, privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 })
+      const pem = Buffer.from(privateKey.export({ type: 'pkcs8', format: 'pem' }))
+      await writeFile(keyFile, pem, { mode: 0o600 })
+      const externalId = kalshiCredentialSourceId('demo', 'test-key', pem)
+      let quantity: string | null = '-2.5'
+      let revision = new Date(Date.now() - 5000).toISOString()
+      let interrupted = false
+      let failedDepositState = 'pending'
       const [account, other] = await database.insert(providerAccounts).values([
-        { portfolioId: PORTFOLIO_ID, providerCode: 'kalshi', externalAccountId: 'kalshi:demo:primary:0', kind: 'authenticated_account', label: 'Authorized source' },
-        { portfolioId: OTHER_PORTFOLIO_ID, providerCode: 'kalshi', externalAccountId: 'kalshi:demo:primary:0', kind: 'authenticated_account', label: 'Other tenant' },
+        { portfolioId: PORTFOLIO_ID, providerCode: 'kalshi', externalAccountId: externalId, kind: 'authenticated_account', label: 'Authorized source' },
+        { portfolioId: OTHER_PORTFOLIO_ID, providerCode: 'kalshi', externalAccountId: externalId, kind: 'authenticated_account', label: 'Other tenant' },
       ]).returning()
       const calls: string[] = []
       const app = await buildApp({ database, config: { ...testConfig(), nodeEnv: 'development',
@@ -152,8 +159,9 @@ describe('migrations and canonical persistence', () => {
           }
           if (path === '/portfolio/positions') {
             expect(signed).toBe(true)
-            return Response.json({ market_positions: [{ ticker: 'KX-BOOK', exchange_index: 0, position_fp: '-2.5',
-              market_exposure_dollars: '1.25' }], cursor: '' })
+            if (url.searchParams.has('cursor')) return Response.json({}, { status: 400 })
+            return Response.json({ market_positions: quantity === null ? [] : [{ ticker: 'KX-BOOK', exchange_index: 0, position_fp: quantity,
+              market_exposure_dollars: '1.25', last_updated_ts: revision }], cursor: interrupted ? 'second' : '' })
           }
           if (path === '/markets/KX-BOOK') {
             expect(signed).toBe(false)
@@ -161,23 +169,64 @@ describe('migrations and canonical persistence', () => {
               market_type: 'binary', status: 'active', notional_value_dollars: '1', yes_bid_dollars: '0.30',
               yes_ask_dollars: '0.50', yes_bid_size_fp: '10', yes_ask_size_fp: '10' } })
           }
+          if (path === '/historical/cutoff') return Response.json({ trades_created_ts: '2026-01-01T00:00:00Z',
+            market_settled_ts: '2026-01-01T00:00:00Z' })
+          if (path === '/portfolio/fills') {
+            const base = { exchange_index: 0, subaccount_number: 0, side: 'yes',
+              market_ticker: 'KX-RESOLVED', action: 'buy', outcome_side: 'yes', book_side: 'bid',
+              yes_price_dollars: '0.40', no_price_dollars: '0.60', fee_cost: '1' }
+            return Response.json({ fills: [
+              { ...base, fill_id: 'verified-buy', count_fp: '100', created_time: '2026-11-21T01:00:00Z' },
+              { ...base, fill_id: 'fractional-buy', market_ticker: 'KX-FRACTION', count_fp: '2.5',
+                fee_cost: '0.10', created_time: '2026-11-23T01:00:00Z' },
+              { ...base, fill_id: 'fractional-sale', market_ticker: 'KX-FRACTION', count_fp: '1', action: 'sell',
+                book_side: 'ask', outcome_side: 'no', yes_price_dollars: '0.60', no_price_dollars: '0.40',
+                fee_cost: '0.02', created_time: '2026-11-24T01:00:00Z' },
+            ] })
+          }
+          if (path === '/historical/fills') return Response.json({ fills: [] })
+          if (path === '/markets') return Response.json({ markets: [] })
+          if (path === '/markets/KX-RESOLVED' || path === '/markets/KX-FRACTION') return Response.json({ market: {
+            ticker: path.split('/').at(-1), event_ticker: 'KX-RESULT', title: 'Resolved example', market_type: 'binary',
+            status: 'finalized', result: 'yes', notional_value_dollars: '1', settlement_value_dollars: '1',
+          } })
+          if (path === '/portfolio/settlements') {
+            const base = { exchange_index: 0, market_result: 'yes', no_count_fp: '0', fee_cost: '1' }
+            return Response.json({ settlements: [
+              { ...base, ticker: 'KX-RESOLVED', yes_count_fp: '100', revenue: 10000, settled_time: '2026-11-22T01:00:00Z' },
+              { ...base, ticker: 'KX-FRACTION', yes_count_fp: '1.5', revenue: 150, settled_time: '2026-11-25T01:00:00Z' },
+            ] })
+          }
+          if (path === '/portfolio/deposits') return Response.json({ deposits: [
+            { id: 'approved', status: 'applied', type: 'ach', amount_cents: 10000, fee_cents: 0, created_ts: 1795132800, finalized_ts: 1795132900 },
+            { id: 'failed', status: failedDepositState, type: 'ach', amount_cents: 50000, fee_cents: 0,
+              created_ts: 1795132800, finalized_ts: failedDepositState === 'failed' ? 1795132900 : null },
+          ] })
+          if (path === '/portfolio/withdrawals') return Response.json({ withdrawals: [] })
+          if (path === '/portfolio/credit_history') return Response.json({ credits: [{ credit_id: 'unlinked-credit',
+            amount_dollars: '100', type: 'credit', status: 'applied', created_time: '2026-11-22T01:00:00Z' }] })
+          if (path === '/historical/positions') return Response.json({ market_positions: [] })
           throw new Error('Unexpected Kalshi path')
         } })
       openApps.push(app)
       const headers = { authorization: `Bearer ${TOKEN}` }
-      const sync = (id: string) => app.inject({ method: 'POST', url: '/v1/provider-accounts/' + id + '/sync?scope=current', headers })
+      let requestAddress = 1
+      const sync = (id: string, scope = 'current') => app.inject({ method: 'POST', url: '/v1/provider-accounts/' + id + '/sync?scope=' + scope,
+        headers, remoteAddress: '127.0.0.' + requestAddress++ })
       expect((await sync(other!.id)).statusCode).toBe(404)
       expect(calls).toEqual([])
       const response = await sync(account!.id)
       expect(response.statusCode, response.body).toBe(200)
       expect(calls).toEqual(['/api_keys', '/portfolio/balance', '/portfolio/positions', '/markets/KX-BOOK'])
       expect(await database.select().from(positionSnapshots).where(eq(positionSnapshots.providerAccountId, account!.id)))
-        .toMatchObject([{ quantity: '2.500000000000000000', averageCostPrice: '0.500000000000000000', markPrice: '0.600000000000000000' }])
+        .toEqual(expect.arrayContaining([expect.objectContaining({ quantity: '2.500000000000000000', averageCostPrice: '0.500000000000000000', markPrice: '0.600000000000000000' })]))
       expect(await database.select().from(priceObservations).where(eq(priceObservations.providerAccountId, account!.id)))
         .toMatchObject([{ price: '0.600000000000000000', priceKind: 'kalshi_retrieved_book_midpoint' }])
       const exposure = await app.inject({ method: 'GET', url: '/v1/portfolios/' + PORTFOLIO_ID + '/analytics/exposure?asset=USD&venue=kalshi&asOf=' + encodeURIComponent(new Date().toISOString()), headers })
       expect(exposure.statusCode, exposure.body).toBe(200)
-      expect(exposure.json().reportedExposure.rows).toMatchObject([{ observedMarketValue: '1.5', providerCoverage: 'partial' }])
+      expect(exposure.json().reportedExposure).toMatchObject({ knownCashSubtotal: '10.5', knownPositionSubtotal: '1.5',
+        knownCombinedSubtotal: '12', portfolioNav: null, eventAllocation: { denominator: '1.5' } })
+      expect(exposure.json().reportedExposure.rows).toEqual(expect.arrayContaining([expect.objectContaining({ observedMarketValue: '1.5', providerCoverage: 'partial' })]))
       const scenarios = '/v1/portfolios/' + PORTFOLIO_ID + '/scenarios'
       const preview = await app.inject({ method: 'POST', url: scenarios + '/baseline', headers,
         payload: { mode: 'actual', accounts: [account!.id], venue: 'kalshi', asset: 'USD', asOf: new Date().toISOString(),
@@ -195,6 +244,70 @@ describe('migrations and canonical persistence', () => {
         availability: { quantities: 'partial', basis: 'partial', valuation: 'partial' },
         positions: [{ quantity: '1.5', value: '0.9' }], bridge: { endingValue: null } })
       expect(await database.select().from(fills).where(eq(fills.providerAccountId, account!.id))).toEqual([])
+      const currentLegs = async () => {
+        const data = await database.select({ id: positionSnapshots.externalId, quantity: positionSnapshots.quantity }).from(positionSnapshots)
+          .where(and(eq(positionSnapshots.providerAccountId, account!.id), eq(positionSnapshots.isCurrent, true)))
+        return Object.fromEntries(data.map((row) => [row.id.split(':').at(-1), Number(row.quantity)]))
+      }
+      expect(await currentLegs()).toEqual({ yes: 0, no: 2.5 })
+      const prior = revision
+      revision = new Date(Date.parse(revision) + 1000).toISOString()
+      quantity = '3'
+      interrupted = true
+      expect((await sync(account!.id)).json().status).toBe('partial')
+      expect(await currentLegs()).toEqual({ yes: 0, no: 2.5 })
+      interrupted = false
+      expect((await sync(account!.id)).statusCode).toBe(200)
+      expect(await currentLegs()).toEqual({ yes: 3, no: 0 })
+      quantity = '-4'
+      const latest = revision
+      revision = prior
+      await sync(account!.id)
+      expect(await currentLegs()).toEqual({ yes: 3, no: 0 })
+      revision = new Date(Date.parse(latest) + 1000).toISOString()
+      await sync(account!.id)
+      expect(await currentLegs()).toEqual({ yes: 0, no: 4 })
+      quantity = null
+      await sync(account!.id)
+      expect(await currentLegs()).toEqual({ yes: 0, no: 4 })
+      quantity = '0'
+      revision = new Date(Date.parse(revision) + 1000).toISOString()
+      await sync(account!.id)
+      expect(await currentLegs()).toEqual({ yes: 0, no: 0 })
+      expect((await sync(account!.id, 'history')).statusCode).toBe(200)
+      const root = '/v1/portfolios/' + PORTFOLIO_ID
+      const listed = await app.inject({ method: 'GET', url: root + '/accounting/records?account=' + account!.id, headers })
+      const candidate = listed.json().items.find((row: { originalReason: string }) => row.originalReason === 'kalshi_final_cash_requires_account_attribution')
+      expect(candidate).toBeDefined()
+      const change = { changes: [{ key: candidate.key, action: 'include' }] }
+      const cashPreview = await app.inject({ method: 'POST', url: root + '/accounting/adjustments/preview', headers, payload: change })
+      expect(cashPreview.statusCode, cashPreview.body).toBe(200)
+      const confirm = await app.inject({ method: 'POST', url: root + '/accounting/adjustments/confirm', headers,
+        payload: { ...change, revision: cashPreview.json().revision } })
+      expect(confirm.statusCode, confirm.body).toBe(200)
+      const snapshot = (asOf?: string) => app.inject({ method: 'GET', url: root + '/accounting?view=detail'
+        + (asOf ? '&asOf=' + encodeURIComponent(asOf) : ''), headers })
+      const accounting = await snapshot('2026-11-22T02:00:00Z')
+      expect(accounting.statusCode, accounting.body).toBe(200)
+      expect(accounting.json().cash).toEqual(expect.arrayContaining([expect.objectContaining({ account: account!.id,
+        knownDelta: '159', knownRealized: '59' })]))
+      expect(accounting.json().holdings).toEqual(expect.arrayContaining([expect.objectContaining({ account: account!.id, quantity: '0', pending: '0' })]))
+      const afterSale = await snapshot('2026-11-24T02:00:00Z')
+      expect(afterSale.json().holdings).toEqual(expect.arrayContaining([expect.objectContaining({ account: account!.id,
+        quantity: '1.5', basis: '0.66' })]))
+      expect(afterSale.json().cash).toEqual(expect.arrayContaining([expect.objectContaining({ knownDelta: '158.48', knownRealized: '59.14' })]))
+      failedDepositState = 'failed'
+      expect((await sync(account!.id, 'history')).statusCode).toBe(200)
+      const afterPayout = await snapshot()
+      expect(afterPayout.json().cash).toEqual(expect.arrayContaining([expect.objectContaining({ knownDelta: '159.98', knownRealized: '59.98' })]))
+      const beforeReplacement = calls.length
+      const replacement = generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' })
+      await writeFile(keyFile, replacement, { mode: 0o600 })
+      const refused = await sync(account!.id)
+      expect(refused.statusCode).toBe(422)
+      expect(refused.json().error.code).toBe('kalshi_credential_source_mismatch')
+      expect(calls).toHaveLength(beforeReplacement)
+
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
@@ -202,7 +315,7 @@ describe('migrations and canonical persistence', () => {
 
   it('reconciles Kalshi fixture fills and Polymarket imports in separate denominations', async () => {
     const nativeMarket = { ticker: 'KX-FIXTURE', event_ticker: 'KX-EVENT', title: 'Synthetic fixture?', market_type: 'binary',
-      status: 'active', last_price_dollars: '0.4' }
+      status: 'active', last_price_dollars: '0.4', notional_value_dollars: '1' }
     const fill = { fill_id: 'fixture-fill', market_ticker: nativeMarket.ticker, action: 'buy', side: 'no', outcome_side: 'no',
       count_fp: '2.5', yes_price_dollars: '0.6', no_price_dollars: '0.4', fee_cost: '0.1', created_time: '2026-11-25T01:00:00Z' }
     let emptyPositions = false
@@ -606,6 +719,35 @@ describe('migrations and canonical persistence', () => {
       input: { operations: [{ bucket: 'a', instrument: canonical[0]!.id, kind: 'buy', amount: '5', price: '0.4', fee: { mode: 'excluded' } }] },
     } })
     expect(mismatch.json()).toMatchObject({ error: { code: 'instrument_venue_mismatch' } })
+  })
+
+  it('combines frozen denomination evaluations without letting one venue fund another', async () => {
+    const app = await createTestApp()
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const url = `/v1/portfolios/${PORTFOLIO_ID}/scenarios`
+    const asOf = '2026-11-01T00:00:00Z'
+    const part = async (asset: string, venue: string, quantity: string) => {
+      const key = 'local:' + venue
+      const preview = await app.inject({ method: 'POST', url: url + '/baseline', headers, payload: {
+        asset, asOf, mode: 'scratch', buckets: [{ id: venue, account: venue, venue, cash: '100' }],
+        local: [{ id: key, mark: '0.40' }],
+      } })
+      expect(preview.statusCode, preview.body).toBe(200)
+      return { baselineToken: preview.json().baselineToken, input: { operations: [{
+        bucket: venue, instrument: key, kind: 'buy', amount: quantity, price: '0.40', fee: { mode: 'fixed', value: '1' },
+      }] } }
+    }
+    const usd = await part('USD', 'kalshi', '100')
+    const usdc = await part('USDC', 'polymarket', '50')
+    const evaluate = (components: unknown[]) => app.inject({ method: 'POST', url: url + '/evaluate-denominations', headers,
+      payload: { components, assumedUsdPerUnit: { USDC: '0.98' } } })
+    const result = await evaluate([usd, usdc])
+    expect(result.statusCode, result.body).toBe(200)
+    expect(result.json()).toMatchObject({ indicativeUsd: { value: '196.02' }, fundingTransfers: false,
+      components: [{ asset: 'USD', funding: [{ endingCash: '59' }] }, { asset: 'USDC', funding: [{ endingCash: '79' }] }] })
+    const underfunded = await evaluate([usd, await part('USDC', 'polymarket', '300')])
+    expect(underfunded.json()).toMatchObject({ indicativeUsd: null,
+      components: [{ asset: 'USD', additionalCapitalRequired: '0' }, { asset: 'USDC', additionalCapitalRequired: '21' }] })
   })
 
   it('persists isolated scratch scenarios with explicit revisions and unsaved evaluation', async () => {

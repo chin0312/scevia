@@ -1,3 +1,4 @@
+import type { PolymarketCollateralReader } from './collateral.js'
 import { createHash } from 'node:crypto'
 import { Decimal } from 'decimal.js'
 import { z } from 'zod'
@@ -82,13 +83,25 @@ export class PolymarketAdapter implements ProviderAdapter {
     incrementalSync: 'supported',
   }
 
-  constructor(private readonly client = new PolymarketHttpClient()) {}
+  constructor(private readonly client = new PolymarketHttpClient(), private readonly collateral?: PolymarketCollateralReader) {
+    if (collateral) {
+      this.capabilities.operations.cash_balances = 'supported'
+      this.capabilities.streams.unshift({ name: 'polygon_pusd_balance', entities: ['cash_balances'], strategy: 'full_refresh',
+        snapshotSemantics: { cash_balances: 'complete' } })
+    }
+  }
 
   async fetchPage(request: FetchPageRequest): Promise<ProviderPage> {
     if (!ADDRESS_PATTERN.test(request.externalAccountId)) {
       throw new ProviderAdapterError('invalid_polymarket_wallet_address', false)
     }
     try {
+      if (request.streamName === 'polygon_pusd_balance' && this.collateral) {
+        const record = await this.collateral.balance(request.externalAccountId, request.signal)
+        return { payload: [record], nextCursor: null, checkpoint: null,
+          coverage: { cash_balances: { status: 'complete', sourceAsOf: record.kind === 'cash_balance' ? record.observedAt : null,
+            reasonCode: 'polygon_finalized_pusd_wallet_balance_only' } } }
+      }
       if (request.streamName === 'positions' || request.streamName === 'closed_positions') return await this.fetchPositions(request)
       if (request.streamName === 'trades') return await this.fetchTrades(request)
       if (request.streamName === 'activity') return await this.fetchActivity(request)
@@ -103,6 +116,7 @@ export class PolymarketAdapter implements ProviderAdapter {
   }
 
   normalizePage(page: ProviderPage, streamName: string): NormalizedRecord[] {
+    if (streamName === 'polygon_pusd_balance') return z.array(normalizedRecordSchema).parse(page.payload)
     const parsedPayload = z.object({
       stream: z.enum(['positions', 'closed_positions', 'trades', 'activity']),
       positionStatus: z.enum(['OPEN', 'CLOSED']).optional(),

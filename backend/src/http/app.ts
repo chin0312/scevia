@@ -1,3 +1,5 @@
+import { PolymarketAdapter } from '../providers/polymarket/adapter.js'
+import { PolymarketCollateralReader } from '../providers/polymarket/collateral.js'
 import type { KalshiTransport } from '../providers/kalshi/client.js'
 import type { KalshiMarketDataService } from '../providers/kalshi/market-data.js'
 import { ScenarioError } from '../scenarios/engine.js'
@@ -312,7 +314,10 @@ function errorBody(requestId: string, code: string, message: string) {
 
 export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
   const kalshiLive = createKalshiLive(options.config, options.database, options.kalshiTransport)
-  const registry = options.registry ?? createProviderRegistry(kalshiLive?.adapter)
+  const polygonRpc = options.config.nodeEnv === 'development' && ['127.0.0.1', '::1'].includes(options.config.host)
+    && options.config.polymarketLiveEnabled ? options.config.polymarketPolygonRpc : undefined
+  const registry = options.registry ?? createProviderRegistry(kalshiLive?.adapter,
+    polygonRpc ? new PolymarketAdapter(undefined, new PolymarketCollateralReader(polygonRpc)) : undefined)
   const ingestion = new IngestionService(options.database, registry)
   const liveAllowed = options.config.polymarketLiveEnabled === true
   const marketData = options.marketData ?? new PolymarketMarketDataService()
@@ -580,11 +585,11 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       request.principalId = options.config.devPrincipalId
     })
 
-    registerAccountingRoutes(privateApi, options.database, liveAllowed || options.marketData || kalshiMarketData ? async (url, type) => {
+    registerAccountingRoutes(privateApi, options.database, liveAllowed || options.marketData || kalshiMarketData ? async (url, type, assetId) => {
       try {
         if (type === 'kalshi_outcome') {
           if (!kalshiMarketData) throw new ScenarioError('kalshi_live_disabled')
-          return await kalshiMarketData.resolve(url, AbortSignal.timeout(8000))
+          return await kalshiMarketData.resolve(url, AbortSignal.timeout(8000), assetId)
         }
         if (!liveAllowed && !options.marketData) throw new ScenarioError('provider_live_disabled')
         return await marketData.resolve(url)
@@ -1451,7 +1456,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         if (result.status === 'failed') {
           const errors = new Set(result.streams.map((stream) => stream.errorCode))
           const kalshiSetupError = account.providerCode === 'kalshi' && ['kalshi_read_scope_unverified', 'kalshi_account_scope_unverified',
-            'kalshi_account_binding_mismatch', 'kalshi_credential_unavailable'].find((code) => errors.has(code))
+            'kalshi_account_binding_mismatch', 'kalshi_credential_unavailable', 'kalshi_credential_source_mismatch'].find((code) => errors.has(code))
           if (kalshiSetupError) return reply.code(422).send(errorBody(request.id, kalshiSetupError, 'Check the local Kalshi credential and account binding.'))
           return reply.code(502).send(errorBody(request.id, 'sync_failed', 'All synchronization streams failed.'))
         }

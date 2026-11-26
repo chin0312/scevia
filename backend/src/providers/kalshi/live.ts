@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, createPublicKey } from 'node:crypto'
 import { constants } from 'node:fs'
 import { open } from 'node:fs/promises'
 import { and, eq, isNull } from 'drizzle-orm'
@@ -10,26 +10,31 @@ import { KalshiAdapter } from './adapter.js'
 import { KalshiClient, kalshiSigner, type KalshiTransport } from './client.js'
 import { KalshiMarketDataService } from './market-data.js'
 
+export function kalshiCredentialSourceId(environment: 'demo' | 'production', keyId: string, pem: Buffer) {
+  const publicKey = createPublicKey(pem).export({ format: 'der', type: 'spki' })
+  const identity = createHash('sha256').update(keyId).update(Buffer.from([0])).update(publicKey).digest('hex')
+  return 'kalshi:' + environment + ':primary:0:' + identity
+}
+
 export function createKalshiLive(config: ServerConfig, database: Database, transport: KalshiTransport = fetch) {
   const settings = config.kalshi
   if (config.nodeEnv !== 'development' || !['127.0.0.1', '::1'].includes(config.host) || !settings?.publicAuthorized) return null
   const { environment, binding } = settings
-  const externalAccountId = 'kalshi:' + environment + ':primary:0'
+  const sourcePrefix = 'kalshi:' + environment + ':primary:0:'
   const publicClient = new KalshiClient(transport, environment)
   const cache: { entry?: { fingerprint: string; client: KalshiClient } } = {}
 
   async function resolve(request: FetchPageRequest) {
-    if (!binding || request.providerAccountId !== binding.accountId || request.externalAccountId !== externalAccountId) {
+    if (!binding || request.providerAccountId !== binding.accountId || (!request.externalAccountId.startsWith(sourcePrefix) || !/^[0-9a-f]{64}$/.test(request.externalAccountId.slice(sourcePrefix.length)))) {
       throw new ProviderAdapterError('kalshi_account_binding_mismatch', false)
     }
     const [account] = await database.select({ id: providerAccounts.id }).from(providerAccounts)
       .innerJoin(portfolios, eq(providerAccounts.portfolioId, portfolios.id))
       .where(and(eq(providerAccounts.id, binding.accountId), eq(portfolios.id, binding.portfolioId),
         eq(portfolios.ownerId, config.devPrincipalId), eq(providerAccounts.providerCode, 'kalshi'),
-        eq(providerAccounts.kind, 'authenticated_account'), eq(providerAccounts.externalAccountId, externalAccountId),
+        eq(providerAccounts.kind, 'authenticated_account'), eq(providerAccounts.externalAccountId, request.externalAccountId),
         isNull(providerAccounts.disabledAt))).limit(1)
     if (!account) throw new ProviderAdapterError('kalshi_account_binding_mismatch', false)
-    if (request.streamName === 'markets') return publicClient
 
     try {
       const handle = await open(binding.keyFile, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
@@ -43,6 +48,10 @@ export function createKalshiLive(config: ServerConfig, database: Database, trans
           const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0)
           if (bytesRead !== info.size || bytesRead >= bytes.length) throw new Error('private key file changed')
           const material = bytes.subarray(0, bytesRead)
+          if (kalshiCredentialSourceId(environment, binding.keyId, material) !== request.externalAccountId) {
+            throw new ProviderAdapterError('kalshi_credential_source_mismatch', false)
+          }
+          if (request.streamName === 'markets') return publicClient
           const fingerprint = createHash('sha256').update(material).digest('hex')
           if (cache.entry?.fingerprint === fingerprint) return cache.entry.client
           const client = new KalshiClient(transport, environment, {
@@ -56,8 +65,9 @@ export function createKalshiLive(config: ServerConfig, database: Database, trans
       } finally {
         await handle.close()
       }
-    } catch {
+    } catch (error) {
       delete cache.entry
+      if (error instanceof ProviderAdapterError) throw error
       throw new ProviderAdapterError('kalshi_credential_unavailable', false)
     }
   }

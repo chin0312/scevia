@@ -1,3 +1,4 @@
+import { PolymarketCollateralReader, polygonPusd } from '../src/providers/polymarket/collateral.js'
 import { describe, expect, it } from 'vitest'
 import { PolymarketAdapter } from '../src/providers/polymarket/adapter.js'
 import { decimalString, PolymarketHttpClient, parseProviderJson } from '../src/providers/polymarket/http.js'
@@ -27,6 +28,34 @@ function request(streamName: FetchPageRequest['streamName'], extra: Partial<Fetc
 }
 
 describe('Polymarket provider adapter', () => {
+  it('reads exact native pUSD at a pinned finalized Polygon block', async () => {
+    const hash = '0x' + 'a'.repeat(64)
+    const hex = (value: bigint) => '0x' + value.toString(16).padStart(64, '0')
+    let chainId = '0x89'
+    const reader = new PolymarketCollateralReader(new URL('https://rpc.example'), async (_url, options) => {
+      const query = JSON.parse(String(options?.body))
+      let result: unknown = chainId
+      if (query.method === 'eth_getBlockByNumber') {
+        expect(query.params).toEqual(['finalized', false])
+        result = { hash, number: '0x123', timestamp: '0x6553f100' }
+      }
+      if (query.method === 'eth_call') {
+        expect(query.params[0].to).toBe(polygonPusd)
+        expect(query.params[1]).toEqual({ blockHash: hash, requireCanonical: true })
+        result = query.params[0].data === '0x313ce567' ? hex(6n) : hex(14_523_011n)
+      }
+      expect(options?.redirect).toBe('error')
+      return jsonResponse({ jsonrpc: '2.0', id: 1, result })
+    })
+    const adapter = new PolymarketAdapter(undefined, reader)
+    const request = { externalAccountId: WALLET, streamName: 'polygon_pusd_balance', signal: NO_ABORT, cursor: null, checkpoint: null }
+    const page = await adapter.fetchPage(request)
+    expect(adapter.normalizePage(page, request.streamName)).toMatchObject([{ kind: 'cash_balance', assetCode: 'PUSD',
+      balance: '14.523011', rawPayload: { blockHash: hash, chainId: 137, finality: 'finalized' } }])
+    chainId = '0x1'
+    await expect(adapter.fetchPage(request)).rejects.toThrow('polymarket_polygon_chain_mismatch')
+  })
+
   it('preserves JSON number lexemes for canonical decimal validation', () => {
     const parsed = parseProviderJson('{"size":0.123456789012345678,"price":1.2300e-2}') as Record<string, unknown>
     expect(parsed.size).toBe('0.123456789012345678')

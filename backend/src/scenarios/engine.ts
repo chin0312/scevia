@@ -16,6 +16,7 @@ export interface ScenarioInstrument {
   nativeOutcomeIndex?: number
   nativeIdType?: 'position_id' | 'clob_token_id'
   markSource?: 'scoped_holding_consensus' | 'public_retrieval_at_cutoff' | 'assumed_current_quote' | 'declared_local'
+  quoteProvenance?: string; establishedPayoutUnit?: string
   latestPrice?: string | null; latestPriceAt?: string | null
   feeSchedule?: { version: 'polymarket-price-variance-v1'; rate: string; retrievedAt: string; source: 'gamma_market'; denomination: 'USDC' }
 }
@@ -56,6 +57,9 @@ export class ScenarioError extends Error {
 }
 
 export function validateInstrumentIdentities(instruments: ScenarioInstrument[]) {
+  const kalshiEnvironments = new Set(instruments.filter((row) => row.provider === 'kalshi' && row.nativeMarket)
+    .map((row) => row.nativeMarket!.startsWith('demo:')))
+  if (kalshiEnvironments.size > 1) throw new ScenarioError('kalshi_scenario_environment_mismatch')
   const nativeIdentities = new Set<string>()
   for (const row of instruments) {
     if (!row.provider || !row.nativeMarket || !row.nativeInstrument) continue
@@ -102,7 +106,8 @@ function evaluateInternal(baseline: ScenarioBaseline, changes: ScenarioInput, op
   const verifiedMaxima = new Map(baseline.rules.flatMap((rule) =>
     [rule.yes, rule.no].map((id) => [id, new D(rule.unitPayout ?? '1')] as const)))
   const recordedMaximum = (id: string) => verifiedMaxima.get(id)
-    ?? (instruments.get(id)?.provider === 'polymarket' ? new D(1) : null)
+    ?? (instruments.get(id)?.establishedPayoutUnit ? new D(instruments.get(id)!.establishedPayoutUnit!)
+      : instruments.get(id)?.provider === 'polymarket' ? new D(1) : null)
   const holdingMark = (row: { instrument: string; mark?: string | null }) => {
     const value = amount(row.mark === undefined ? instruments.get(row.instrument)?.mark ?? null : row.mark)
     const max = recordedMaximum(row.instrument)

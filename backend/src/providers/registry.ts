@@ -24,8 +24,8 @@ export class ProviderRegistry {
   }
 }
 
-export const createProviderRegistry = (kalshi = new KalshiAdapter()) => new ProviderRegistry([
-  new PolymarketAdapter(),
+export const createProviderRegistry = (kalshi = new KalshiAdapter(), polymarket = new PolymarketAdapter()) => new ProviderRegistry([
+  polymarket,
   kalshi,
   new MultiOutcomeFixtureAdapter(),
   new SnapshotFixtureAdapter(),

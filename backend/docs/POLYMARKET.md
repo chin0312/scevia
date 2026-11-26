@@ -76,3 +76,17 @@ Protocol V2 uses the pUSD ERC-20 on Polygon, backed by USDC, and changes exchang
 | Envio HyperSync or approved Polygon RPC | Raw blocks, logs, receipts and traces can supplement historical fees, bridge, collateral, split, merge and redemption checks given verified contract versions and wallet scope. A chain receipt does not establish an exchange's private book or account-wide economic intent. HyperSync advertises receipt-root verification. Free entitlement, retention, rate, lag and projected workload cost have not been confirmed for Scevia. [HyperSync](https://docs.envio.dev/docs/HyperSync/overview) |
 
 No third-party acquisition, enrolment or paid service is needed for this patch. Choose at most one supplemental raw-evidence source after an approved sample shows a gap that official APIs and statements cannot close. Validate pending, credited and final bridge movements separately to avoid counting the same cash movement at multiple layers.
+
+### Finalized native collateral read
+
+After confirming both Polymarket wallet-data rights and the selected RPC service's permission for the intended queries and retention, set `POLYMARKET_LIVE_DATA_AUTHORIZED=YES`, `POLYMARKET_POLYGON_RPC_AUTHORIZED=YES`, and `POLYMARKET_POLYGON_RPC_URL=https://your-approved-polygon-rpc` on the loopback development server. Reuse an owned, explicitly registered wallet source.
+
+```sh
+api=http://127.0.0.1:3001/v1
+auth="Authorization: Bearer $DEV_AUTH_TOKEN"
+curl -fsS -H "$auth" -X POST "$api/provider-accounts/$POLYMARKET_PROVIDER_ACCOUNT_ID/sync?scope=current"
+curl -fsS -H "$auth" "$api/portfolios/$PORTFOLIO_ID/cash-balances"
+curl -fsS -H "$auth" "$api/portfolios/$PORTFOLIO_ID/coverage?providerAccountId=$POLYMARKET_PROVIDER_ACCOUNT_ID"
+```
+
+Verify the returned `PUSD` amount against the approved wallet and the same finalized Polygon block. The reader verifies chain ID, uses the documented pUSD contract, verifies its decimals, and pins ERC-20 calls to the canonical finalized block hash. The stream requires an RPC endpoint supporting the finalized tag and EIP-1898 block-hash parameters. Wallet balance is independent of reconstructed cash, CLOB spendable balance and open order commitments. It supplies no historical flows, fees or trade attribution. Historical API USDC-coded fields remain provider report units. [Polymarket contract deployments](https://docs.polymarket.com/resources/contracts) · [Block-hash RPC parameters](https://eips.ethereum.org/EIPS/eip-1898)

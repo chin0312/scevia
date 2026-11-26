@@ -10,6 +10,7 @@ const serverEnvironmentSchema = z.object({
   KALSHI_PUBLIC_DATA_AUTHORIZED: z.enum(['YES', 'NO']).default('NO'),
   KALSHI_ACCOUNT_DATA_AUTHORIZED: z.enum(['YES', 'NO']).default('NO'),
   KALSHI_ENVIRONMENT: z.enum(['demo', 'production']).default('demo'),
+  POLYMARKET_POLYGON_RPC_AUTHORIZED: z.enum(['YES', 'NO']).default('NO'),
   POLYMARKET_LIVE_DATA_AUTHORIZED: z.enum(['YES', 'NO']).default('NO'),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   HOST: z.string().default('127.0.0.1'),
@@ -35,6 +36,7 @@ export interface KalshiConfig {
 export interface ServerConfig extends DatabaseConfig {
   kalshi?: KalshiConfig
   polymarketLiveEnabled?: boolean
+  polymarketPolygonRpc?: URL
   nodeEnv: 'development' | 'test' | 'production'
   host: string
   port: number
@@ -89,8 +91,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     }).parse({ accountId: env.KALSHI_PROVIDER_ACCOUNT_ID, portfolioId: env.KALSHI_PORTFOLIO_ID,
       keyId: env.KALSHI_KEY_ID, keyFile: env.KALSHI_PRIVATE_KEY_FILE })
   }
+  let polymarketPolygonRpc: URL | undefined
+  if (localDevelopment && parsed.POLYMARKET_LIVE_DATA_AUTHORIZED === 'YES' && parsed.POLYMARKET_POLYGON_RPC_AUTHORIZED === 'YES') {
+    try {
+      polymarketPolygonRpc = new URL(env.POLYMARKET_POLYGON_RPC_URL ?? '')
+      if (polymarketPolygonRpc.protocol !== 'https:' || polymarketPolygonRpc.username || polymarketPolygonRpc.password
+        || polymarketPolygonRpc.hash) throw new Error('invalid endpoint')
+    } catch { throw new Error('Configure a valid HTTPS Polygon RPC endpoint for authorized Polymarket balance reads') }
+  }
   return {
     ...database,
+    ...(polymarketPolygonRpc ? { polymarketPolygonRpc } : {}),
     kalshi,
     nodeEnv: parsed.NODE_ENV,
     polymarketLiveEnabled: parsed.NODE_ENV === 'development' && ['127.0.0.1', '::1', 'localhost'].includes(parsed.HOST)

@@ -60,7 +60,7 @@ function concurrentWrite(error: unknown): boolean {
 }
 
 
-export function registerAccountingRoutes(app: FastifyInstance, database: Database, resolvePublic?: (url: string, type: import('../scenarios/public-market.js').PublicSelection['assetIdType']) => Promise<unknown>) {
+export function registerAccountingRoutes(app: FastifyInstance, database: Database, resolvePublic?: (url: string, type: import('../scenarios/public-market.js').PublicSelection['assetIdType'], assetId?: string) => Promise<unknown>) {
   async function owned(portfolioId: string, ownerId: string) {
     const [row] = await database.select({ id: portfolios.id }).from(portfolios)
       .where(and(eq(portfolios.id, portfolioId), eq(portfolios.ownerId, ownerId))).limit(1)
@@ -84,7 +84,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const association = request.body.providerAccountId ?? null
     const sourceLinks = request.body.sourceLinks ?? {}
     const acceptUnlinked = request.body.acceptUnlinked === true
-    const [account] = association ? await database.select({ id: providerAccounts.id, venue: providerAccounts.providerCode })
+    const [account] = association ? await database.select({ id: providerAccounts.id, venue: providerAccounts.providerCode, externalId: providerAccounts.externalAccountId })
       .from(providerAccounts).where(and(eq(providerAccounts.id, association), eq(providerAccounts.portfolioId, portfolioId))) : []
     if (association && !account) return reply.code(404).send(missing)
     if (!association && (acceptUnlinked || Object.keys(sourceLinks).length)) return reply.code(422).send({ error: { code: 'source_links_require_account' } })
@@ -99,7 +99,8 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     }
     catch (error) { return reply.code(422).send({ error: { code: (error as Error).message } }) }
     if (request.body.kalshiMapping !== undefined && !parsed.issues.length) {
-      const nativeIds = [...new Set(parsed.rows.flatMap((row) => row.instrument ? [row.instrument] : []))]
+      const namespace = account?.externalId.startsWith('kalshi:demo:') ? 'demo:' : ''
+      const nativeIds = [...new Set(parsed.rows.flatMap((row) => row.instrument ? [namespace + row.instrument] : []))]
       if (nativeIds.length > 2000) return reply.code(422).send({ error: { code: 'kalshi_mapping_scope_limit' } })
       const matched = nativeIds.length ? await database.select({ id: instruments.id, native: instruments.externalId, ticker: markets.externalId })
         .from(instruments).innerJoin(markets, eq(instruments.marketId, markets.id))
@@ -107,9 +108,20 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       const canonical = new Map(matched.filter((row) => row.native === row.ticker + ':yes' || row.native === row.ticker + ':no')
         .map((row) => [row.native, row.id]))
       parsed.rows = parsed.rows.map((row) => {
-        const id = row.instrument ? canonical.get(row.instrument) : undefined
+        const id = row.instrument ? canonical.get(namespace + row.instrument) : undefined
         return id ? { ...row, instrument: id, canonicalInstrumentId: id } : row
       })
+    }
+    const mappedKalshiIds = [...new Set(parsed.rows.flatMap((row) => row.venue === 'kalshi' && row.canonicalInstrumentId ? [row.canonicalInstrumentId] : []))]
+    if (mappedKalshiIds.length > 2000) return reply.code(422).send({ error: { code: 'kalshi_mapping_scope_limit' } })
+    if (mappedKalshiIds.length) {
+      const matches = await database.select({ nativeMarket: markets.externalId }).from(instruments)
+        .innerJoin(markets, eq(instruments.marketId, markets.id))
+        .where(and(eq(markets.providerCode, 'kalshi'), inArray(instruments.id, mappedKalshiIds)))
+      const demo = account?.externalId.startsWith('kalshi:demo:') === true
+      if (matches.length !== mappedKalshiIds.length || matches.some((row) => row.nativeMarket.startsWith('demo:') !== demo)) {
+        return reply.code(422).send({ error: { code: 'kalshi_import_environment_mismatch' } })
+      }
     }
     const unresolvedRows = parsed.rows.filter((row) => !row.id || ((row.type === 'split' || row.type === 'merge') && !row.completeSet)).length
     if (parsed.issues.length) return reply.code(422).send({ ...parsed, unresolvedRows, batchId: null })
@@ -431,15 +443,17 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       if (change.action === 'reset_identity') delete next.identity
       if (change.action === 'reset_duplicate') delete next.duplicate
       if (change.action === 'exclude') { next.membership = 'excluded'; next.membershipRevision = record.revision }
+      const reviewedKalshiCash = !selection && record.source.kind === 'provider'
+        && record.originalReason === 'kalshi_final_cash_requires_account_attribution'
       if (change.action === 'include') {
         next.membership = 'included'
         next.membershipRevision = record.revision
-        if (record.source.kind === 'import' && (record.originalReason || !original.id) && !next.identity) {
+        if (reviewedKalshiCash || (record.source.kind === 'import' && (record.originalReason || !original.id) && !next.identity)) {
           next.identity = { mode: 'include', revision: record.revision }
         }
       }
       if (change.action === 'distinct') next.identity = { mode: 'distinct', revision: record.revision }
-      if (record.source.kind === 'provider' && (change.action === 'distinct' || (change.action === 'include' && record.originalReason !== null))) {
+      if (record.source.kind === 'provider' && (change.action === 'distinct' || (change.action === 'include' && record.originalReason !== null && !reviewedKalshiCash))) {
         throw new Error('provider_evidence_cannot_be_promoted')
       }
 
@@ -764,7 +778,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
           || left.instrument.localeCompare(right.instrument) || left.sourceRecordId.localeCompare(right.sourceRecordId))),
       catalogRevision: digest(metadata.map((row) => ({ ...row, resolvesAt: row.resolvesAt?.toISOString() ?? null }))
         .sort((left, right) => left.instrument.localeCompare(right.instrument))),
-      reportedExposure: analyzeReportedExposure(snapshots, input.coverage, asOf, asset, metadata, rules, reported.edges, reported.graphLimit),
+      reportedExposure: analyzeReportedExposure(snapshots, input.coverage, asOf, asset, metadata, rules, reported.edges, reported.graphLimit, input.balances.filter((row) => accounts.includes(row.account) && (!scope.venue || row.venue === scope.venue))),
       settlementEvidenceRevision: digest([
         rules.map((rule) => ({ ...rule, reviewedAt: rule.reviewedAt.toISOString() })).sort((left, right) => left.market.localeCompare(right.market)),
         { effectiveLimit: effective.graphLimit, reportedLimit: reported.graphLimit,
@@ -814,11 +828,8 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     if (useObserved && asset !== 'USD') throw new ScenarioError('reported_kalshi_baseline_asset_mismatch')
     const connectedKalshi = new Set(actual?.providerAccounts.filter((row) => row.venue === 'kalshi' && row.kind === 'authenticated_account')
       .map((row) => row.account))
-    const recent = (at: Date | null) => at !== null && at.toISOString() <= asOf && Date.parse(asOf) - at.getTime() <= 86_400_000
-    const observedBalances = useObserved ? actual!.balances.filter((row) => row.venue === 'kalshi' && row.asset === asset && connectedKalshi.has(row.account)
-      && recent(row.observedAt) && actual!.coverage.some((entry) => entry.venue === row.venue && entry.account === row.account
-        && entry.entity === 'cash_balances' && entry.lastSuccessfulRunId === row.syncRunId
-        && entry.lastAttemptStatus === 'complete' && recent(entry.lastSuccessfulSyncAt) && recent(entry.lastAttemptAt))) : []
+    const observedBalances = useObserved ? actual!.response.reportedExposure.cash.filter((row) =>
+      row.venue === 'kalshi' && connectedKalshi.has(row.account) && row.availability === 'eligible') : []
     const buckets: FundingBucket[] = mode === 'scratch' ? source.buckets.map((row) => ({ ...row, pending: '0' }))
       : actual!.response.context.accountIdentities.map((scope) => {
         const cash = cashRows.find((row) => row.venue === scope.venue && row.account === scope.account)
@@ -836,7 +847,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
         const observed = cash?.balance == null ? observedBalances.find((row) => row.account === scope.account && row.venue === scope.venue) : undefined
         return { id: bucketKey(scope), inventoryComplete, ...(tradingVenue ? { tradingVenue } : {}), venue: scope.venue, account: scope.account,
           cash: cash?.balance ?? (observed ? new AnalyticalDecimal(observed.balance).toFixed() : null), pending,
-          ...(observed ? { cashObservation: { sourceRecordId: observed.sourceRecordId, asOf: observed.observedAt.toISOString() } } : {}),
+          ...(observed ? { cashObservation: { sourceRecordId: observed.sourceRecordId, asOf: observed.observedAt } } : {}),
           coverage: cash?.historyCoverage ?? 'unverified', inventoryAt: cash?.openingInventoryAt ?? null,
           pendingEntitlements: scoped.flatMap((row) => row.entitlements.map((entitlement) =>
             ({ instrument: row.instrument, ...entitlement }))) }
@@ -893,6 +904,16 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       const reference = scopedReference([...observations.values()])
       if (reference) baselineInstruments.set(id, { ...instrument, ...reference })
     }
+    if (actual) {
+      const scoped = actual.providerAccounts.filter((row) => row.venue === 'kalshi' && row.kind === 'authenticated_account'
+        && actual.response.context.accountIdentities.some((entry) => entry.account === row.account && entry.venue === row.venue))
+      const environments = new Set(scoped.map((row) => row.externalId.startsWith('kalshi:demo:')))
+      const selectedKalshi = [...baselineInstruments.values()].filter((row) => row.provider === 'kalshi')
+      if (environments.size > 1 || selectedKalshi.some((row) => row.nativeMarket?.startsWith('demo:') && !environments.has(true))
+        || (environments.has(true) && selectedKalshi.some((row) => !row.nativeMarket?.startsWith('demo:')))) {
+        throw new ScenarioError('kalshi_scenario_environment_mismatch')
+      }
+    }
     if (!buckets.length || buckets.length > 100 || holdings.length > 250) throw new ScenarioError('baseline_scope_limit')
     const rules = model.rules.filter((rule) => model.effective.graph.has(rule.market) && rule.asset === asset && rule.reviewedAt.toISOString() <= asOf
       && [rule.yes, rule.no].every((id) => listings.get(id)?.market === rule.market)
@@ -929,15 +950,17 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const input = await loadEvidence(portfolioId, asOf)
     if (input.truncated) return reply.code(422).send({ error: { code: 'provider_evidence_limit' } })
     const state = replayAccounting(input.evidence, asOf)
-    const assets = [...new Set(state.cash.map((row) => row.asset))].sort()
+    const assets = [...new Set([...state.cash, ...input.balances, ...input.positions].flatMap((row) => row.asset ? [row.asset] : []))].sort()
     const accounts = new Map([...input.accounts, ...input.evidence.map((row) => row.observation)]
       .map((row) => [JSON.stringify([row.venue, row.account]), { venue: row.venue, account: row.account }]))
     const groups = assets.map((asset) => {
       const rows = state.cash.filter((row) => row.asset === asset)
       const known = rows.filter((row) => row.portfolioValue !== null)
       const sum = known.reduce((value, row) => value.plus(row.portfolioValue!), new AnalyticalDecimal(0)).toFixed()
-      return { asset, knownValue: known.length ? sum : null, value: known.length === rows.length ? sum : null,
-        coverage: known.length === rows.length ? 'selected_asset_buckets' : 'partial',
+      return { asset, knownValue: known.length ? sum : null, value: rows.length && known.length === rows.length ? sum : null,
+        coverage: rows.length && known.length === rows.length ? 'selected_asset_buckets' : 'partial',
+        observedCash: input.balances.filter((row) => row.asset === asset).map(({ venue, account, balance, observedAt, sourceRecordId }) =>
+          ({ venue, account, balance, observedAt, sourceRecordId })),
         accounts: rows.map(({ venue, account, balance, portfolioValue }) => ({ venue, account, balance, portfolioValue })) }
     })
     const unknownAccounts = [...accounts.values()].filter((scope) => !state.cash.some((row) => row.account === scope.account && row.venue === scope.venue))
