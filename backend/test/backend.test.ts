@@ -1,3 +1,6 @@
+import { TrackingWorker } from '../src/tracking/worker.js'
+import { initializeTrackedAccounts } from '../src/tracking/routes.js'
+import { kalshiMarketChoice } from '../src/providers/kalshi/market-data.js'
 import { kalshiCredentialSourceId } from '../src/providers/kalshi/live.js'
 import { generateKeyPairSync } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
@@ -12,6 +15,7 @@ import { Pool } from 'pg'
 import { createDatabase, type Database } from '../src/db/client.js'
 import { runMigrations } from '../src/db/migrate.js'
 import {
+  accountTracking, marketTracking, sharedMarketObservations,
   activityFactOccurrences,
   cashMovements,
   reviewedBinaryRules,
@@ -123,6 +127,95 @@ afterAll(async () => {
 })
 
 describe('migrations and canonical persistence', () => {
+  it('polls a shared market once and revalues owned mapped portfolios without synchronizing account history', async () => {
+    const [event] = await database.insert(events).values({ providerCode: 'kalshi', externalId: 'TRACK-EVENT', name: 'Tracking' }).returning()
+    const [market] = await database.insert(markets).values({ providerCode: 'kalshi', externalId: 'TRACK-MARKET',
+      eventId: event!.id, title: 'Tracking', settlementAssetCode: 'USD' }).returning()
+    const [leg] = await database.insert(instruments).values({ marketId: market!.id, externalId: 'TRACK-MARKET:yes',
+      outcomeName: 'Yes', outcomeType: 'yes', settlementAssetCode: 'USD' }).returning()
+    const app = await createTestApp()
+    const other = await buildApp({ database, config: { ...testConfig(), devPrincipalId: OTHER_OWNER_ID } })
+    openApps.push(other)
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const roots = ['/v1/portfolios/' + PORTFOLIO_ID, '/v1/portfolios/' + OTHER_PORTFOLIO_ID]
+    const setup = async (server: typeof app, root: string) => {
+      expect((await server.inject({ method: 'PUT', url: root + '/tracking/markets', headers, payload: { markets: [market!.id] } })).statusCode).toBe(200)
+      const csv = ['venue,account,id,timestamp,sequence,type,instrument,asset,quantity,price,amount,fee,fee_asset,coverage_through,canonical_instrument_id',
+        'kalshi,tracked,opening,2026-01-01T00:00:00Z,,opening_cash,,USD,,,100,,,,',
+        'kalshi,tracked,inventory,2026-01-01T00:00:00Z,,opening_inventory,,USD,,,,,,,',
+        `kalshi,tracked,buy,2026-01-02T00:00:00Z,,buy,${leg!.id},USD,10,0.4,,0,USD,,${leg!.id}`,
+      ].join('\n')
+      const response = await server.inject({ method: 'POST', url: root + '/imports/preview', headers, payload: { csv } })
+      expect(response.statusCode, response.body).toBe(200)
+      const batch = response.json()
+      expect((await server.inject({ method: 'POST', headers,
+        url: root + '/imports/' + batch.batchId + '/confirm?reviewRevision=' + batch.reviewRevision })).statusCode).toBe(200)
+    }
+    await setup(app, roots[0]!)
+    await setup(other, roots[1]!)
+    expect((await app.inject({ method: 'GET', url: roots[1] + '/tracking', headers })).statusCode).toBe(404)
+    let quoteAt = '2026-01-03T00:00:00.000Z'
+    let price = '0.6'
+    const lookup = vi.fn(async () => {
+      const item = kalshiMarketChoice({ ticker: 'TRACK-MARKET', event_ticker: 'TRACK-EVENT', title: 'Tracking',
+        status: 'active', market_type: 'binary', notional_value_dollars: '1' }, quoteAt)
+      return { ...item, outcomes: item.outcomes.map((outcome) => ({ ...outcome,
+        quote: { value: price, retrievedAt: quoteAt, observedAt: null, provenance: 'provider_book_midpoint' } })) }
+    })
+    const syncProviderAccount = vi.fn()
+    const workerOptions = { kalshi: { lookup }, accountIds: [], marketIntervalMs: 300_000, accountIntervalMs: 300_000,
+      ingestion: { syncProviderAccount } }
+    const worker = new TrackingWorker(database, workerOptions)
+    const restarted = new TrackingWorker(database, workerOptions)
+    const signal = new AbortController().signal
+    const due = () => database.update(marketTracking).set({ nextAttemptAt: new Date(0) })
+    await due()
+    expect((await Promise.all([worker.market(signal), restarted.market(signal)])).sort()).toEqual([false, true])
+    expect(lookup).toHaveBeenCalledTimes(1)
+    await due()
+    await worker.market(signal)
+    quoteAt = '2026-01-02T23:00:00.000Z'
+    price = '0.5'
+    await due()
+    await restarted.market(signal)
+    expect(await database.select().from(sharedMarketObservations)).toHaveLength(2)
+    for (const [index, server] of [app, other].entries()) {
+      const response = await server.inject({ method: 'GET', url: roots[index] + '/accounting?view=detail&asOf=2026-01-03T01:00:00Z', headers })
+      expect(response.statusCode, response.body).toBe(200)
+      expect(response.json().cash).toContainEqual(expect.objectContaining({ balance: '96', portfolioValue: '102' }))
+    }
+    expect(syncProviderAccount).not.toHaveBeenCalled()
+    lookup.mockRejectedValueOnce(new Error('fixture_outage'))
+    await due()
+    await restarted.market(signal)
+    const [job] = await database.select().from(marketTracking)
+    expect(job).toMatchObject({ failures: 1, leaseToken: null })
+    expect(await restarted.market(signal)).toBe(false)
+    await due()
+    await restarted.market(signal)
+    expect((await database.select().from(marketTracking))[0]?.failures).toBe(0)
+  })
+
+  it('schedules only locally approved, enabled account sources and resumes an expired job lease', async () => {
+    const [first, foreign] = await database.insert(providerAccounts).values([
+      { portfolioId: PORTFOLIO_ID, providerCode: 'polymarket', kind: 'public_wallet', label: 'Approved', externalAccountId: 'wallet-a' },
+      { portfolioId: OTHER_PORTFOLIO_ID, providerCode: 'polymarket', kind: 'public_wallet', label: 'Other', externalAccountId: 'wallet-b' },
+    ]).returning()
+    expect(await initializeTrackedAccounts(database, OWNER_ID, [first!.id, foreign!.id], true)).toEqual([first!.id])
+    const syncProviderAccount = vi.fn(async () => ({ status: 'complete' as const, providerAccountId: first!.id,
+      streams: [], startedAt: new Date().toISOString(), finishedAt: new Date().toISOString() }))
+    const opts = { accountIds: [first!.id], marketIntervalMs: 300_000, accountIntervalMs: 300_000, ingestion: { syncProviderAccount } }
+    const signal = new AbortController().signal
+    const worker = new TrackingWorker(database, opts)
+    await database.update(accountTracking).set({ nextAttemptAt: new Date(0), leaseUntil: new Date(1) })
+    expect(await worker.account(signal)).toBe(true)
+    expect(await new TrackingWorker(database, opts).account(signal)).toBe(true)
+    expect(syncProviderAccount.mock.calls).toEqual([[first!.id, 'current'], [first!.id, 'history']])
+    await database.update(providerAccounts).set({ disabledAt: new Date() }).where(eq(providerAccounts.id, first!.id))
+    await database.update(accountTracking).set({ nextAttemptAt: new Date(0) })
+    expect(await worker.account(signal)).toBe(false)
+  })
+
   it('replays a versioned demo capture and isolates user corrections, scenarios and resets', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'scevia-demo-'))
     try {

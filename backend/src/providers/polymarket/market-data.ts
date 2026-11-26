@@ -143,6 +143,30 @@ export class PolymarketMarketDataService {
     }
   }
 
+  async trackingSnapshot(conditionId: string, signal: AbortSignal) {
+    if (!/^0x[0-9a-f]{64}$/i.test(conditionId)) throw new PublicMarketError('invalid_condition_id', 400)
+    const rows = z.array(recordSchema).max(2).parse(await this.client.getGamma('markets',
+      new URLSearchParams({ condition_ids: conditionId, closed: 'any', limit: '2' }), signal))
+    const found = rows.filter((row) => stringValue(row.conditionId)?.toLowerCase() === conditionId.toLowerCase())
+    if (found.length !== 1) throw new PublicMarketError('polymarket_market_identity_unavailable', 502)
+    const row = found[0]!
+    const version = stringValue(row.version)?.toLowerCase()
+    const lifecycle = row.resolved === true || row.resolutionStatus === 'resolved' ? 'resolved'
+      : row.closed === true || row.archived === true ? 'closed' : row.active === true ? 'open' : 'unknown'
+    const assets = parseStringArray(row.clobTokenIds)
+    const positions = version === 'v1' ? assets : version === 'v2' ? parseStringArray(row.positionIds) : []
+    const nativeIdsValid = positions.length === 2 && assets.length === 2 && new Set(assets).size === 2
+      && new Set(positions).size === 2 && [...assets, ...positions].every((id) => TOKEN_ID_PATTERN.test(id))
+    if (lifecycle !== 'open' || !nativeIdsValid) return { lifecycle, quotes: [] }
+    const result = recordSchema.parse(await this.client.postClob('midpoints', assets.map((token_id) => ({ token_id })), signal))
+    const retrievedAt = new Date()
+    return { lifecycle, quotes: positions.flatMap((id, index) => {
+      const price = decimalString(result[assets[index]!])
+      return price !== null && new Decimal(price).gte(0) && new Decimal(price).lte(1)
+        ? [{ id, price, retrievedAt, asset: version === 'v1' ? 'USDC' : 'PUSD' }] : []
+    }) }
+  }
+
   async priceHistory(input: {
     tokenId: string
     interval: string

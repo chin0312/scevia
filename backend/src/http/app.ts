@@ -1,3 +1,6 @@
+import { setTimeout as delay } from 'node:timers/promises'
+import { initializeTrackedAccounts, registerTrackingRoutes } from '../tracking/routes.js'
+import { TrackingWorker } from '../tracking/worker.js'
 import { registerDemoRoutes } from '../demo/workspace.js'
 import { PolymarketAdapter } from '../providers/polymarket/adapter.js'
 import { PolymarketCollateralReader } from '../providers/polymarket/collateral.js'
@@ -538,6 +541,29 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 
   // Kalshi remains unavailable in production and in the default development server.
   const kalshiMarketData = options.config.nodeEnv === 'test' ? options.kalshiMarketData : kalshiLive?.marketData
+  const tracking = options.config.tracking
+  if (tracking && options.config.nodeEnv === 'development' && ['127.0.0.1', '::1'].includes(options.config.host)) {
+    const accountIds = await initializeTrackedAccounts(options.database, options.config.devPrincipalId,
+      tracking.accountIds, liveAllowed, kalshiLive?.accountId)
+    const worker = new TrackingWorker(options.database, { ...tracking, accountIds, ingestion,
+      kalshi: options.config.kalshi?.environment === 'production' ? kalshiMarketData : undefined,
+      polymarket: liveAllowed ? marketData : undefined })
+    const stopping = new AbortController()
+    const loop = async (run: (signal: AbortSignal) => Promise<unknown>, interval = 5000) => {
+      while (!stopping.signal.aborted) {
+        try { await run(stopping.signal) }
+        catch { app.log.warn('Tracking worker will retry after a local processing failure') }
+        await delay(interval, undefined, { signal: stopping.signal }).catch(() => undefined)
+      }
+    }
+    let running: Promise<unknown> | undefined
+    app.addHook('onListen', async () => { running = Promise.all([
+      loop((signal) => worker.market(signal)),
+      loop((signal) => worker.account(signal)),
+      loop(() => worker.pruneObservations(tracking.retentionDays), 60_000),
+    ]) })
+    app.addHook('onClose', async () => { stopping.abort(); await running })
+  }
   app.get<{ Querystring: { marketTicker?: string; eventTicker?: string; cursor?: string } }>('/v1/market-catalog/kalshi', {
     schema: { tags: ['public market data'], querystring: { type: 'object', additionalProperties: false, properties: {
       marketTicker: { type: 'string', pattern: '^[A-Z0-9][A-Z0-9_.-]{0,127}$' },
@@ -608,6 +634,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       request.principalId = options.config.devPrincipalId
     })
 
+    registerTrackingRoutes(privateApi, options.database)
     registerDemoRoutes(privateApi, options.database, options.config.demoDataset)
     registerAccountingRoutes(privateApi, options.database, liveAllowed || options.marketData || kalshiMarketData ? async (url, type, assetId) => {
       try {

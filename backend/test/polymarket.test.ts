@@ -306,6 +306,30 @@ describe('Polymarket provider adapter', () => {
 })
 
 describe('Polymarket public market data', () => {
+  it('uses exact condition, exchange token and position identities for a tracked midpoint', async () => {
+    const conditionId = '0x' + 'a'.repeat(64)
+    const requests: URL[] = []
+    let closed = false
+    const source = new PolymarketMarketDataService(new PolymarketHttpClient(async (input, init) => {
+      const url = new URL(String(input))
+      requests.push(url)
+      if (url.pathname === '/markets') {
+        expect(url.searchParams.get('condition_ids')).toBe(conditionId)
+        expect(url.searchParams.get('closed')).toBe('any')
+        return Response.json([{ conditionId, active: !closed, closed, version: 'v2',
+          clobTokenIds: ['1234', '5678'], positionIds: ['9876', '5432'] }])
+      }
+      expect(JSON.parse(String(init?.body))).toEqual([{ token_id: '1234' }, { token_id: '5678' }])
+      return Response.json({ 1234: '0.65', 5678: '0.35' })
+    }))
+    const signal = new AbortController().signal
+    expect(await source.trackingSnapshot(conditionId, signal)).toMatchObject({ lifecycle: 'open',
+      quotes: [{ id: '9876', asset: 'PUSD', price: '0.65' }, { id: '5432', asset: 'PUSD', price: '0.35' }] })
+    closed = true
+    expect(await source.trackingSnapshot(conditionId, signal)).toEqual({ lifecycle: 'closed', quotes: [] })
+    expect(requests).toHaveLength(3)
+  })
+
   it('searches events, preserves multi-outcome identities and distinguishes missing batch prices', async () => {
     const calls: Array<{ url: URL; init: RequestInit | undefined }> = []
     const marketRows = Array.from({ length: 50 }, (_, marketIndex) => ({

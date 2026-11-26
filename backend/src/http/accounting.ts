@@ -1,3 +1,4 @@
+import { sharedTrackingEvidence } from '../tracking/evidence.js'
 import { demoMarketAt } from '../demo/dataset.js'
 import { demoResolutionEvidence } from '../demo/resolutions.js'
 import { kalshiCsvMapping, parseMappedKalshiCsv } from '../accounting/kalshi-csv.js'
@@ -264,8 +265,14 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     return { batchId, confirmedAt: result.confirmedAt }
   })
 
-  async function loadEvidence(portfolioId: string, cutoff: string, preview?: Pick<typeof batches.$inferSelect,
-    'id' | 'observations' | 'associatedAccountId' | 'sourceLinks' | 'contentHash'> & { manual?: boolean; acceptUnlinked?: boolean }, read?: AccountingRead, replaces?: string, accountScope?: string[]) {
+  function loadEvidence(portfolioId: string, cutoff: string, preview?: Parameters<typeof readEvidence>[3], read?: AccountingRead, replaces?: string, accountScope?: string[], trackingFrom?: string) {
+    return read ? readEvidence(read, portfolioId, cutoff, preview, replaces, accountScope, trackingFrom)
+      : database.transaction((tx) => readEvidence(tx, portfolioId, cutoff, preview, replaces, accountScope, trackingFrom),
+        { isolationLevel: 'repeatable read', accessMode: 'read only' })
+  }
+
+  async function readEvidence(read: AccountingRead, portfolioId: string, cutoff: string, preview?: Pick<typeof batches.$inferSelect,
+    'id' | 'observations' | 'associatedAccountId' | 'sourceLinks' | 'contentHash'> & { manual?: boolean; acceptUnlinked?: boolean }, replaces?: string, accountScope?: string[], trackingFrom?: string) {
     const readAll = async (tx: AccountingRead) => {
       const confirmed = await tx.select().from(batches).where(and(eq(batches.portfolioId, portfolioId),
         isNotNull(batches.confirmedAt), isNull(batches.supersededAt))).orderBy(batches.id)
@@ -280,8 +287,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       const resolutions = workspace?.demo ? await demoResolutionEvidence(tx, portfolioId, workspace.demo, provider.accounts) : []
       return [confirmed, provider, latest, last?.revision ?? 0, resolutions, workspace?.demo] as const
     }
-    const [confirmed, provider, latest, decisionRevision, resolutions, demoCapture] = read ? await readAll(read)
-      : await database.transaction(readAll, { isolationLevel: 'repeatable read', accessMode: 'read only' })
+    const [confirmed, provider, latest, decisionRevision, resolutions, demoCapture] = await readAll(read)
     const sources = new Map(provider.evidence.flatMap((item) =>
       'sourceRecordId' in item && !item.unresolvedReason ? [[item.sourceRecordId, item] as const] : []))
     const connected = new Set(provider.accounts.filter((account) => account.kind !== 'file_import').map((account) => account.account))
@@ -330,7 +336,8 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       rawEvidence.filter((item) => !('batchId' in item) || item.batchId !== preview?.id), decisionMap)
       : { changes: new Map<string, PortfolioDecision>(), report: [] }
     const applied = applyDecisions(rawEvidence, new Map([...decisionMap, ...replacement.changes]))
-    return { ...provider, ...applied, evidence: [...applied.evidence, ...resolutions], resolutions, demoCapture, rawEvidence, decisionMap, decisionRevision, replacement,
+    const tracking = await sharedTrackingEvidence(read, applied.evidence, cutoff, trackingFrom, demoCapture)
+    return { ...provider, ...applied, evidence: [...applied.evidence, ...resolutions, ...tracking.evidence], tracking, resolutions, demoCapture, rawEvidence, decisionMap, decisionRevision, replacement,
       recordDecisionRevisions: new Map(latest.map(({ key, revision }) => [key, revision])),
       truncated: provider.truncated || latest.length > 10000,
       selected: applied.records.some((record) => record.decision !== null) }
@@ -346,7 +353,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
   }
 
   function replay(input: Awaited<ReturnType<typeof loadEvidence>>, asOf: string) {
-    return { ...replayAccounting(input.evidence, asOf, input.truncated), portfolioScope: input.selected ? 'user_selected' : 'available_evidence' }
+    return { ...replayAccounting(input.evidence, asOf, input.truncated || input.tracking.truncated), portfolioScope: input.selected ? 'user_selected' : 'available_evidence' }
   }
 
   app.post<{ Params: { portfolioId: string }; Body: { venue: string; label: string } }>(prefix + '/accounting/accounts', {
@@ -523,7 +530,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
           const proposed = applyDecisions(plan.input.rawEvidence, plan.next)
           const asOf = new Date().toISOString()
           const before = replayAccounting(plan.input.evidence, asOf)
-          const after = replayAccounting([...proposed.evidence, ...plan.input.resolutions], asOf)
+          const after = replayAccounting([...proposed.evidence, ...plan.input.resolutions, ...plan.input.tracking.evidence], asOf)
           return { revision: plan.revision, affected: plan.changes.size, before: before.cash, after: after.cash,
             beforeHoldings: before.holdings, afterHoldings: after.holdings,
             beforeDiscrepancyCount: before.discrepancies.length, afterDiscrepancyCount: after.discrepancies.length }
@@ -634,7 +641,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     return { evidence, context: { asOf, asset, accounts, accountIdentities, venue: venue ?? null,
       evidenceRevision: digest([input.records.filter((record) => inScope(record.adjusted))
         .map((record) => [record.key, record.revision, record.decision]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
-        input.resolutions.filter((row) => inScope(row.observation) && row.observation.timestamp <= asOf).map((row) => row.observation)]),
+        [...input.resolutions, ...input.tracking.evidence].filter((row) => inScope(row.observation) && row.observation.timestamp <= asOf).map((row) => row.observation)]),
       coverageRevision: digest(input.coverage.filter(inScope)
         .map((row) => [row.venue, row.account, row.entity, row.status, row.lastSuccessfulRunId, row.lastAttemptStatus,
           row.lastAttemptAt?.toISOString(), row.lastSuccessfulSyncAt?.toISOString()])
@@ -658,7 +665,8 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const from = new Date(query.data.from).toISOString()
     if (from >= asOf) return reply.code(422).send({ error: { code: 'invalid_analytics_range' } })
     return database.transaction(async (tx) => {
-      const input = await loadEvidence(portfolioId, asOf, undefined, tx, undefined, query.data.accounts?.split(','))
+      const input = await loadEvidence(portfolioId, asOf, undefined, tx, undefined, query.data.accounts?.split(','), from)
+      if (input.tracking.truncated) return reply.code(422).send({ error: { code: 'analytics_replay_limit' } })
       if (input.truncated) return reply.code(422).send({ error: { code: 'provider_evidence_limit' } })
       const accounts = selectAccounts(input, query.data.accounts, query.data.venue)
       if (!accounts) return reply.code(422).send({ error: { code: 'invalid_analytics_accounts' } })
@@ -777,6 +785,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
   async function loadExposureInputs(tx: AccountingRead, portfolioId: string, asOf: string, asset: string,
     scope: Pick<z.infer<typeof analyticsQuery>, 'accounts' | 'venue'>, selected: string[] = []) {
     const input = await loadEvidence(portfolioId, asOf, undefined, tx, undefined, scope.accounts?.split(','))
+    if (input.tracking.truncated) throw new ScenarioError('analytics_replay_limit')
     if (input.truncated) throw new ScenarioError('provider_evidence_limit')
     const accounts = selectAccounts(input, scope.accounts, scope.venue)
     if (!accounts) throw new ScenarioError('invalid_analytics_accounts')
@@ -1174,8 +1183,8 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     if (!Number.isInteger(days) || days < 1 || days > 31) {
       return reply.code(422).send({ error: { code: 'valuation_range_limit' } })
     }
-    const input = await loadEvidence(portfolioId, new Date(end + day - 1).toISOString())
-    if (input.truncated || input.evidence.length * days > 100_000) return reply.code(422).send({ error: { code: 'valuation_work_limit' } })
+    const input = await loadEvidence(portfolioId, new Date(end + day - 1).toISOString(), undefined, undefined, undefined, undefined, new Date(start).toISOString())
+    if (input.truncated || input.tracking.truncated || input.evidence.length * days > 100_000) return reply.code(422).send({ error: { code: 'valuation_work_limit' } })
     const points = Array.from({ length: days }, (_, index) => {
       const asOf = new Date(start + (index + 1) * day - 1).toISOString()
       const state = replay(input, asOf)
