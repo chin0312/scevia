@@ -135,7 +135,8 @@ function valuation(replay: ValuationReplay, accounts: string[], asset: string, o
   }
 }
 
-export function analyzePerformance(evidence: Evidence[], accounts: string[], asset: string, from: string, through: string, selectedScopes?: AccountIdentity[], requestedCutoffs: string[] = []) {
+export function analyzePerformance(evidence: Evidence[], accounts: string[], asset: string, from: string, through: string, selectedScopes?: AccountIdentity[], requestedCutoffs: string[] = [],
+  projectAt?: (cutoff: string) => Replay) {
   const start = Date.parse(from)
   const end = Date.parse(through)
   const days = Math.floor((end - start) / dayMs) + 1
@@ -149,8 +150,8 @@ export function analyzePerformance(evidence: Evidence[], accounts: string[], ass
     if (replayWork > 1_600_000 || replayCount > 18_000) throw new Error('analytics_replay_limit')
     return replayAccounting(rows, asOf)
   }
-  const initialState = replayAt(evidence, from)
-  const endingState = through === from ? initialState : replayAt(evidence, through)
+  const initialState = projectAt ? projectAt(from) : replayAt(evidence, from)
+  const endingState = through === from ? initialState : projectAt ? projectAt(through) : replayAt(evidence, through)
   const scopes = selectedScopes ?? [...new Map(evidence.map(({ observation: { venue, account } }) =>
     [JSON.stringify([venue, account]), { venue, account }])).values()]
   const opening = valuation(initialState, accounts, asset, from, scopes)
@@ -158,7 +159,7 @@ export function analyzePerformance(evidence: Evidence[], accounts: string[], ass
   cache.set(from, opening)
   cache.set(through, ending)
   const partitions = new Map<string, Evidence[]>()
-  for (const row of evidence) {
+  for (const row of projectAt ? [] : evidence) {
     const key = JSON.stringify([row.observation.venue, row.observation.account])
     const partition = partitions.get(key) ?? []
     partition.push(row)
@@ -179,6 +180,11 @@ export function analyzePerformance(evidence: Evidence[], accounts: string[], ass
   const at = (asOf: string) => {
     const existing = cache.get(asOf)
     if (existing) return existing
+    if (projectAt) {
+      const point = valuation(projectAt(asOf), accounts, asset, from, scopes)
+      cache.set(asOf, point)
+      return point
+    }
     const cutoff = Date.parse(asOf)
     const combined: ValuationReplay = { asOf, cash: [], holdings: [] }
     for (const partition of prepared) {

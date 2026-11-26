@@ -135,6 +135,100 @@ afterAll(async () => {
 })
 
 describe('migrations and canonical persistence', () => {
+  it('evaluates, freezes and compares an independently funded historical replay using the canonical ledger', async () => {
+    const app = await createTestApp()
+    const another = await buildApp({ database, config: { ...testConfig(), devPrincipalId: OTHER_OWNER_ID } })
+    openApps.push(another)
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const request = (method: 'GET' | 'POST' | 'PATCH' | 'DELETE', url: string, payload?: object) =>
+      app.inject({ method, url, headers, ...(payload ? { payload } : {}) })
+    const collection = (await request('POST', '/v1/simulations')).json().collection.id
+    const root = '/v1/simulations/' + collection + '/replays'
+    const at = (day: number) => '2025-01-0' + day + 'T12:00:00.000Z'
+    const [event] = await database.insert(events).values({ providerCode: 'kalshi', externalId: 'replay-test-event', name: 'Replay fixture event' }).returning()
+    const [market] = await database.insert(markets).values({ providerCode: 'kalshi', externalId: 'REPLAY-TEST',
+      eventId: event!.id, title: 'Replay fixture market', settlementAssetCode: 'USD' }).returning()
+    const [yes] = await database.insert(instruments).values(['yes', 'no'].map((outcome) => ({ marketId: market!.id,
+      externalId: 'REPLAY-TEST:' + outcome, outcomeName: outcome, outcomeType: outcome, settlementAssetCode: 'USD' }))).returning()
+    await database.insert(marketLifecycleEvidence).values({ revision: 'replay-lifecycle', marketId: market!.id,
+      lifecycle: 'open', retrievedAt: new Date(at(5)), tradingOpensAt: new Date(at(1)), tradingClosesAt: new Date(at(6)) })
+    const marks = [['0.4', 2], ['0.3', 3], ['0.6', 4]] as const
+    await database.insert(sharedMarketObservations).values(marks.map(([price, day]) => ({
+      instrumentId: yes!.id, price, asset: 'USD', method: 'historical_close', source: 'fixture',
+      revision: 'replay-mark-' + day, retrievedAt: new Date(at(5)), observedAt: new Date(at(day)), effectiveAt: new Date(at(day)),
+    })))
+    const configuration = {
+      version: 1, from: at(1), through: at(5),
+      buckets: [{ id: 'virtual', venue: 'kalshi', asset: 'USD', capital: '100' }],
+      positions: [{ id: 'buy', bucket: 'virtual', instrumentId: yes!.id,
+        entry: { at: at(2), execution: { mode: 'reference' }, size: { mode: 'quantity', value: '50' }, fee: { mode: 'fixed', amount: '1' } },
+        exits: [{ at: at(4), quantity: '50', execution: { mode: 'reference' }, fee: { mode: 'fixed', amount: '1' } }] }],
+    }
+    const evaluated = await request('POST', root + '/evaluate?detail=full', configuration)
+    expect(evaluated.statusCode, evaluated.body).toBe(200)
+    const preview = evaluated.json()
+    expect(preview.result).toMatchObject({ status: 'evaluated', funding: { status: 'funded', buckets: [{ closingCash: '108', minimumKnownCash: '79' }] },
+      summary: { starting: '100', ending: '108', investmentGain: '8', totalReturn: '0.08', twr: '0.08', maximumDrawdown: '-0.06',
+        fees: { reportingValue: '2' } } })
+    expect(preview.result.history.find((point: { asOf: string }) => point.asOf === at(2))).toMatchObject({
+      completeValue: '99', cash: [{ value: '79' }], positions: [{ quantity: '50', value: '20' }],
+    })
+    const saved = await request('POST', root, { name: 'Original', previewToken: preview.previewToken })
+    expect(saved.statusCode, saved.body).toBe(201)
+    const id = saved.json().id
+    expect((await another.inject({ method: 'GET', url: root + '/' + id, headers })).statusCode).toBe(404)
+    const duplicate = await request('POST', root + '/' + id + '/duplicate', { name: 'Copy' })
+    expect(duplicate.statusCode).toBe(201)
+    expect((await request('POST', root + '/compare', { replayIds: [id, duplicate.json().id] })).json().compatible).toBe(true)
+    const compact = (await request('GET', root + '/' + id)).json().result
+    expect(compact.history[0]).not.toHaveProperty('cash')
+    expect(compact).not.toHaveProperty('schedule')
+    const snapshot = (await request('GET', root + '/' + id + '?at=' + encodeURIComponent(at(2)))).json().snapshot
+    expect(snapshot).toMatchObject({ cash: [{ value: '79' }], positions: [{ quantity: '50', reference: { price: '0.4' } }] })
+    const compactPoint = compact.history.find((point: { asOf: string }) => point.asOf === at(2))
+    expect(compactPoint).toMatchObject({ completeValue: '99', referenceQuality: {
+      valuationQuality: 'observed_references', oldestObservationAt: at(2), observedReferenceCount: 1,
+    } })
+    expect(snapshot).toMatchObject(compactPoint)
+    const detailed = (await request('GET', root + '/' + id + '?detail=full')).json().result
+    expect(detailed.history.find((point: { asOf: string }) => point.asOf === at(2))).toMatchObject(compactPoint)
+
+    await database.update(sharedMarketObservations).set({ source: 'alternate-fixture', method: 'historical_sample',
+      revision: 'replay-alternate-source' }).where(eq(sharedMarketObservations.revision, 'replay-mark-3'))
+    const alternateConfiguration = { ...configuration, positions: [{ ...configuration.positions[0]!,
+      entry: { ...configuration.positions[0]!.entry, at: at(3) } }] }
+    const alternate = (await request('POST', root + '/evaluate', alternateConfiguration)).json()
+    const alternateSaved = (await request('POST', root, { name: 'Other execution time', previewToken: alternate.previewToken })).json()
+    const aligned = (await request('POST', root + '/compare', { replayIds: [id, alternateSaved.id] })).json()
+    expect(aligned.compatible).toBe(true)
+    expect(aligned.evidenceQualifications.marketSourcePoints).toBeGreaterThan(0)
+    expect(aligned.items.map((item: { normalized: Array<{ asOf: string }> }) => item.normalized.map((point) => point.asOf)))
+      .toEqual([aligned.grid, aligned.grid])
+    expect(aligned.grid).not.toContain(at(3))
+    expect(aligned.items[0].normalized[0]).toMatchObject({ referenceQuality: { marketPriceCoverage: 'not_required' } })
+    await database.update(sharedMarketObservations).set({ price: '0.7', revision: 'replay-refreshed' })
+      .where(eq(sharedMarketObservations.revision, 'replay-mark-4'))
+    expect((await request('GET', root + '/' + id)).json().result.summary.ending).toBe('108')
+    const refreshed = (await request('POST', root + '/evaluate', configuration)).json()
+    expect(refreshed.result.summary.ending).toBe('113')
+    const accepted = await request('PATCH', root + '/' + id, { revision: 1, previewToken: refreshed.previewToken })
+    expect(accepted.json()).toMatchObject({ revision: 2, result: { summary: { ending: '113' } } })
+    expect((await request('PATCH', root + '/' + id, { revision: 1, name: 'Stale' })).statusCode).toBe(409)
+    const changed = (await request('POST', root + '/compare', { replayIds: [id, duplicate.json().id] })).json()
+    expect(changed).toMatchObject({ compatible: false, dimensions: { sharedEvidence: false } })
+    expect(changed.sharedEvidenceChanges.length).toBeGreaterThan(0)
+    const originalClock = Date.now()
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(originalClock + 16 * 60 * 1000)
+    try {
+      expect((await request('PATCH', root + '/' + id, { revision: 2, previewToken: preview.previewToken })).statusCode).toBe(409)
+    } finally { clock.mockRestore() }
+    expect((await request('POST', root + '/evaluate', { ...configuration, mode: 'knowledge' })).json().result).toMatchObject({
+      status: 'partial', summary: { ending: null, twr: null },
+    })
+    expect((await request('DELETE', root + '/' + id + '?revision=2')).statusCode).toBe(204)
+    expect((await request('GET', root)).json().items).toHaveLength(2)
+  })
+
   it('discovers an untracked V2 market and keeps mapped research leases and simulations owner scoped', async () => {
     const condition = '0x' + 'a'.repeat(64)
     const transport = vi.fn(async (input: URL | string) => {
@@ -144,7 +238,8 @@ describe('migrations and canonical persistence', () => {
       ] })
       if (new URL(input).pathname === '/midpoints') return Response.json({ 333: '0.45', 444: '0.55' })
       return Response.json([{ conditionId: condition, version: 'v2', negRisk: false, active: true,
-        question: 'Untracked market', events: [{ id: 'native-event', title: 'Discovery event' }],
+        question: 'Untracked market', acceptingOrdersTimestamp: '2025-12-01T09:00:00Z',
+        endDate: '2026-02-01T00:00:00Z', events: [{ id: 'native-event', title: 'Discovery event' }],
         clobTokenIds: ['333', '444'], positionIds: ['111', '222'], outcomes: ['Yes', 'No'] }])
     })
     const marketData = new PolymarketMarketDataService(new PolymarketHttpClient(transport as typeof fetch))
@@ -157,6 +252,9 @@ describe('migrations and canonical persistence', () => {
     const first = await register(app)
     expect(first.json()).toMatchObject({ status: 'identified', quoteAvailability: 'observed' })
     const shared = first.json()
+    const [window] = await database.select().from(marketLifecycleEvidence).where(eq(marketLifecycleEvidence.marketId, shared.marketId))
+    expect(window).toMatchObject({ tradingOpensAt: new Date('2025-12-01T09:00:00Z'), tradingClosesAt: null,
+      expectedResolutionAt: new Date('2026-02-01T00:00:00Z') })
     expect((await register(other)).json().marketId).toBe(shared.marketId)
     const reference = await app.inject({ method: 'GET', url: '/v1/market-references?instruments=' + shared.outcomes[0].id, headers })
     expect(reference.json().references[0]).toMatchObject({ asset: 'PUSD', availability: 'recent_reference' })

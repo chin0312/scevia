@@ -630,6 +630,18 @@ export const portfolioScenarioBundles = scevia.table('portfolio_scenario_bundles
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [index('portfolio_scenario_bundles_portfolio_idx').on(table.portfolioId)])
 
+export const historicalReplays = scevia.table('historical_replays', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  collectionId: uuid('collection_id').notNull().references(() => portfolios.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  description: text('description'),
+  revision: integer('revision').default(1).notNull(),
+  configuration: jsonb('configuration').$type<import('../replay/contracts.js').ReplayConfig>().notNull(),
+  result: jsonb('result').$type<import('../replay/result.js').FrozenReplayResult>().notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [index('historical_replays_collection_idx').on(table.collectionId, table.updatedAt)])
+
 export type TrackedResolution = {
   knownAt: string
   winningInstrument: string

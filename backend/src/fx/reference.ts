@@ -177,10 +177,14 @@ export function convertAmount(value: string | null, rate: string | null) {
   return amount.isZero() ? '0' : rate === null ? null : amount.mul(rate).toFixed()
 }
 
-export function reportAmounts(rows: FxRows, amounts: Array<{ asset: string; value: string | null }>, currency: string, asOf: string, options: FxOptions = {}) {
+export function reportAmounts(rows: FxRows, amounts: Array<{ asset: string; value: string | null }>, currency: string, asOf: string, options: FxOptions = {},
+  assumedUsdPerUnit?: Partial<Record<'USDC' | 'PUSD', string>>) {
   const components = amounts.map((entry) => {
-    const reference = selectRate(rows, entry.asset, currency, asOf, options)
-    return { ...entry, reference, reportingValue: convertAmount(entry.value, reference.rate) }
+    const assumed = entry.asset === currency ? undefined : assumedUsdPerUnit?.[entry.asset as 'USDC' | 'PUSD']
+    const reference = selectRate(rows, assumed ? 'USD' : entry.asset, currency, asOf, options)
+    const rate = assumed && reference.rate ? new D(assumed).mul(reference.rate).toFixed() : reference.rate
+    return { ...entry, reference: assumed ? { ...reference, rate, assumedUsdPerUnit: assumed, qualification: 'hypothetical_stablecoin_override' as const } : reference,
+      reportingValue: convertAmount(entry.value, rate) }
   })
   const known = components.filter((component) => component.reportingValue !== null)
   const sum = known.reduce((acc, component) => acc.plus(component.reportingValue!), new D(0)).toFixed()
