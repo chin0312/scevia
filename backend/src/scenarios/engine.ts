@@ -8,7 +8,7 @@ const zero = () => new D(0)
 const sum = (values: Decimal[]) => values.reduce((total, value) => total.plus(value), zero())
 const add = (left: Decimal | null, right: Decimal | null) => left === null || right === null ? null : left.plus(right)
 export const methodology = 'weighted-average-scenario-v1'
-export interface FundingBucket { id: string; venue: string; account: string; cash: string | null; pending: string | null; inventoryComplete?: boolean; tradingVenue?: string }
+export interface FundingBucket { id: string; venue: string; account: string; cash: string | null; pending: string | null; inventoryComplete?: boolean; inventoryAt?: string | null; tradingVenue?: string }
 export interface ScenarioInstrument {
   id: string; mark: string | null; markAt?: string | null; market?: string; event?: string; resolvesAt?: string | null
   venue?: string; provider?: string; nativeMarket?: string; nativeInstrument?: string; settlementAsset?: string | null; outcome?: string | null; providerMarket?: string; lifecycle?: string
@@ -142,8 +142,15 @@ function evaluateInternal(baseline: ScenarioBaseline, changes: ScenarioInput, op
     if (reviewed.some((item) => item.id === rule.id || item.id === yes.market
       || [item.yes, item.no].some((id) => id === yes.id || id === no.id))
       || baseline.missingRules?.includes(rule.id)) throw new ScenarioError('reviewed_payout_cannot_be_overridden')
-    return { ...rule, ...(unitPayout === undefined ? {} : { unitPayout }), asset: baseline.asset }
+    const established = [recordedMaximum(yes.id), recordedMaximum(no.id)].filter((unit): unit is Decimal => unit !== null)
+    const payout = new D(unitPayout ?? '1')
+    if (established.some((unit) => !unit.eq(payout))) throw new ScenarioError('conditional_payout_unit_mismatch')
+    return { ...rule, unitPayout: payout.toFixed(), asset: baseline.asset,
+      authority: established.length ? 'conditional_established_unit' : 'conditional_abstract_unit' }
   })
+  if (new Set(conditionalRules.flatMap((rule) => [rule.yes, rule.no])).size !== conditionalRules.length * 2) {
+    throw new ScenarioError('conflicting_instrument_assignment')
+  }
   const maxima = new Map([...conditionalRules, ...baseline.rules].flatMap((rule) =>
     [rule.yes, rule.no].map((id) => [id, new D(rule.unitPayout ?? '1')] as const)))
   const maximum = (instrument: ScenarioInstrument) => recordedMaximum(instrument.id) ?? maxima.get(instrument.id) ?? null
@@ -333,11 +340,25 @@ function evaluateInternal(baseline: ScenarioBaseline, changes: ScenarioInput, op
     }
     const outcomes = new Map(input.outcomes.map(({ group, winner }) => [group, winner]))
     if (hypothetical && baseline.rules.some((rule) => rule.fixed !== undefined && outcomes.has(rule.id) && outcomes.get(rule.id) !== rule.fixed)) {
-      return { authority: 'scenario_assumptions', unsupported: [], result: { status: 'unavailable' as const, reason: 'no_feasible_outcomes' },
+      return { authority: 'scenario_assumptions', declaredPayouts: conditionalRules, unsupported: [], result: { status: 'unavailable' as const, reason: 'no_feasible_outcomes' },
         cashInclusive: null, basisRelative: null, coverage: 'unavailable_or_supported_subset' }
     }
     if (hypothetical && (outcomes.size !== input.outcomes.length || [...outcomes.keys()].some((id) => !rules.some((rule) => rule.id === id)))) {
       throw new ScenarioError('invalid_outcome_scope')
+    }
+    const financialCash = after ? endingCash : openingCash
+    const cashRangeEligible = financialCash !== null && pending !== null && !financialCash.lt(0)
+      && (after ? shortfall?.isZero() : openingCashNonnegative)
+    const authority = hypothetical ? 'scenario_assumptions' : 'reviewed_rules'
+    const declaredPayouts = hypothetical ? conditionalRules : []
+    const confirmedEmpty = inventoryComplete && (baseline.mode === 'scratch' || baseline.buckets.every((bucket) =>
+      bucket.inventoryComplete === true || (bucket.inventoryComplete === undefined && bucket.inventoryAt != null)))
+      && rows.every((row) => row.quantity.isZero() && row.quantityKnown !== false)
+    if (confirmedEmpty && (!hypothetical || (!outcomes.size && !input.constraints.length))) {
+      const value = cashRangeEligible ? financialCash.plus(pending).toFixed() : null
+      return { authority, declaredPayouts, unsupported: [], coverage: 'confirmed_no_open_exposure',
+        result: { status: 'no_open_exposure' as const, grossPayout: '0' },
+        cashInclusive: value === null ? null : { best: value, worst: value }, basisRelative: { best: '0', worst: '0' } }
     }
     const allGroups = rules.map((rule) => ({
       ...rule, ...(hypothetical && outcomes.has(rule.id) ? { fixed: outcomes.get(rule.id)! } : {}),
@@ -346,6 +367,10 @@ function evaluateInternal(baseline: ScenarioBaseline, changes: ScenarioInput, op
         quantity: row.quantity.toFixed(), mark: fixed((after ? overrides.get(row.instrument) : undefined) ?? holdingMark(row)),
       }]),
     }))
+    if (hypothetical && allGroups.some((group) => conditionalRules.some((rule) => rule.id === group.id)
+      && group.legs.some((leg) => leg.mark !== null && new D(leg.mark).gt(group.unitPayout ?? '1')))) {
+      throw new ScenarioError('reference_price_exceeds_payout')
+    }
     const constraints = hypothetical ? [...baseline.constraints, ...input.constraints] : baseline.constraints
     const knownGroups = new Set([...allGroups.map((group) => group.id), ...(baseline.missingRules ?? [])])
     if (constraints.some((edge) => !knownGroups.has(edge.left) || !knownGroups.has(edge.right))) {
@@ -361,7 +386,7 @@ function evaluateInternal(baseline: ScenarioBaseline, changes: ScenarioInput, op
       || !rules.some((rule) => [rule.yes, rule.no].includes(row.instrument)))).map((row) => key(row.bucket, row.instrument))
     const cash = after ? endingCash : openingCash
     const allBasis = rows.reduce((known, row) => add(known, row.basis), zero() as Decimal | null)
-    return { authority: hypothetical ? 'scenario_assumptions' : 'reviewed_rules', unsupported, result,
+    return { authority, declaredPayouts, unsupported, result,
       coverage: result.status !== 'exact' ? 'unavailable_or_supported_subset' : inventoryComplete && !unsupported.length ? 'complete_selected_model' : 'supported_subset',
       cashInclusive: result.status === 'exact' && inventoryComplete && !unsupported.length && cash !== null && pending !== null && !cash.lt(0)
         && (after ? shortfall?.isZero() : openingCashNonnegative) ? { best: cash.plus(pending).plus(result.best.payout).toFixed(),
@@ -400,7 +425,7 @@ function evaluateInternal(baseline: ScenarioBaseline, changes: ScenarioInput, op
     }),
     bridge: { evidenceStartingValue: fixed(add(add(initialMarked, actualOpeningCash), pending)), startingValue: fixed(startingValue), addedCapital: fixed(capital), withdrawnCapital: fixed(withdrawn), executionEffect: fixed(executionEffect),
       fees: fixed(fees?.neg() ?? null), remarkEffect: fixed(remarkEffect), endingValue: fixed(endingValue),
-      normalizedChange: explained === null || endingValue === null || !weightBudget?.gt(0)
+      normalizedChange: explained === null || endingValue === null || !shortfall?.isZero() || !weightBudget?.gt(0)
         ? null : endingValue.minus(weightBudget).div(weightBudget).toFixed(),
       unexplained: endingValue === null || explained === null ? null : endingValue.minus(explained).toFixed() },
     knownPending: fixed(pending), hypotheticalRealized: fixed(realized),

@@ -31,7 +31,7 @@ describe('scenario financial references', () => {
     const scratch = evaluate(starting(), { ...empty, operations: [buy] })
     expect(scratch).toMatchObject({ bridge: { endingValue: '99' }, funding: [{ endingCash: '39' }], positions: [{ basis: '61', value: '60' }] })
     const short = evaluate(starting(), { ...empty, operations: [{ ...buy, amount: '200', fee: { mode: 'fixed', value: '2' } }] })
-    expect(short).toMatchObject({ status: 'underfunded', additionalCapitalRequired: '22' })
+    expect(short).toMatchObject({ status: 'underfunded', additionalCapitalRequired: '22', bridge: { normalizedChange: null } })
     const baseline = starting()
     baseline.buckets.push({ id: 'b', venue: 'fixture', account: 'b', cash: '10', pending: '0' })
     const separate = evaluate(baseline, { ...empty, operations: [{ ...buy, amount: '50', bucket: 'b', fee: { mode: 'excluded' } }] })
@@ -91,6 +91,36 @@ describe('scenario financial references', () => {
       acquisitionBasisRows: { denominator: '60', rows: [{ id: '["a","yes"]', value: '60', weight: '1' }] },
       resolutionExposure: [{ id: 'next_7_days', positions: 1, knownValue: '60' }],
     })
+  })
+
+  it('reports confirmed cash-only exposure and preserves incomplete inventory', () => {
+    const baseline = starting('40')
+    baseline.mode = 'actual'
+    baseline.buckets[0]!.inventoryComplete = true
+    baseline.buckets[0]!.pending = '5'
+    baseline.holdings = [{ bucket: 'a', instrument: 'yes', quantity: '100', basis: '40' }]
+    const input = { ...empty, operations: [{ bucket: 'a', instrument: 'yes', kind: 'exit' as const,
+      price: '0.55', fee: { mode: 'excluded' as const } }] }
+    expect(evaluate(baseline, input).settlement.verified).toMatchObject({ coverage: 'confirmed_no_open_exposure',
+      result: { status: 'no_open_exposure', grossPayout: '0' }, cashInclusive: { best: '100', worst: '100' } })
+    baseline.buckets[0]!.inventoryComplete = false
+    expect(evaluate(baseline, input).settlement.verified).toMatchObject({ result: { status: 'unavailable' }, cashInclusive: null })
+  })
+
+  it('preserves established units and labels abstract payouts and incompatible marks', () => {
+    const baseline = starting()
+    const declaration = { id: 'scenario:opposing', yes: 'yes', no: 'no', unitPayout: '2' }
+    baseline.instruments[0]!.provider = 'polymarket'
+    baseline.instruments[1]!.provider = 'polymarket'
+    expect(() => evaluate(baseline, { ...empty, rules: [declaration] })).toThrow('conditional_payout_unit_mismatch')
+    expect(evaluate(baseline, { ...empty, rules: [{ ...declaration, unitPayout: '1' }] }).settlement.conditional.declaredPayouts)
+      .toMatchObject([{ authority: 'conditional_established_unit', unitPayout: '1' }])
+    baseline.instruments = [{ id: 'yes', mark: '0.6' }, { id: 'no', mark: '0.4' }]
+    baseline.holdings = [{ instrument: 'yes', bucket: 'a', quantity: '10', basis: '6' }]
+    expect(evaluate(baseline, { ...empty, rules: [declaration] }).settlement.conditional)
+      .toMatchObject({ declaredPayouts: [{ authority: 'conditional_abstract_unit' }], result: { best: { payout: '20' } } })
+    expect(() => evaluate(baseline, { ...empty, rules: [{ ...declaration, unitPayout: '0.5' }] }))
+      .toThrow('reference_price_exceeds_payout')
   })
 
   it('uses a common sizing budget and preserves unknown fees', () => {

@@ -9,7 +9,9 @@ const model = (properties: Record<string, object>) => ({
 const revisions = { type: 'object', additionalProperties: text }
 const mode = { type: 'string', enum: ['actual', 'scratch'] }
 const range = { anyOf: [model({ best: text, worst: text }), { type: 'null' }] }
-const modeled = model({ authority: text, coverage: text, unsupported: list(text), result: settlementResult, cashInclusive: range, basisRelative: range })
+const modeled = model({ authority: text, coverage: text, unsupported: list(text), result: { anyOf: [...settlementResult.anyOf, model({ status: { const: 'no_open_exposure' }, grossPayout: { const: '0' } })] },
+  declaredPayouts: list(model({ id: text, yes: text, no: text, unitPayout: text, asset: text,
+    authority: { enum: ['conditional_established_unit', 'conditional_abstract_unit'] } })), cashInclusive: range, basisRelative: range })
 const concentration = { anyOf: [model({ denominator: text, hhi: text, weights: list(text) }), { type: 'null' }] }
 const dimension = model({ metrics: concentration, unmapped: text, availability: { type: 'string', enum: ['unavailable', 'known_subset', 'known_marked_scope'] },
   identifiedHoldings: { type: 'integer' }, unmappedHoldings: { type: 'integer' }, rows: list(model({ id: text, value: text, weight: numberText })) })
@@ -39,6 +41,6 @@ export const evaluationResponse = model({
 })
 const boolean = { type: 'boolean' }
 export const comparisonResponse = model({ compatibility: model({ sameAsset: boolean, sameBaseline: boolean,
-  sameAssumptions: boolean, sameFinancialBaseline: boolean, sameAccountScope: boolean, sameValuationAssumptions: boolean,
+  sameAssumptions: boolean, sameActualValuationReferences: boolean, sameFeeAssumptions: boolean, sameFinancialBaseline: boolean, sameAccountScope: boolean, sameValuationAssumptions: boolean,
   sameCapitalBudget: boolean, sameFundingAssumptions: boolean, sameFeeMethodology: boolean, sameSettlementScope: boolean, conversion: text }),
 items: list(model({ id: text, name: text, revision: { type: 'integer' }, result: evaluationResponse })) })
