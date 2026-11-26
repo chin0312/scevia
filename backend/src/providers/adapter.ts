@@ -14,6 +14,7 @@ export interface ProviderPage {
 }
 
 export interface FetchPageRequest {
+  providerAccountId?: string
   externalAccountId: string
   streamName: string
   cursor: string | null

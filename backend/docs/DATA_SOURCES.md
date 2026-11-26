@@ -82,3 +82,13 @@ All live assignments below are conditional on permission and an approved test sa
 | Reference and historical prices | CLOB midpoint and venue price history | Managed candles are fallback observations with their own timestamps and aggregation. Midpoints are references and carry no execution guarantee. |
 
 Kalshi account and market contracts are validated using synthetic input. Live permission, populated validation and approved processing are release dependencies. [Kalshi authorization and acquisition](KALSHI.md)
+
+## Phase 6 source capability and validation
+
+| Source | Implemented evidence | Financial coverage and acceptance |
+|---|---|---|
+| Kalshi | Authorization-gated, loopback development GET transport. Exact local account binding, restricted API key, current and archive cursors, supported fills and reported fees, provider cash, signed net inventory, indicative supported book marks, public catalog and archived observations. | Synthetic integration covers authorization isolation, signed fractional inventory, price persistence and observed valuation. Cash activity and settlement allocation need account-attributable evidence. Historical continuity, complete current inventory, native fee schedules and populated statement reconciliation remain unverified. |
+| Polymarket | Existing explicitly authorized wallet-scoped Data API, Gamma and CLOB public reads. Observations retain endpoint and source identities, with ambiguous trades and activity eligible for reconciliation review. | Synthetic integration covers retrieval and reconciliation boundaries. Missing inventory, complete historical fills, actual cash, fees and collateral identity across protocol generations need independent evidence. Stored historical USDC-coded API units do not establish on-chain token identity. |
+| CSV | User-supplied financial import and review, explicit Kalshi activity mapping, optional `fieldUnits` overrides for price, amount and fee, source linking and explicit confirmation. | Usable with approved, owned exports and affirmative opening/coverage evidence where required. Real format detection, statement-grade settlement reconciliation and broad API/CSV overlap validation remain pending. |
+
+The multi-provider technical path is under review. Only approved populated accounts or permitted user records and an independent financial comparison can satisfy Phase 6B. Unified frontend integration, production authentication and retention are separate. See [Kalshi setup and checks](KALSHI.md#authorized-local-setup-and-verification) and the [Polymarket local validation workflow](POLYMARKET.md).

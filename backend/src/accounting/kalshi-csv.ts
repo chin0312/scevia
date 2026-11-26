@@ -2,11 +2,13 @@ import { Decimal } from 'decimal.js'
 import { z } from 'zod'
 import { csvRows, parseFinancialCsv } from './csv.js'
 
+const moneyUnit = z.enum(['dollars', 'cents'])
 const column = z.string().min(1).max(100)
 export const kalshiCsvMapping = z.object({
   format: z.literal('kalshi_activity'), account: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,159}$/),
   activity: z.enum(['fill', 'deposit', 'withdrawal', 'fee', 'rebate', 'reward']),
-  units: z.enum(['dollars', 'cents']),
+  units: moneyUnit,
+  fieldUnits: z.object({ price: moneyUnit.optional(), amount: moneyUnit.optional(), fee: moneyUnit.optional() }).strict().optional(),
   columns: z.object({ id: column, timestamp: column, ticker: column.optional(), side: column.optional(), action: column.optional(),
     quantity: column.optional(), price: column.optional(), amount: column.optional(), fee: column.optional() }).strict(),
 }).strict()
@@ -19,6 +21,8 @@ export function parseMappedKalshiCsv(text: string, mapping: KalshiCsvMapping) {
   const header = table.shift()
   if (!header || new Set(header).size !== header.length || !table.length) throw new Error('invalid_mapped_csv_header')
   const selected = mapping.columns
+  const assigned = Object.values(selected).filter((name) => name !== undefined)
+  if (new Set(assigned).size !== assigned.length) throw new Error('kalshi_csv_mapping_duplicate_column')
   const fill = mapping.activity === 'fill'
   if (Object.values(selected).some((name) => name !== undefined && !header.includes(name))
     || (fill ? !selected.ticker || !selected.side || !selected.action || !selected.quantity || !selected.price : !selected.amount)) {
@@ -29,10 +33,11 @@ export function parseMappedKalshiCsv(text: string, mapping: KalshiCsvMapping) {
   const originalRows: number[] = []
   for (const [index, cells] of table.entries()) {
     const at = (name?: string) => name === undefined ? '' : cells[header.indexOf(name)]?.trim() ?? ''
-    const money = (value: string) => {
+    const money = (field: 'price' | 'amount' | 'fee') => {
+      const value = at(selected[field])
       if (!value) return ''
       if (!decimal.test(value)) throw new Error('invalid_kalshi_decimal')
-      return new Decimal(value).div(mapping.units === 'cents' ? 100 : 1).toFixed()
+      return new Decimal(value).div((mapping.fieldUnits?.[field] ?? mapping.units) === 'cents' ? 100 : 1).toFixed()
     }
     try {
       if (cells.length !== header.length) throw new Error('invalid_column_count')
@@ -45,8 +50,8 @@ export function parseMappedKalshiCsv(text: string, mapping: KalshiCsvMapping) {
         throw new Error('kalshi_fill_mapping_invalid')
       }
       rows.push(['kalshi', mapping.account, id, at(selected.timestamp), '', fill ? action : mapping.activity,
-        fill ? ticker + ':' + side : '', 'USD', fill ? at(selected.quantity) : '', fill ? money(at(selected.price)) : '',
-        fill ? '' : money(at(selected.amount)), fill ? money(at(selected.fee)) : '', ''].map(quote).join(','))
+        fill ? ticker + ':' + side : '', 'USD', fill ? at(selected.quantity) : '', fill ? money('price') : '',
+        fill ? '' : money('amount'), fill ? money('fee') : '', ''].map(quote).join(','))
       originalRows.push(index + 2)
     } catch (error) { failures.push({ row: index + 2, code: (error as Error).message }) }
   }

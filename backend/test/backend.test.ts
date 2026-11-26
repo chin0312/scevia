@@ -1,3 +1,7 @@
+import { generateKeyPairSync } from 'node:crypto'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { KalshiAdapter } from '../src/providers/kalshi/adapter.js'
 import { KalshiClient } from '../src/providers/kalshi/client.js'
 import { KalshiMarketDataService } from '../src/providers/kalshi/market-data.js'
@@ -17,6 +21,7 @@ import {
   markets,
   portfolios,
   positionSnapshots,
+  priceObservations,
   providerActivityFacts,
   providerAccounts,
   sourceRecordRevisions,
@@ -117,6 +122,67 @@ afterAll(async () => {
 })
 
 describe('migrations and canonical persistence', () => {
+  it('binds development Kalshi credentials and values signed inventory with a qualified book mark', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'scevia-kalshi-'))
+    try {
+      const keyFile = join(directory, 'signer.pem')
+      const { privateKey } = generateKeyPairSync('ed25519')
+      await writeFile(keyFile, privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 })
+      const [account, other] = await database.insert(providerAccounts).values([
+        { portfolioId: PORTFOLIO_ID, providerCode: 'kalshi', externalAccountId: 'kalshi:demo:primary:0', kind: 'authenticated_account', label: 'Authorized source' },
+        { portfolioId: OTHER_PORTFOLIO_ID, providerCode: 'kalshi', externalAccountId: 'kalshi:demo:primary:0', kind: 'authenticated_account', label: 'Other tenant' },
+      ]).returning()
+      const calls: string[] = []
+      const app = await buildApp({ database, config: { ...testConfig(), nodeEnv: 'development',
+        kalshi: { environment: 'demo', publicAuthorized: true, accountAuthorized: true,
+          binding: { accountId: account!.id, portfolioId: PORTFOLIO_ID, keyId: 'test-key', keyFile } } },
+        kalshiTransport: async (url, init) => {
+          const path = url.pathname.replace('/trade-api/v2', '')
+          calls.push(path)
+          expect(url.origin).toBe('https://external-api.demo.kalshi.co')
+          const signed = new Headers(init.headers).has('kalshi-access-key')
+          if (path === '/api_keys') {
+            expect(signed).toBe(true)
+            return Response.json({ api_keys: [{ api_key_id: 'test-key', scopes: ['read'], subaccount: 0 }] })
+          }
+          if (path === '/portfolio/balance') {
+            expect(signed).toBe(true)
+            expect(url.searchParams.get('exchange_index')).toBe('0')
+            return Response.json({ balance: 1050, updated_ts: Math.floor(Date.now() / 1000) })
+          }
+          if (path === '/portfolio/positions') {
+            expect(signed).toBe(true)
+            return Response.json({ market_positions: [{ ticker: 'KX-BOOK', exchange_index: 0, position_fp: '-2.5',
+              market_exposure_dollars: '1.25' }], cursor: '' })
+          }
+          if (path === '/markets/KX-BOOK') {
+            expect(signed).toBe(false)
+            return Response.json({ market: { ticker: 'KX-BOOK', event_ticker: 'KX-EVENT', title: 'Book example',
+              market_type: 'binary', status: 'active', notional_value_dollars: '1', yes_bid_dollars: '0.30',
+              yes_ask_dollars: '0.50', yes_bid_size_fp: '10', yes_ask_size_fp: '10' } })
+          }
+          throw new Error('Unexpected Kalshi path')
+        } })
+      openApps.push(app)
+      const headers = { authorization: `Bearer ${TOKEN}` }
+      const sync = (id: string) => app.inject({ method: 'POST', url: '/v1/provider-accounts/' + id + '/sync?scope=current', headers })
+      expect((await sync(other!.id)).statusCode).toBe(404)
+      expect(calls).toEqual([])
+      const response = await sync(account!.id)
+      expect(response.statusCode, response.body).toBe(200)
+      expect(calls).toEqual(['/api_keys', '/portfolio/balance', '/portfolio/positions', '/markets/KX-BOOK'])
+      expect(await database.select().from(positionSnapshots).where(eq(positionSnapshots.providerAccountId, account!.id)))
+        .toMatchObject([{ quantity: '2.500000000000000000', averageCostPrice: '0.500000000000000000', markPrice: '0.600000000000000000' }])
+      expect(await database.select().from(priceObservations).where(eq(priceObservations.providerAccountId, account!.id)))
+        .toMatchObject([{ price: '0.600000000000000000', priceKind: 'kalshi_retrieved_book_midpoint' }])
+      const exposure = await app.inject({ method: 'GET', url: '/v1/portfolios/' + PORTFOLIO_ID + '/analytics/exposure?asset=USD&venue=kalshi&asOf=' + encodeURIComponent(new Date().toISOString()), headers })
+      expect(exposure.statusCode, exposure.body).toBe(200)
+      expect(exposure.json().reportedExposure.rows).toMatchObject([{ observedMarketValue: '1.5', providerCoverage: 'partial' }])
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   it('reconciles Kalshi fixture fills and Polymarket imports in separate denominations', async () => {
     const nativeMarket = { ticker: 'KX-FIXTURE', event_ticker: 'KX-EVENT', title: 'Synthetic fixture?', market_type: 'binary',
       status: 'active', last_price_dollars: '0.4' }

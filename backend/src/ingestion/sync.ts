@@ -208,6 +208,7 @@ export class IngestionService {
         await this.renewAccountLease(accountCheckpointId, leaseToken)
         const page = await this.fetchWithRetry({
           adapter,
+          providerAccountId: account.id,
           externalAccountId: account.externalAccountId,
           stream,
           cursor,
@@ -392,6 +393,7 @@ export class IngestionService {
 
   private async fetchWithRetry(input: {
     adapter: ProviderAdapter
+    providerAccountId: string
     externalAccountId: string
     stream: ProviderSyncStream
     cursor: string | null
@@ -409,6 +411,7 @@ export class IngestionService {
         })
         const response = await Promise.race([
           input.adapter.fetchPage({
+            providerAccountId: input.providerAccountId,
             externalAccountId: input.externalAccountId,
             streamName: input.stream.name,
             cursor: input.cursor,

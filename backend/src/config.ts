@@ -7,6 +7,9 @@ const databaseEnvironmentSchema = z.object({
 })
 
 const serverEnvironmentSchema = z.object({
+  KALSHI_PUBLIC_DATA_AUTHORIZED: z.enum(['YES', 'NO']).default('NO'),
+  KALSHI_ACCOUNT_DATA_AUTHORIZED: z.enum(['YES', 'NO']).default('NO'),
+  KALSHI_ENVIRONMENT: z.enum(['demo', 'production']).default('demo'),
   POLYMARKET_LIVE_DATA_AUTHORIZED: z.enum(['YES', 'NO']).default('NO'),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   HOST: z.string().default('127.0.0.1'),
@@ -22,7 +25,15 @@ export interface DatabaseConfig {
   ssl: boolean
 }
 
+export interface KalshiConfig {
+  environment: 'demo' | 'production'
+  publicAuthorized: boolean
+  accountAuthorized: boolean
+  binding?: { accountId: string; portfolioId: string; keyId: string; keyFile: string }
+}
+
 export interface ServerConfig extends DatabaseConfig {
+  kalshi?: KalshiConfig
   polymarketLiveEnabled?: boolean
   nodeEnv: 'development' | 'test' | 'production'
   host: string
@@ -64,8 +75,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     throw new Error('CORS_ORIGINS must be configured in production')
   }
 
+  const localDevelopment = parsed.NODE_ENV === 'development' && ['127.0.0.1', '::1'].includes(parsed.HOST)
+  const kalshi: KalshiConfig = {
+    environment: parsed.KALSHI_ENVIRONMENT,
+    publicAuthorized: localDevelopment && parsed.KALSHI_PUBLIC_DATA_AUTHORIZED === 'YES',
+    accountAuthorized: localDevelopment && parsed.KALSHI_ACCOUNT_DATA_AUTHORIZED === 'YES',
+  }
+  if (kalshi.accountAuthorized) {
+    if (!kalshi.publicAuthorized) throw new Error('Kalshi account ingestion requires separate public catalog authorization')
+    kalshi.binding = z.object({
+      accountId: z.uuid(), portfolioId: z.uuid(), keyId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+      keyFile: z.string().startsWith('/'),
+    }).parse({ accountId: env.KALSHI_PROVIDER_ACCOUNT_ID, portfolioId: env.KALSHI_PORTFOLIO_ID,
+      keyId: env.KALSHI_KEY_ID, keyFile: env.KALSHI_PRIVATE_KEY_FILE })
+  }
   return {
     ...database,
+    kalshi,
     nodeEnv: parsed.NODE_ENV,
     polymarketLiveEnabled: parsed.NODE_ENV === 'development' && ['127.0.0.1', '::1', 'localhost'].includes(parsed.HOST)
       && parsed.POLYMARKET_LIVE_DATA_AUTHORIZED === 'YES',

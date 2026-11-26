@@ -36,12 +36,18 @@ export function kalshiMarketChoice(raw: unknown, retrievedAt: string) {
 }
 
 export class KalshiMarketDataService {
-  constructor(private readonly client: KalshiClient) {}
+  constructor(private readonly client: KalshiClient, private readonly identityPrefix = '') {}
+
+  private choice(raw: unknown, retrievedAt: string) {
+    const item = kalshiMarketChoice(raw, retrievedAt)
+    return { ...item, marketTicker: this.identityPrefix + item.marketTicker, eventTicker: this.identityPrefix + item.eventTicker,
+      outcomes: item.outcomes.map((outcome) => ({ ...outcome, id: this.identityPrefix + outcome.id })) }
+  }
   async lookup(id: string, signal: AbortSignal) {
     const checked = ticker.parse(id)
     const value = z.object({ market: z.unknown() }).parse(await this.client.read('market', new URLSearchParams(), signal, checked))
-    const result = kalshiMarketChoice(value.market, new Date().toISOString())
-    if (result.marketTicker !== checked) throw new ProviderAdapterError('kalshi_market_identity_mismatch', false)
+    const result = this.choice(value.market, new Date().toISOString())
+    if (result.marketTicker !== this.identityPrefix + checked) throw new ProviderAdapterError('kalshi_market_identity_mismatch', false)
     return result
   }
   async list(event: string | undefined, cursor: string | undefined, signal: AbortSignal) {
@@ -52,8 +58,8 @@ export class KalshiMarketDataService {
     const captured = new Date().toISOString()
     const items = page.markets.flatMap((row) => {
       try {
-        const item = kalshiMarketChoice(row, captured)
-        return !event || item.eventTicker === event ? [item] : []
+        const item = this.choice(row, captured)
+        return !event || item.eventTicker === this.identityPrefix + event ? [item] : []
       } catch { return [] }
     })
     return { provider: 'kalshi', items, nextCursor: page.cursor || null, partial: items.length !== page.markets.length }

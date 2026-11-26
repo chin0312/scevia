@@ -1,3 +1,4 @@
+import type { KalshiTransport } from '../providers/kalshi/client.js'
 import type { KalshiMarketDataService } from '../providers/kalshi/market-data.js'
 import { ScenarioError } from '../scenarios/engine.js'
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify'
@@ -28,7 +29,8 @@ import {
   users,
 } from '../db/schema.js'
 import { ProviderAdapterError } from '../providers/adapter.js'
-import { ProviderRegistry, providerRegistry } from '../providers/registry.js'
+import { createKalshiLive } from '../providers/kalshi/live.js'
+import { ProviderRegistry, createProviderRegistry } from '../providers/registry.js'
 import { PolymarketMarketDataService, PublicMarketError } from '../providers/polymarket/market-data.js'
 import { IngestionError, SyncAlreadyRunningError } from '../ingestion/errors.js'
 import { IngestionService } from '../ingestion/sync.js'
@@ -41,6 +43,7 @@ export interface AppOptions {
   registry?: ProviderRegistry
   marketData?: PolymarketMarketDataService
   kalshiMarketData?: KalshiMarketDataService
+  kalshiTransport?: KalshiTransport
 }
 
 interface PageQuery {
@@ -308,7 +311,8 @@ function errorBody(requestId: string, code: string, message: string) {
 }
 
 export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
-  const registry = options.registry ?? providerRegistry
+  const kalshiLive = createKalshiLive(options.config, options.database, options.kalshiTransport)
+  const registry = options.registry ?? createProviderRegistry(kalshiLive?.adapter)
   const ingestion = new IngestionService(options.database, registry)
   const liveAllowed = options.config.polymarketLiveEnabled === true
   const marketData = options.marketData ?? new PolymarketMarketDataService()
@@ -405,6 +409,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
                 properties: {
                   providerCode: { type: 'string' },
                   liveAccess: { type: 'string' },
+                  accountAccess: { type: 'string' },
                   displayName: { type: 'string' },
                   adapterKind: { type: 'string' },
                   accountKinds: { type: 'array', items: { type: 'string' } },
@@ -432,7 +437,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       },
     },
   }, async () => ({ items: registry.listCapabilities().map((item) => ({ ...item,
-    liveAccess: item.providerCode === 'kalshi' ? 'disabled' : item.providerCode === 'polymarket' && liveAllowed ? 'enabled' : 'unavailable' })) }))
+    accountAccess: item.providerCode === 'kalshi' ? kalshiLive?.accountId ? 'credential_verification_required' : 'disabled' : undefined,
+    liveAccess: item.providerCode === 'kalshi' ? kalshiLive ? 'authorized' : 'disabled' : item.providerCode === 'polymarket' && liveAllowed ? 'enabled' : 'unavailable' })) }))
 
   app.get<{ Querystring: { q: string; limit: number; page: number } }>('/v1/market-data/search', {
     config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
@@ -525,7 +531,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
   })
 
   // Kalshi remains unavailable in production and in the default development server.
-  const kalshiMarketData = options.config.nodeEnv === 'test' ? options.kalshiMarketData : undefined
+  const kalshiMarketData = options.config.nodeEnv === 'test' ? options.kalshiMarketData : kalshiLive?.marketData
   app.get<{ Querystring: { marketTicker?: string; eventTicker?: string; cursor?: string } }>('/v1/market-catalog/kalshi', {
     schema: { tags: ['public market data'], querystring: { type: 'object', additionalProperties: false, properties: {
       marketTicker: { type: 'string', pattern: '^[A-Z0-9][A-Z0-9_-]{0,127}$' },
@@ -1437,11 +1443,16 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       if (!account) return reply.code(404).send(errorBody(request.id, 'not_found', 'The requested resource was not found.'))
       try {
         if ((account.providerCode === 'polymarket' && !liveAllowed && !options.registry)
-          || (account.providerCode === 'kalshi' && (!options.registry || options.config.nodeEnv !== 'test'))) {
+          || (account.providerCode === 'kalshi' && account.id !== kalshiLive?.accountId
+            && !(options.registry && options.config.nodeEnv === 'test'))) {
           return reply.code(422).send(errorBody(request.id, 'provider_live_disabled', 'Live account synchronization is disabled.'))
         }
         const result = await ingestion.syncProviderAccount(account.id, request.query.scope)
         if (result.status === 'failed') {
+          const errors = new Set(result.streams.map((stream) => stream.errorCode))
+          const kalshiSetupError = account.providerCode === 'kalshi' && ['kalshi_read_scope_unverified', 'kalshi_account_scope_unverified',
+            'kalshi_account_binding_mismatch', 'kalshi_credential_unavailable'].find((code) => errors.has(code))
+          if (kalshiSetupError) return reply.code(422).send(errorBody(request.id, kalshiSetupError, 'Check the local Kalshi credential and account binding.'))
           return reply.code(502).send(errorBody(request.id, 'sync_failed', 'All synchronization streams failed.'))
         }
         return reply.code(200).send(result)
