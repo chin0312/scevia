@@ -1,0 +1,152 @@
+/* Responsive layer. Scevia is designed for desktop (1280–1600px); below that the layout reflows rather than shrinks.
+   Card internals respond to the card's own width (container queries), so the same card works in a 3-column row
+   on desktop and full-width on a tablet. Page structure responds to the viewport (media queries). */
+
+/* ── Card internals: container queries ───────────────────────── */
+.card { container-type: inline-size; }
+.search span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.chip { white-space: nowrap; }
+.card-h { flex-wrap: wrap; }
+.card-h > :first-child { min-width: 0; flex: 1 1 200px; }
+.actions { flex-wrap: wrap; justify-content: flex-end; }
+.tiles { grid-template-columns: repeat(auto-fit, minmax(176px, 1fr)); }
+.dt-wrap { position: relative; } /* keeps visually-hidden header text inside the scroll area */
+.matrix > * { min-width: 0; }
+.ministat { grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); }
+.ministat .v { white-space: nowrap; }
+@container (max-width: 520px) { .ministat .v { font-size: var(--font-size-lg); } }
+.conc { grid-template-columns: minmax(160px, 1.4fr) minmax(64px, 1fr) 70px 46px; }
+.attr { grid-template-columns: minmax(120px, 1.3fr) 1fr 1fr 80px 36px; column-gap: var(--space-2); }
+.hl-tile .v, .tile .v, .cell .v, .hero-fig { white-space: nowrap; }
+@container (max-width: 820px) { .hl-tile .v { font-size: var(--font-size-2xl); } }
+.seg-detail .row { flex-wrap: wrap; }
+
+/* Allocation: donut beside the list when there is room, above it when there isn't. */
+@container (max-width: 440px) {
+  .alloc { grid-template-columns: 1fr; justify-items: stretch; }
+  .alloc .donut-wrap { justify-self: center; }
+}
+.al-row { grid-template-columns: 10px minmax(0, 1fr) auto 40px; }
+.al-row > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Concentration rows: name on its own line when the card is narrow. */
+@container (max-width: 520px) {
+  .conc { grid-template-columns: minmax(0, 1fr) 72px 48px; grid-template-areas: 'nm nm nm' 'bar amt pct'; row-gap: var(--space-1); }
+  .conc .nm { grid-area: nm; }
+  .conc .cbar { grid-area: bar; }
+  .conc > .r:nth-last-child(2) { grid-area: amt; }
+  .conc > .r:last-child { grid-area: pct; }
+}
+
+/* Outcome payoffs: event on top, figures below, when the card is narrow. */
+@container (max-width: 760px) {
+  .po-row { grid-template-columns: repeat(2, minmax(0, 1fr)) auto; gap: var(--space-2) var(--space-3); padding: var(--space-3) var(--space-4); }
+  .po-row > :first-child { grid-column: 1 / -1; }
+  .po-row > :nth-child(2) { grid-column: 1 / -1; font-size: var(--font-size-xs); color: var(--color-text-secondary); }
+  .po-row > :nth-child(2) br { display: none; }
+  .po-row > :nth-child(2) small::before { content: ' · '; }
+  .po-row.h { display: none; }
+  .po-row .po { min-width: 0; }
+  .po-row.t > :nth-child(2) { display: none; }
+}
+
+/* Comparisons and grids inside cards */
+@container (max-width: 560px) {
+  .cov-grid { grid-template-columns: repeat(2, 1fr); }
+  .hl, .hl-group { grid-template-columns: 1fr; }
+  .ba-row { padding-left: var(--space-4); padding-right: var(--space-4); font-size: var(--font-size-xs); }
+  .attr { grid-template-columns: minmax(96px, 1.4fr) 1fr 1fr 72px 28px; }
+  .bucket { grid-template-columns: 84px minmax(0, 1fr) 40px 72px; gap: var(--space-2); }
+  .matrix { grid-template-columns: 72px 1fr 1fr; }
+  .f2, .sumbar { grid-template-columns: 1fr; }
+  .cell { padding: var(--space-3); }
+  .cell .v { font-size: var(--font-size-xl); }
+  .cell .delta { position: static; margin-bottom: var(--space-1); }
+}
+
+/* ── Wide and ultrawide desktop: the shell is fluid up to --layout-content-max; gutters grow with the viewport,
+   running text keeps --layout-text-max, and tables/charts take the extra width. ── */
+@media (min-width: 1680px) {
+  main { padding-right: var(--space-12); }
+  .shell { grid-template-columns: calc(var(--layout-rail-width) + var(--space-8)) minmax(0, 1fr); }
+  .rail { padding-left: var(--space-8); }
+  .dt td.mkt { min-width: 320px; }
+}
+@media (min-width: 2200px) {
+  main { padding-right: var(--space-16); }
+  .tiles { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+}
+@media (max-width: 1360px) {
+  .g-lab { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ── Small desktop ───────────────────────────────────────────── */
+@media (max-width: 1400px) {
+  .g-3 { grid-template-columns: 1.3fr 1fr 1fr; }
+}
+
+/* ── Tablet: one column; the section rail becomes a horizontal bar ── */
+@media (max-width: 1100px) {
+  .topbar { gap: var(--space-4); padding: 0 var(--space-4); }
+  .search { width: auto; }
+  .search span, .search kbd { display: none; }
+
+  .shell { grid-template-columns: minmax(0, 1fr); }
+  .rail { position: sticky; z-index: var(--z-sticky); top: var(--layout-topbar-height); flex-direction: column; gap: var(--space-2); padding: var(--space-2) var(--space-6); background: var(--color-bg-canvas); border-bottom: 1px solid var(--color-border-subtle); }
+  .rail > h6, .rail .rail-sub, .rail .rail-card, .rail .rail-extra, .rail .count, .rail .flag { display: none; }
+  .rail > ol { flex-direction: row; gap: var(--space-1); overflow-x: auto; scrollbar-width: none; }
+  .rail > ol li a { white-space: nowrap; }
+  .rail .rail-keep { display: flex; align-items: center; gap: var(--space-2); overflow-x: auto; scrollbar-width: none; }
+  .rail .rail-keep h6 { display: none; }
+  .rail .rail-keep .scn { display: flex; flex-direction: row; gap: var(--space-1); }
+  .rail .rail-keep .scn a { white-space: nowrap; }
+  .rail .rail-keep .scn small { display: none; }
+
+  main { padding: var(--space-6) var(--space-6) var(--space-12); }
+  .page-loading { grid-template-columns: minmax(0, 1fr); }
+  .page-loading > :first-child { display: none; }
+  .g-21, .g-12, .g-2, .lab { grid-template-columns: minmax(0, 1fr); }
+  .g-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .g-3 > :first-child { grid-column: 1 / -1; }
+  .assume { grid-template-columns: repeat(2, 1fr); }
+  .page-head { flex-wrap: wrap; align-items: flex-start; }
+  .anchor, .card { scroll-margin-top: calc(var(--layout-topbar-height) + var(--space-16)); }
+}
+
+/* ── Narrow tablet: primary nav moves to its own row ─────────── */
+@media (max-width: 900px) {
+  .topbar { height: auto; flex-wrap: wrap; row-gap: var(--space-2); padding: var(--space-2) var(--space-4); }
+  .topbar .nav { order: 3; width: 100%; overflow-x: auto; scrollbar-width: none; }
+  .topbar .nav a { white-space: nowrap; flex: 1 0 auto; justify-content: center; padding: 0 var(--space-3); }
+  .chip-date { display: none; }
+  .rail { top: calc(var(--layout-topbar-height) + var(--space-10)); }
+}
+
+/* ── Phone ───────────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  .topbar { position: static; }
+  .utils { gap: 0; }
+  .topbar { position: relative; z-index: var(--z-dropdown); } /* not sticky here, but its menus must still paint above the page */
+
+  .rail { position: static; padding: var(--space-2) var(--space-4); }
+  main { padding: var(--space-4) var(--space-4) var(--space-12); }
+  .g-3 { grid-template-columns: minmax(0, 1fr); }
+  .assume { grid-template-columns: 1fr; }
+  .hero-fig { font-size: var(--font-size-display); }
+  .hero-fig .dec { font-size: var(--font-size-xl); }
+  .hero-top { flex-wrap: wrap; }
+  .page-head h1 { font-size: var(--font-size-2xl); }
+  .page-head .actions { justify-content: flex-start; }
+  .summary { font-size: var(--font-size-md); }
+  .card-h { padding: var(--space-4) var(--space-4) 0; }
+  .card-b { padding: var(--space-4); }
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tile { padding: var(--space-3) var(--space-4); }
+  .drawer { width: 100vw; border-radius: 0; }
+  .source-row:not(.active) { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .source-row:not(.active) > :nth-child(3) { grid-column: 2; grid-row: 2; font-size: var(--font-size-xs); }
+  .source-row:not(.active) > :nth-child(4) { grid-column: 3; grid-row: 1 / span 2; }
+  .modal { max-width: calc(100vw - var(--space-6)); }
+  .palette { width: calc(100vw - var(--space-6)); }
+  .anchor, .card { scroll-margin-top: var(--space-4); }
+}

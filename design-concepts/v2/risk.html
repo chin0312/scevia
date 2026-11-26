@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Scevia — Risk (v2 concept)</title>
+<link rel="stylesheet" href="assets/components.css">
+<style>
+  .conc { display: grid; grid-template-columns: 200px 1fr 70px 46px; gap: var(--space-3); align-items: center; padding: var(--space-2) 0; font-size: var(--font-size-sm); }
+  .conc .nm { display: flex; gap: var(--space-2); align-items: center; white-space: nowrap; overflow: hidden; }
+  .conc .nm span:last-child { overflow: hidden; text-overflow: ellipsis; }
+  .cbar { position: relative; height: 18px; }
+  .cbar i { position: absolute; left: 0; top: 3px; height: 12px; border-radius: var(--radius-sm); background: var(--color-data-1); }
+  .cbar i.over { background: var(--color-warn-fg); }
+  .cbar .lim { position: absolute; top: -4px; bottom: -4px; border-left: 1.5px dashed var(--color-warn-fg); opacity: .7; }
+  .po-row { display: grid; grid-template-columns: minmax(240px, 1.5fr) 110px 1fr 1fr 64px; gap: var(--space-4); align-items: center; padding: var(--space-3) var(--space-6); border-bottom: 1px solid var(--color-border-subtle); font-size: var(--font-size-sm); }
+  .po-row.h { font-size: var(--font-size-xs); color: var(--color-text-tertiary); padding-top: var(--space-2); padding-bottom: var(--space-2); }
+  .po-row.t { font-weight: var(--font-weight-semibold); border-bottom: 0; }
+  .po { display: flex; align-items: center; gap: var(--space-3); }
+  .po .bar { flex: 1; }
+  .po span { width: 64px; text-align: right; }
+  .rel { border: 1px solid var(--color-border-subtle); border-radius: var(--radius-lg); padding: var(--space-4); background: var(--color-bg-raised); display: flex; flex-direction: column; gap: var(--space-2); }
+  .rel + .rel { margin-top: var(--space-3); }
+  .rel .h { display: flex; justify-content: space-between; align-items: center; gap: var(--space-3); }
+  .rel .h b { font-weight: var(--font-weight-semibold); }
+  .rel p { font-size: var(--font-size-xs); color: var(--color-text-secondary); }
+  .rel .leg { display: flex; gap: var(--space-2); align-items: center; font-size: var(--font-size-sm); }
+  .rel.unk { border-color: var(--color-warn-fg); }
+  .ministat { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-3); margin-top: var(--space-4); }
+  .ministat > div { background: var(--color-bg-raised); border-radius: var(--radius-md); padding: var(--space-3) var(--space-4); }
+  .ministat .l { font-size: var(--font-size-xs); color: var(--color-text-tertiary); }
+  .ministat .v { font-size: var(--font-size-xl); font-weight: var(--font-weight-semibold); margin-top: 2px; }
+</style></head>
+<body>
+<div id="topbar"></div>
+<div class="shell">
+  <aside class="rail">
+    <div><h6 class="caps">Risk</h6>
+      <ol>
+        <li><a href="#summary" class="on" data-i="home">Exposure summary</a></li>
+        <li><a href="#conc" data-i="bars">Concentration</a></li>
+        <li><a href="#ladder" data-i="ladder">Downside ladder</a></li>
+        <li><a href="#payoffs" data-i="table">Outcome payoffs <span class="count">9</span></a></li>
+        <li><a href="#rel" data-i="link">Relationships <span class="flag">1</span></a></li>
+        <li><a href="#calendar" data-i="cal">Resolution calendar</a></li>
+      </ol></div>
+    <div><h6 class="caps">Guardrails</h6>
+      <ol><li><a href="#" data-i="shield">Single event ≤ 15%</a></li><li><a href="#" data-i="shield">Category ≤ 40%</a></li></ol></div>
+    <div class="rail-card"><b>How risk is measured</b>Deterministic payoffs: what you gain or lose if each event resolves one way or the other. Scevia never assigns probabilities.</div>
+  </aside>
+
+  <main>
+    <section class="page-head anchor" id="summary">
+      <div><div class="caps">Risk · 10 positions across 9 events</div><h1>What you’re exposed to</h1></div>
+      <div class="actions"><div class="seg"><button class="on">By event</button><button>By category</button><button>By platform</button></div><a class="btn btn-primary" href="scenario-lab.html" data-i="flask">Stress-test in Lab</a></div>
+    </section>
+
+    <p class="summary">You have <b>$27,266</b> committed across 9 events. One event, <a href="#">2026 hottest year</a>, holds <b>29%</b> of it, which is above your 15% guardrail. If your three largest events all went against you, you’d lose <b class="loss">−$16,136</b> (46% of your portfolio). <b>$6,396</b> resolves in a single week (Dec 10–16).</p>
+
+    <div class="tiles">
+      <div class="tile"><div class="l">Capital committed <span class="itip">i</span></div><div class="v">$27,266</div><div class="f">78% of total value</div></div>
+      <div class="tile"><div class="l">If everything goes against you <span class="itip">i</span></div><div class="v loss">−$27,266</div><div class="f">$6,345 cash would remain</div></div>
+      <div class="tile"><div class="l">Largest single event <span class="itip">i</span></div><div class="v" style="color:var(--color-warn-fg)">29.0%</div><div class="f">over 15% guardrail</div></div>
+      <div class="tile"><div class="l">Top-3 concentration <span class="itip">i</span></div><div class="v">59%</div><div class="f">$16,136 of committed</div></div>
+      <div class="tile"><div class="l">Resolving ≤ 30 days <span class="itip">i</span></div><div class="v">$7,971</div><div class="f">3 events · first on Dec 2</div></div>
+    </div>
+
+    <div class="grid g-21">
+      <section class="card anchor" id="conc">
+        <div class="card-h"><div><h3>Event concentration</h3><p>Capital committed per event · same outcome on 2 platforms counts once</p></div><div class="legend"><span><i style="background:var(--color-data-1)"></i>Within guardrail</span><span><i style="background:var(--color-warn-fg)"></i>Over 15%</span></div></div>
+        <div class="card-b" id="concRows"></div>
+      </section>
+      <section class="card anchor" id="ladder">
+        <div class="card-h"><div><h3>Downside ladder</h3><p>Loss if your N largest events all go against you</p></div></div>
+        <div class="card-b"><div class="chart" id="ladderChart"></div>
+          <div class="ministat"><div><div class="l">Largest event</div><div class="v loss">−$7,920</div></div><div><div class="l">Top 3 events</div><div class="v loss">−$16,136</div></div><div><div class="l">All macro</div><div class="v loss">−$10,346</div></div></div></div>
+      </section>
+    </div>
+
+    <section class="card anchor" id="payoffs" style="overflow:hidden">
+      <div class="card-h" style="padding-bottom:var(--space-4)"><div><h3>Outcome payoffs</h3><p>P&amp;L at resolution vs. cost basis · fees excluded</p></div><div class="tabs"><a class="on">All events</a><a>Next 30 days</a><a>Over guardrail</a></div></div>
+      <div id="payoffTable"></div>
+    </section>
+
+    <div class="grid g-12">
+      <section class="card anchor" id="rel">
+        <div class="card-h"><div><h3>Event relationships</h3><p>How positions that may move together are treated</p></div><a class="btn btn-sm" data-i="link">Map contracts</a></div>
+        <div class="card-b">
+          <div class="rel"><div class="h"><b>Dec 2026 FOMC decision</b><span class="chip yes">✓ Equivalent · confirmed by you</span></div>
+            <div class="leg"><span class="plat ks">K</span>Fed cuts rates at Dec FOMC · YES</div><div class="leg"><span class="plat pm">P</span>Fed rate cut in December? · YES</div>
+            <p>Same source and date, combined as one event. If NO: <span class="loss">−$4,266</span>.</p></div>
+          <div class="rel"><div class="h"><b>US macro outlook</b><span class="chip info">Related · not netted</span></div>
+            <p>Fed cut (YES) · Nov CPI &gt; 3% (NO) · 2027 recession (NO). These share drivers but resolve on different rules, so they aren’t combined. Model them together in Scenario Lab.</p></div>
+          <div class="rel unk"><div class="h"><b>BTC year-end · ETH ETF flows</b><span class="chip warn">? Unknown</span></div>
+            <p>Probably correlated, but Scevia can’t confirm it. Worst-case totals treat them as independent and are marked <i>unmodeled dependency</i>. <a href="#" style="color:var(--color-text-primary);text-decoration:underline">Classify</a></p></div>
+        </div>
+      </section>
+      <section class="card anchor" id="calendar">
+        <div class="card-h"><div><h3>Resolution calendar</h3><p>When capital is released or lost · circle area = capital at stake</p></div><div class="seg"><button class="on">90 days</button><button>12 months</button></div></div>
+        <div class="card-b"><div class="chart" id="calStrip"></div>
+          <div class="callout warn" style="margin-top:var(--space-3)" data-i="alert"><span><b>$6,396</b> resolves between Dec 10 and Dec 16. One bad week could cost 18% of your portfolio.</span></div></div>
+      </section>
+    </div>
+
+    <div class="footer-note"><span>Payoffs assume each contract settles at $1 or $0 as written. Scevia does not estimate how likely each outcome is.</span><span>Sample portfolio · fictional data</span></div>
+  </main>
+</div>
+<script src="assets/app.js"></script>
+<script src="assets/data.js"></script>
+<script>
+shell('Risk'); spy();
+const EV = [
+  { n: '2026 hottest year on record', ids: ['hot'], cat: 'Climate', res: 'Jan 14', d: 51 },
+  { n: 'Dec 2026 FOMC decision', ids: ['fedk', 'fedp'], cat: 'Economics', res: 'Dec 16', d: 22, rel: 'eq' },
+  { n: 'US recession in 2027', ids: ['rec'], cat: 'Economics', res: 'Dec ’27', d: 402, rel: 'macro' },
+  { n: 'Bitcoin above $150k, Dec 31', ids: ['btc'], cat: 'Crypto', res: 'Dec 31', d: 37, rel: 'unk' },
+  { n: 'Shutdown before Feb 1', ids: ['shut'], cat: 'Politics', res: 'Feb 1', d: 69 },
+  { n: 'Nov CPI above 3.0%', ids: ['cpi'], cat: 'Economics', res: 'Dec 10', d: 16, rel: 'macro' },
+  { n: 'ETH ETF inflows > $1B (Nov)', ids: ['eth'], cat: 'Crypto', res: 'Dec 2', d: 8, rel: 'unk' },
+  { n: 'Celtics win 2027 Finals', ids: ['cel'], cat: 'Sports', res: 'Jun ’27', d: 205 },
+  { n: 'Chiefs win Super Bowl LXI', ids: ['chf'], cat: 'Sports', res: 'Feb 14', d: 82 },
+];
+const byId = Object.fromEntries(POS.map((p) => [p.id, p]));
+EV.forEach((e) => { const ps = e.ids.map((i) => byId[i]); e.cost = ps.reduce((a, p) => a + p.cost, 0); e.win = ps.reduce((a, p) => a + p.ifWin, 0); e.side = ps[0].side; e.plats = [...new Set(ps.map((p) => p.p))]; });
+const TOT = 27266, SC = 32;
+document.getElementById('concRows').innerHTML = EV.map((e) => { const pct = e.cost / TOT * 100; return `<div class="conc"><span class="nm">${e.plats.map(platBadge).join('')}<span>${e.n}</span></span><div class="cbar"><i class="${pct > 15 ? 'over' : ''}" style="width:${pct / SC * 100}%"></i><span class="lim" style="left:${15 / SC * 100}%"></span></div><span class="r">${fmt(e.cost)}</span><span class="r t3">${pct.toFixed(1)}%</span></div>`; }).join('');
+
+(() => {
+  const W = 480, H = 220, P = { l: 48, r: 10, t: 10, b: 28 }; let c = 0; const pts = EV.map((e) => (c += e.cost));
+  const bw = (W - P.l - P.r) / EV.length, x = (i) => P.l + i * bw, y = (v) => P.t + v / 30000 * (H - P.t - P.b);
+  let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="overflow:visible"><g class="axis">`;
+  [0, 10000, 20000, 30000].forEach((t) => s += `<line class="grid-l" x1="${P.l}" x2="${W - P.r}" y1="${y(t)}" y2="${y(t)}" stroke-dasharray="2 4"/><text x="${P.l - 8}" y="${y(t) + 4}" text-anchor="end">${t ? '−' + kfmt(t) : '$0'}</text>`);
+  EV.forEach((e, i) => s += `<text x="${x(i) + bw / 2}" y="${H - 8}" text-anchor="middle">${i + 1}</text>`);
+  s += '</g>';
+  EV.forEach((e, i) => { const prev = i ? pts[i - 1] : 0, hi = i < 3;
+    s += `<rect x="${x(i) + 3}" y="${y(0)}" width="${bw - 6}" height="${y(prev) - y(0)}" rx="3" style="fill:var(--color-loss-fg)" opacity=".14"/>`;
+    s += `<rect x="${x(i) + 3}" y="${y(prev)}" width="${bw - 6}" height="${y(pts[i]) - y(prev)}" rx="3" style="fill:var(--color-loss-fg)" opacity="${hi ? .9 : .45}"/>`; });
+  s += `<text class="lbl" x="${x(2) + bw / 2}" y="${y(pts[2]) + 16}" text-anchor="middle" style="fill:var(--color-loss-fg)">−$16.1k</text><text class="lbl" x="${x(8) + bw / 2 - 4}" y="${y(pts[8]) + 16}" text-anchor="middle" style="fill:var(--color-loss-fg)">−$27.3k</text>`;
+  document.getElementById('ladderChart').innerHTML = s + '</svg>';
+})();
+
+const relChip = { eq: '<span class="chip accent">2 contracts</span>', macro: '<span class="chip info">Related</span>', unk: '<span class="chip warn">? Unknown link</span>' };
+document.getElementById('payoffTable').innerHTML = `<div class="po-row h"><span>Event · your side</span><span>Resolves</span><span>If it resolves for you</span><span>If it resolves against you</span><span class="r">Share</span></div>` +
+  EV.map((e) => `<div class="po-row"><div class="mk">${e.plats.map(platBadge).join('')}<div><b>${e.n}</b><span style="display:flex;gap:var(--space-1);margin-top:var(--space-1)"><span class="chip ${e.side === 'YES' ? 'yes' : 'no'}">${e.side}</span>${relChip[e.rel] || ''}</span></div></div>
+    <span>${e.res}<br><small class="t3">in ${e.d} days</small></span>
+    <div class="po"><div class="bar"><i style="width:${e.win / 8000 * 100}%;background:var(--color-gain-fg)"></i></div><span class="gain">${sfmt(e.win)}</span></div>
+    <div class="po"><div class="bar"><i style="width:${e.cost / 8000 * 100}%;background:var(--color-loss-fg)"></i></div><span class="loss">${sfmt(-e.cost)}</span></div>
+    <span class="r">${(e.cost / TOT * 100).toFixed(1)}%</span></div>`).join('') +
+  `<div class="po-row t"><span>All events</span><span></span><span class="gain r">+$25,934 <small class="t3">best case</small></span><span class="loss r">−$27,266 <small class="t3">worst case*</small></span><span class="r">100%</span></div>
+   <div class="foot"><span>* Assumes every event can go against you at once. Some pairs may not be independent; 1 relationship is unclassified.</span></div>`;
+
+(() => {
+  const W = 560, H = 200, L = 16, R = 16, days = 90, base = 150, x = (d) => L + d / days * (W - L - R);
+  let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="overflow:visible"><g class="axis">`;
+  [['Nov 24', 0], ['Dec 1', 7], ['Dec 15', 21], ['Jan 1', 38], ['Jan 15', 52], ['Feb 1', 69], ['Feb 15', 83]].forEach(([t, d]) => s += `<line class="grid-l" x1="${x(d)}" x2="${x(d)}" y1="24" y2="${base}" stroke-dasharray="2 4"/><text x="${x(d)}" y="${base + 20}" text-anchor="middle">${t}</text>`);
+  s += `</g><rect x="${x(16)}" y="24" width="${x(22) - x(16)}" height="${base - 24}" style="fill:var(--color-warn-fg)" opacity=".08"/><line x1="${L}" x2="${W - R}" y1="${base}" y2="${base}" style="stroke:var(--color-border-strong)"/>`;
+  let k = 0;
+  EV.filter((e) => e.d <= days).sort((a, b) => a.d - b.d).forEach((e) => { const r = Math.sqrt(e.cost) / 3.3, cy = base - r - 3, ly = (k++ % 2) ? 40 : 58;
+    s += `<line x1="${x(e.d)}" x2="${x(e.d)}" y1="${ly + 5}" y2="${cy - r}" style="stroke:var(--color-border-strong)"/><circle cx="${x(e.d)}" cy="${cy}" r="${r}" style="fill:${CAT_COLORS[e.cat]};stroke:var(--color-bg-surface)" stroke-width="2" opacity=".9"/><text class="lbl-sm" x="${x(e.d)}" y="${ly}" text-anchor="middle">${kfmt(e.cost)}</text>`; });
+  s += `<line x1="${x(0)}" x2="${x(0)}" y1="14" y2="${base}" style="stroke:var(--color-accent-fg)" stroke-width="1.5"/><text class="lbl" x="${x(0) + 5}" y="16" style="fill:var(--color-accent-fg)">TODAY</text>`;
+  document.getElementById('calStrip').innerHTML = s + '</svg>';
+})();
+</script>
+</body></html>

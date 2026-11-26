@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Scevia — Scenario Lab (v2 concept)</title>
+<link rel="stylesheet" href="assets/components.css">
+<style>
+  .lab { display: grid; grid-template-columns: 400px minmax(0, 1fr); gap: var(--space-4); align-items: start; }
+  .adj { padding: var(--space-5) var(--space-6); border-top: 1px solid var(--color-border-subtle); }
+  .adj-h { display: flex; gap: var(--space-3); align-items: flex-start; }
+  .adj-h b { display: block; font-weight: var(--font-weight-medium); line-height: var(--line-height-snug); }
+  .adj-h small { font-size: var(--font-size-xs); color: var(--color-text-tertiary); }
+  .adj-h .x { margin-left: auto; color: var(--color-text-tertiary); width: 22px; height: 22px; }
+  .adj-h .x svg { width: 14px; height: 14px; }
+  .qty { display: flex; justify-content: space-between; align-items: baseline; margin: var(--space-4) 0 var(--space-1); }
+  .qty .to { font-size: var(--font-size-xl); font-weight: var(--font-weight-semibold); }
+  .qty .from { text-decoration: line-through; color: var(--color-text-tertiary); margin-right: var(--space-2); font-size: var(--font-size-sm); }
+  .act { font-size: var(--font-size-caption); font-weight: var(--font-weight-semibold); letter-spacing: var(--tracking-caps); text-transform: uppercase; padding: 2px var(--space-2); border-radius: var(--radius-sm); }
+  .act.sell { color: var(--color-loss-fg); background: var(--color-loss-bg); }
+  .act.buy { color: var(--color-gain-fg); background: var(--color-gain-bg); }
+  .act.exit, .act.none { color: var(--color-text-secondary); background: var(--color-bg-raised); }
+  .scale { display: flex; justify-content: space-between; font-size: var(--font-size-caption); color: var(--color-text-tertiary); }
+  .f2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin-top: var(--space-3); }
+  .sumbar { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); padding: var(--space-4) var(--space-6); border-top: 1px solid var(--color-border-subtle); background: var(--color-bg-raised); border-radius: 0 0 var(--radius-xl) var(--radius-xl); }
+  .sumbar .l { font-size: var(--font-size-xs); color: var(--color-text-tertiary); }
+  .sumbar .v { font-size: var(--font-size-lg); font-weight: var(--font-weight-semibold); }
+  .ba-row { display: grid; grid-template-columns: 1.6fr 1fr 1fr 0.9fr; align-items: center; padding: var(--space-3) var(--space-6); border-top: 1px solid var(--color-border-subtle); font-size: var(--font-size-sm); }
+  .ba-row.h { font-size: var(--font-size-xs); color: var(--color-text-tertiary); padding-top: var(--space-2); padding-bottom: var(--space-2); }
+  .ba-row > span:not(:first-child) { text-align: right; }
+  .ba-row .after { font-weight: var(--font-weight-semibold); }
+  .matrix { display: grid; grid-template-columns: 96px 1fr 1fr; gap: var(--space-2); }
+  .mh { font-size: var(--font-size-xs); color: var(--color-text-tertiary); display: flex; align-items: center; justify-content: center; text-align: center; }
+  .mh.row { justify-content: flex-start; text-align: left; }
+  .mh b { color: var(--color-text-primary); font-weight: var(--font-weight-medium); }
+  .cell { position: relative; border-radius: var(--radius-lg); padding: var(--space-4); border: 1px solid var(--color-border-subtle); }
+  .cell.pos { background: var(--color-gain-bg); }
+  .cell.neg { background: var(--color-loss-bg); }
+  .cell .v { font-size: var(--font-size-2xl); font-weight: var(--font-weight-semibold); letter-spacing: var(--tracking-tight); }
+  .cell .was { font-size: var(--font-size-xs); color: var(--color-text-secondary); margin-top: 2px; }
+  .cell .delta { position: absolute; top: var(--space-3); right: var(--space-3); }
+  .delta.good { color: var(--color-gain-fg); background: var(--color-gain-bg); border: 1px solid var(--color-border-subtle); }
+  .delta.bad { color: var(--color-loss-fg); background: var(--color-loss-bg); border: 1px solid var(--color-border-subtle); }
+  .scn a { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); font-size: var(--font-size-sm); color: var(--color-text-secondary); }
+  .scn a:hover { background: var(--color-bg-hover); }
+  .scn a.on { background: var(--color-accent-bg); color: var(--color-text-primary); box-shadow: inset 0 0 0 1px var(--color-accent-solid); }
+  .scn i { width: 8px; height: 8px; border-radius: var(--radius-pill); flex: none; }
+  .scn small { margin-left: auto; font-size: var(--font-size-caption); color: var(--color-text-tertiary); }
+  .assume { display: grid; grid-template-columns: repeat(4, 1fr); }
+  .assume > div { padding: var(--space-4) var(--space-6); border-left: 1px solid var(--color-border-subtle); }
+  .assume > div:first-child { border-left: 0; }
+  .assume .l { font-size: var(--font-size-xs); color: var(--color-text-tertiary); }
+  .assume .v { font-weight: var(--font-weight-medium); margin-top: var(--space-1); display: flex; gap: var(--space-2); align-items: center; }
+  .cmp .hl { background: var(--color-accent-bg); }
+</style></head>
+<body>
+<div id="topbar"></div>
+<div class="shell">
+  <aside class="rail">
+    <div><h6 class="caps">Scenarios</h6>
+      <div class="scn">
+        <a href="#"><i style="background:var(--color-text-tertiary)"></i>Current portfolio<small>base</small></a>
+        <a href="#" class="on"><i style="background:var(--color-accent-solid)"></i>Trim crypto, add Fed<small>draft</small></a>
+        <a href="#"><i style="background:var(--color-data-1)"></i>Exit sports longshots<small>Nov 21</small></a>
+        <a href="#"><i style="background:var(--color-data-3)"></i>Hedge the shutdown<small>Nov 18</small></a>
+        <a href="#" class="t3">+ New scenario</a>
+      </div></div>
+    <div><h6 class="caps">In this scenario</h6>
+      <ol>
+        <li><a href="#adjust" class="on" data-i="sliders">Adjustments <span class="count">3</span></a></li>
+        <li><a href="#ba" data-i="compare">Before / after</a></li>
+        <li><a href="#matrix" data-i="grid">Outcome matrix</a></li>
+        <li><a href="#payoff" data-i="bars">Payoff by event</a></li>
+        <li><a href="#cmp" data-i="table">Compare scenarios</a></li>
+        <li><a href="#assume" data-i="info">Assumptions</a></li>
+      </ol></div>
+  </aside>
+
+  <main>
+    <section class="page-head">
+      <div><div class="caps"><span class="accent">Scenario Lab</span> · Draft · edited just now</div><h1>Trim crypto, add to Fed</h1></div>
+      <div class="actions"><button class="btn btn-ghost" data-i="reset" onclick="resetAll()">Reset</button><button class="btn" data-i="copy">Duplicate</button><button class="btn btn-primary" data-i="save">Save scenario</button></div>
+    </section>
+    <div class="callout info" data-i="shield"><span><b>Hypothetical only.</b> No orders are placed. Prices are what <i>you</i> assume you could trade at, not guaranteed fills. Outcomes are shown without probabilities.</span></div>
+
+    <div class="lab">
+      <section class="card anchor" id="adjust">
+        <div class="card-h" style="padding-bottom:var(--space-4)"><div><h3>Adjustments</h3><p>Drag to resize a position</p></div><button class="btn btn-sm" data-i="plus">Add position</button></div>
+        <div id="adjList"></div>
+        <div class="sumbar"><div><div class="l">Net cash impact</div><div class="v" id="cashImpact"></div></div><div><div class="l">Locked-in realized P&amp;L</div><div class="v" id="realized"></div></div></div>
+      </section>
+
+      <div style="display:flex;flex-direction:column;gap:var(--space-4);min-width:0">
+        <section class="card anchor" id="ba" style="overflow:hidden">
+          <div class="card-h" style="padding-bottom:var(--space-4)"><div><h3>Before / after</h3><p>Whole portfolio at resolution · fees excluded</p></div><div class="legend"><span><i style="background:var(--color-text-tertiary)"></i>Current</span><span><i style="background:var(--color-accent-solid)"></i>This scenario</span></div></div>
+          <div id="baRows"></div>
+        </section>
+        <section class="card anchor" id="matrix">
+          <div class="card-h"><div><h3>Outcome matrix · Fed × Bitcoin</h3><p>P&amp;L of the affected positions in each combination</p></div><span class="chip warn">? Unmodeled dependency</span></div>
+          <div class="card-b"><div class="matrix" id="mx"></div>
+            <div class="callout info" style="margin-top:var(--space-4)" data-i="spark"><span id="mxInsight"></span></div></div>
+        </section>
+      </div>
+    </div>
+
+    <div class="grid g-2">
+      <section class="card anchor" id="payoff">
+        <div class="card-h"><div><h3>Payoff by event</h3><p>How each outcome moves · ○ current → ● scenario</p></div></div>
+        <div class="card-b chart" id="dumbbell"></div>
+      </section>
+      <section class="card anchor" id="cmp" style="overflow:hidden">
+        <div class="card-h" style="padding-bottom:var(--space-3)"><div><h3>Compare scenarios</h3><p>Side by side with saved drafts</p></div><button class="btn btn-sm" data-i="plus">Add column</button></div>
+        <table class="dt cmp"><thead><tr><th></th><th class="r">Current</th><th class="r hl accent">This draft</th><th class="r">Exit longshots</th></tr></thead><tbody id="cmpRows"></tbody></table>
+      </section>
+    </div>
+
+    <section class="card assume anchor" id="assume">
+      <div><div class="l">Fill prices</div><div class="v">Your hypothetical prices</div></div>
+      <div><div class="l">Trading fees</div><div class="v">Excluded <a class="t3" href="#">include</a></div></div>
+      <div><div class="l">Slippage / depth</div><div class="v">Not modeled</div></div>
+      <div><div class="l">Event relationships</div><div class="v">Fed ↔ BTC independent <span class="chip warn">change</span></div></div>
+    </section>
+
+    <div class="footer-note"><span>Scenario results show what happens under the outcomes and prices you choose. They aren’t forecasts or recommendations.</span><span>Sample portfolio · fictional data</span></div>
+  </main>
+</div>
+<script src="assets/app.js"></script>
+<script src="assets/data.js"></script>
+<script>
+shell('Scenario Lab'); spy();
+const byId = Object.fromEntries(POS.map((p) => [p.id, p]));
+const DEF = [{ id: 'btc', to: 4000, px: 0.29, max: 12000 }, { id: 'fedk', to: 6200, px: 0.65, max: 10000 }, { id: 'chf', to: 0, px: 0.12, max: 6000 }];
+let ADJ = DEF.map((a) => ({ ...a }));
+const fresh = () => Object.fromEntries(POS.map((p) => [p.id, { sh: p.sh, cost: p.cost, realized: 0 }]));
+function apply() {
+  const st = fresh(); let cash = 0;
+  ADJ.forEach((a) => { const p = byId[a.id], s = st[a.id];
+    if (a.to < p.sh) { const sold = p.sh - a.to; s.realized = sold * (a.px - p.avg); s.sh = a.to; s.cost = a.to * p.avg; cash += sold * a.px; }
+    else if (a.to > p.sh) { const add = a.to - p.sh; s.sh = a.to; s.cost = p.cost + add * a.px; cash -= add * a.px; } });
+  return { st, cash };
+}
+const base = { st: fresh(), cash: 0 };
+const evP = (S, ids, win) => ids.reduce((t, i) => { const s = S.st[i]; return t + s.realized + (win ? s.sh - s.cost : -s.cost); }, 0);
+function metrics(S) {
+  const v = Object.values(S.st), committed = v.reduce((a, s) => a + s.cost, 0), real = v.reduce((a, s) => a + s.realized, 0), sh = v.reduce((a, s) => a + s.sh, 0);
+  return { committed, cash: 6345.20 + S.cash, worst: -committed + real, best: sh - committed + real, fedNo: evP(S, ['fedk', 'fedp'], false), largest: Math.max(S.st.hot.cost, S.st.fedk.cost + S.st.fedp.cost), real };
+}
+const B = metrics(base);
+const dchip = (d, up) => Math.abs(d) < .5 ? '<span class="delta flat">—</span>' : `<span class="delta ${(up ? d > 0 : d < 0) ? 'good' : 'bad'}">${sfmt(d)}</span>`;
+
+function renderAdj() {
+  document.getElementById('adjList').innerHTML = ADJ.map((a, k) => { const p = byId[a.id], d = a.to - p.sh;
+    const act = d < 0 ? (a.to === 0 ? ['Exit', 'exit'] : ['Sell ' + (-d).toLocaleString(), 'sell']) : d > 0 ? ['Buy ' + d.toLocaleString(), 'buy'] : ['No change', 'none'];
+    return `<div class="adj"><div class="adj-h">${platBadge(p.p)}<div><b>${p.m}</b><small><span class="chip ${p.side === 'YES' ? 'yes' : 'no'}">${p.side}</span> avg ${p.avg.toFixed(2)} · mark ${p.mark.toFixed(2)} · ${p.res}</small></div><a class="x icon-btn" aria-label="Remove">${icon('x')}</a></div>
+      <div class="qty"><span class="act ${act[1]}">${act[0]}</span><span>${d ? `<span class="from">${p.sh.toLocaleString()}</span>` : ''}<span class="to">${a.to.toLocaleString()}</span> <span class="t3">shares</span></span></div>
+      <input class="slider" type="range" min="0" max="${a.max}" step="100" value="${a.to}" aria-label="Shares" oninput="ADJ[${k}].to=+this.value;render()">
+      <div class="scale"><span>0</span><span>current ${p.sh.toLocaleString()}</span><span>${a.max.toLocaleString()}</span></div>
+      <div class="f2"><div class="field"><label>Hypothetical price</label><input value="$${a.px.toFixed(2)}" onchange="ADJ[${k}].px=parseFloat(this.value.replace('$',''))||ADJ[${k}].px;render()"></div>
+      <div class="field"><label>${d < 0 ? 'Proceeds' : d > 0 ? 'Cost' : 'Cash impact'}</label><div class="v">${d ? (d < 0 ? '+' : '−') + fmt(Math.abs(d) * a.px) : '$0'}</div></div></div></div>`; }).join('');
+}
+function render() {
+  renderAdj();
+  const S = apply(), A = metrics(S);
+  document.getElementById('cashImpact').innerHTML = `<span class="${S.cash >= 0 ? 'gain' : 'loss'}">${sfmt(S.cash, 2)}</span>`;
+  document.getElementById('realized').innerHTML = `<span class="${A.real >= 0 ? 'gain' : 'loss'}">${sfmt(A.real, 2)}</span>`;
+  const rows = [['Capital committed', B.committed, A.committed, false], ['Cash available', B.cash, A.cash, true], ['Worst case · everything against you*', B.worst, A.worst, true], ['Best case · everything for you', B.best, A.best, true], ['If the Fed does not cut', B.fedNo, A.fedNo, true], ['Largest single-event loss', -B.largest, -A.largest, true]];
+  document.getElementById('baRows').innerHTML = `<div class="ba-row h"><span>Metric</span><span>Current</span><span>Scenario</span><span>Change</span></div>` + rows.map(([l, b, a, up]) => `<div class="ba-row"><span>${l}</span><span class="t3">${fmt(b)}</span><span class="after">${fmt(a)}</span><span>${dchip(a - b, up)}</span></div>`).join('');
+  const cell = (S, f, b) => evP(S, ['fedk', 'fedp'], f) + evP(S, ['btc'], b);
+  const V = [[true, true], [true, false], [false, true], [false, false]].map(([f, b]) => ({ before: cell(base, f, b), after: cell(S, f, b) }));
+  const tile = (v) => `<div class="cell ${v.after >= 0 ? 'pos' : 'neg'}">${dchip(v.after - v.before, true)}<div class="caps">Scenario</div><div class="v ${v.after >= 0 ? 'gain' : 'loss'}">${sfmt(v.after)}</div><div class="was">was ${sfmt(v.before)}</div></div>`;
+  document.getElementById('mx').innerHTML = `<div></div><div class="mh"><span><b>Bitcoin &gt; $150k</b> · YES</span></div><div class="mh"><span><b>Bitcoin &gt; $150k</b> · NO</span></div>
+    <div class="mh row"><span><b>Fed cuts</b><br>YES</span></div>${tile(V[0])}${tile(V[1])}<div class="mh row"><span><b>Fed cuts</b><br>NO</span></div>${tile(V[2])}${tile(V[3])}`;
+  document.getElementById('mxInsight').innerHTML = `This draft improves the <b>“Fed cuts, Bitcoin misses”</b> case by <b class="gain">${sfmt(V[1].after - V[1].before)}</b>, but the <b>double miss</b> changes by <b class="${V[3].after - V[3].before >= 0 ? 'gain' : 'loss'}">${sfmt(V[3].after - V[3].before)}</b> to <b class="loss">${sfmt(V[3].after)}</b>. You’ve moved crypto risk into one Fed decision.`;
+  // dumbbell
+  const EVS = [['Fed (Dec FOMC)', ['fedk', 'fedp']], ['Bitcoin > $150k', ['btc']], ['Chiefs Super Bowl', ['chf']]], mn = -7000, mxv = 7000, W = 600;
+  const X = (v) => 220 + (v - mn) / (mxv - mn) * (W - 240), rowH = 76, H = EVS.length * rowH + 30;
+  let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="overflow:visible"><g class="axis">`;
+  [-6000, -3000, 0, 3000, 6000].forEach((t) => s += `<line class="${t ? 'grid-l' : 'zero'}" x1="${X(t)}" x2="${X(t)}" y1="4" y2="${H - 26}" ${t ? 'stroke-dasharray="2 4"' : ''}/><text x="${X(t)}" y="${H - 8}" text-anchor="middle">${t ? (t > 0 ? '+' : '') + kfmt(t) : '$0'}</text>`);
+  s += '</g>';
+  EVS.forEach(([name, ids], i) => { const y0 = 20 + i * rowH;
+    s += `<text class="name" x="0" y="${y0 + 18}">${name}</text>`;
+    [[true, 'if YES', y0], [false, 'if NO', y0 + 28]].forEach(([w, lab, yy]) => { const b = evP(base, ids, w), a = evP(S, ids, w);
+      s += `<text class="ax" x="${X(mn) - 14}" y="${yy + 4}" text-anchor="end">${lab}</text><line x1="${X(b)}" x2="${X(a)}" y1="${yy}" y2="${yy}" style="stroke:var(--color-accent-solid)" stroke-width="3" opacity=".55"/>`;
+      s += `<circle cx="${X(b)}" cy="${yy}" r="5" style="fill:var(--color-bg-surface);stroke:var(--color-text-secondary)" stroke-width="1.6"/><circle cx="${X(a)}" cy="${yy}" r="6" style="fill:var(--color-accent-fg)"/>`;
+      s += `<text class="lbl" x="${Math.max(X(a), X(b)) + 11}" y="${yy + 4}" text-anchor="start" style="fill:${a >= 0 ? 'var(--color-gain-fg)' : 'var(--color-loss-fg)'}">${sfmt(a)}</text>`; }); });
+  document.getElementById('dumbbell').innerHTML = s + '</svg>';
+  const C = { committed: 25221, cash: 8515.20, worst: -25096, best: 17604, fedNo: B.fedNo, largest: 7920 };
+  document.getElementById('cmpRows').innerHTML = [['Capital committed', 'committed'], ['Cash available', 'cash'], ['Worst case*', 'worst'], ['Best case', 'best'], ['If the Fed does not cut', 'fedNo'], ['Largest event loss', 'largest']].map(([l, k]) => { const sg = k === 'largest' ? -1 : 1; return `<tr><td>${l}</td><td class="r t3">${fmt(sg * B[k])}</td><td class="r hl" style="font-weight:var(--font-weight-semibold)">${fmt(sg * A[k])}</td><td class="r">${fmt(sg * C[k])}</td></tr>`; }).join('')
+    + `<tr><td colspan="4" class="t3" style="font-size:var(--font-size-xs)">* Assumes all events can go against you at once; dependencies not modeled.</td></tr>`;
+}
+function resetAll() { ADJ = DEF.map((a) => ({ ...a })); render(); }
+render();
+</script>
+</body></html>

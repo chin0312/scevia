@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Scevia — v2 design direction</title>
+<link rel="stylesheet" href="assets/components.css">
+<style>
+  .wrap { max-width: 1240px; margin: 0 auto; padding: var(--space-16) var(--space-10); display: flex; flex-direction: column; gap: var(--space-10); }
+  .hero { display: grid; grid-template-columns: 1.1fr 1fr; gap: var(--space-12); align-items: end; }
+  .hero h1 { font-size: var(--font-size-hero); font-weight: var(--font-weight-semibold); letter-spacing: var(--tracking-tight); line-height: var(--line-height-tight); margin-top: var(--space-3); }
+  .hero h1 span { color: var(--color-accent-fg); }
+  .ref { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-4); }
+  .ref .card-b b { display: block; font-size: var(--font-size-lg); margin-bottom: var(--space-2); }
+  .ref .card-b p { font-size: var(--font-size-sm); color: var(--color-text-secondary); }
+  .sw { display: grid; grid-template-columns: repeat(8, 1fr); gap: var(--space-2); }
+  .sw div { height: 84px; border-radius: var(--radius-lg); padding: var(--space-3); display: flex; flex-direction: column; justify-content: flex-end; font-size: var(--font-size-caption); border: 1px solid var(--color-border-subtle); }
+  .sw b { font-size: var(--font-size-xs); }
+  .files { font-family: var(--font-family-mono); font-size: var(--font-size-sm); color: var(--color-text-secondary); line-height: var(--line-height-normal); white-space: pre; }
+  .shots { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); }
+  .shots a { display: block; border-radius: var(--radius-xl); overflow: hidden; border: 1px solid var(--color-border-subtle); background: var(--color-bg-surface); }
+  .shots .th { height: 300px; background-size: cover; background-position: top left; border-bottom: 1px solid var(--color-border-subtle); }
+  .shots .cap { display: flex; justify-content: space-between; padding: var(--space-4) var(--space-5); }
+  .shots .cap b { font-weight: var(--font-weight-semibold); }
+</style></head>
+<body><div class="wrap">
+  <div class="hero">
+    <div><div class="caps">Scevia · design system v2 · Nov 24 2026</div><h1>Dark institutional,<br><span>one accent.</span></h1></div>
+    <p class="summary">Rebuilt from the references you named. getquin’s surfaces and big figures, Delta’s pills and metric tiles, and Portfolio Visualizer’s section rail, written summaries, and comparisons. Every screen is built only from tokens and passes the design lint.</p>
+  </div>
+
+  <div class="ref">
+    <div class="card"><div class="card-b"><span class="caps">getquin</span><b>Surfaces &amp; figures</b><p>Near-black canvas, grey cards with hairlines, white primary button, balance with small decimals, period selector inside the chart card, tabs inside cards.</p></div></div>
+    <div class="card"><div class="card-b"><span class="caps">Delta</span><b>Pills &amp; tiles</b><p>Filter pills, a row of large-number metric tiles, vivid but limited data colours, and a violet brand accent kept for selection and Scenario Lab.</p></div></div>
+    <div class="card"><div class="card-b"><span class="caps">Portfolio Visualizer</span><b>Structure &amp; explanation</b><p>Left section rail, a written summary of the results, Return/Risk highlight tiles, side-by-side comparison tables, and export actions.</p></div></div>
+  </div>
+
+  <div class="sw">
+    <div style="background:var(--color-bg-canvas)"><b>bg-canvas</b></div>
+    <div style="background:var(--color-bg-surface)"><b>bg-surface</b></div>
+    <div style="background:var(--color-bg-raised)"><b>bg-raised</b></div>
+    <div style="background:var(--color-action-primary-bg);color:var(--color-action-primary-fg)"><b>action-primary</b></div>
+    <div style="background:var(--color-accent-solid);color:var(--color-accent-on-solid)"><b>accent</b></div>
+    <div style="background:var(--color-gain-bg);color:var(--color-gain-fg)"><b>gain</b></div>
+    <div style="background:var(--color-loss-bg);color:var(--color-loss-fg)"><b>loss</b></div>
+    <div style="background:linear-gradient(90deg,var(--color-data-1) 0 17%,var(--color-data-2) 17% 34%,var(--color-data-3) 34% 50%,var(--color-data-4) 50% 67%,var(--color-data-5) 67% 84%,var(--color-data-6) 84%)"><b>data 1–6</b></div>
+  </div>
+
+  <div class="grid g-2">
+    <div class="card"><div class="card-h"><div><h3>How the system is enforced</h3><p>Not a markdown suggestion</p></div></div><div class="card-b files">AGENTS.md                 hard rules (CLAUDE.md imports it)
+PRODUCT.md / DESIGN.md    context + visual intent (impeccable-ready)
+design-system/
+  tokens/tokens.json      single source of truth (W3C DTCG)
+  tokens/tokens.css       generated · build.mjs --check
+  components.md           inventory + required states
+  lint/design-lint.mjs    fails on raw colours, sizes, fonts,
+                          unknown tokens · --contrast WCAG AA
+  DECISIONS.md            evidence log</div></div>
+    <div class="card"><div class="card-h"><div><h3>Type</h3><p>Geist + Geist Mono · tabular figures</p></div></div><div class="card-b">
+      <div class="hero-fig">$35,003<span class="dec">.20</span><span class="cur">USD</span></div>
+      <p class="t2" style="margin-top:var(--space-3)">Capital committed $27,266 · <span class="mono">0x7a…1c · $0.20–0.40</span></p></div></div>
+  </div>
+
+  <div class="shots">
+    <a href="overview.html"><div class="th" style="background-image:url(renders/01-overview.png)"></div><div class="cap"><b>Overview</b><span class="t3">What do I own, and what changed?</span></div></a>
+    <a href="analytics.html"><div class="th" style="background-image:url(renders/02-analytics.png)"></div><div class="cap"><b>Analytics</b><span class="t3">Where do my results come from?</span></div></a>
+    <a href="risk.html"><div class="th" style="background-image:url(renders/03-risk.png)"></div><div class="cap"><b>Risk</b><span class="t3">What am I exposed to?</span></div></a>
+    <a href="scenario-lab.html"><div class="th" style="background-image:url(renders/04-scenario-lab.png)"></div><div class="cap"><b>Scenario Lab</b><span class="t3">What if I change something? · interactive</span></div></a>
+  </div>
+  <div class="footer-note"><span>Design exploration. All portfolio data is fictional.</span><span>Reference concept for the app in web/</span></div>
+</div></body></html>
