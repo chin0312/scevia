@@ -51,6 +51,8 @@ export function registerMarketEvidence(app: FastifyInstance, db: Database,
       const row = await polymarket.discoverCondition(input.market, signal)
       if (row.support !== 'supported') return { status: 'unsupported_contract' as const, metadata: row }
       metadata = row
+      tradingOpensAt = row.tradingOpensAt ? new Date(row.tradingOpensAt) : null
+      tradingClosesAt = row.tradingClosesAt ? new Date(row.tradingClosesAt) : null
       generation = row.generation ?? null
       mappings = row.outcomes
       market = normalizedRecordSchema.parse({ kind: 'market', externalEventId: row.eventId, externalMarketId: row.conditionId,

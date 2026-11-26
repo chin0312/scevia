@@ -9,7 +9,8 @@ const scope = ({ venue, account }: { venue: string; account: string }) => JSON.s
 
 export function consolidatePerformance(evidence: Evidence[], rates: Rates, assets: string[], currency: string,
   from: string, through: string, mode: FxMode, unsupportedScope = false, financialKnown = (_time: string) => true, preference: FxOptions = {}, financialPeriodKnown = financialKnown,
-  replay?: { cutoffs: string[]; assumedUsdPerUnit?: Partial<Record<'USDC' | 'PUSD', string>> | undefined }) {
+  replay?: { cutoffs: string[]; assumedUsdPerUnit?: Partial<Record<'USDC' | 'PUSD', string>> | undefined;
+    projectAt?: NonNullable<Parameters<typeof analyzePerformance>[7]>; mixedFlowTimes?: Set<string> }) {
   const times = [...new Set(evidence.filter(({ observation }) => ['deposit', 'withdrawal'].includes(observation.type)
     && observation.timestamp > from && observation.timestamp <= through).map(({ observation }) => observation.timestamp))].sort()
   if (times.length * assets.length > 1200) throw new Error('analytics_replay_limit')
@@ -18,7 +19,7 @@ export function consolidatePerformance(evidence: Evidence[], rates: Rates, asset
     const scopes = [...new Map(evidence.filter(({ observation }) => observation.asset === asset)
       .map(({ observation }) => [scope(observation), { venue: observation.venue, account: observation.account }])).values()]
     const data = analyzePerformance(evidence, [...new Set(scopes.map((item) => item.account))], asset, from, through, scopes,
-      [...new Set([...times.flatMap((time) => [before(time), time]), ...(replay?.cutoffs ?? [])])])
+      [...new Set([...times.flatMap((time) => [before(time), time]), ...(replay?.cutoffs ?? [])])], replay?.projectAt)
     return { asset, data, points: new Map([...data.history, ...data.anchors].map((value) => [value.asOf, value])) }
   })
   const at = (time: string) => {
@@ -36,7 +37,7 @@ export function consolidatePerformance(evidence: Evidence[], rates: Rates, asset
     const known = reportAmounts(rates, contributions, currency, time, { ...preference, mode }, replay?.assumedUsdPerUnit)
     const prior = at(before(time)); const after = at(time)
     return { timestamp: time, before: prior, after, contributions, converted: known,
-      valid: contributions.length > 0 && contributions.every((item) => item.valid)
+      valid: !replay?.mixedFlowTimes?.has(time) && contributions.length > 0 && contributions.every((item) => item.valid)
         && prior.components.every((item, index) => item.value === '0'
           || item.reference.rate === after.components[index]?.reference.rate)
         && prior.eligible && after.eligible && known.completeValue !== null }

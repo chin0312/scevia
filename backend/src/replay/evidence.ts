@@ -8,6 +8,28 @@ import { ReplayError, type ReplayConfig } from './contracts.js'
 type Read = Pick<Database, 'select' | 'execute'>
 const quotes = sharedMarketObservations
 
+export function resolutionCutoffs(config: ReplayConfig, catalog: ReplayEvidence['catalog'], lifecycle: Map<string, ReplayLifecycle[]>) {
+  const cutoffs = new Set<string>()
+  const marketsByInstrument = new Map(catalog.map((row) => [row.instrumentId, row.marketId]))
+  for (const position of config.positions) {
+    const journal = lifecycle.get(marketsByInstrument.get(position.instrumentId) ?? '') ?? []
+    for (const row of journal) {
+      const retrieved = row.retrievedAt.toISOString()
+      const terminal = ['resolved', 'settled', 'disputed', 'invalidated', 'voided'].includes(row.lifecycle)
+      if (!row.resolution && !terminal && !row.conflict) continue
+      const effective = row.resolution?.settlementTime ?? row.resolution?.knownAt ?? retrieved
+      const disputed = row.conflict || ['disputed', 'invalidated', 'voided'].includes(row.lifecycle)
+      const at = disputed || (config.mode === 'knowledge' && retrieved > effective) ? retrieved : effective
+      cutoffs.add(at)
+      if (row.resolution && position.redemption?.mode === 'delay') {
+        cutoffs.add(new Date(Date.parse(at) + position.redemption.seconds * 1000).toISOString())
+      }
+    }
+    if (position.redemption?.mode === 'at') cutoffs.add(position.redemption.at)
+  }
+  return [...cutoffs].filter((at) => at >= config.from && at <= config.through)
+}
+
 export async function replayEvidence(db: Read, config: ReplayConfig, evidenceAt: string) {
   const ids = [...new Set(config.positions.map((row) => row.instrumentId))]
   const catalog = ids.length ? await db.select({
@@ -25,12 +47,7 @@ export async function replayEvidence(db: Read, config: ReplayConfig, evidenceAt:
   if ([...lifecycle.values()].reduce((sum, rows) => sum + rows.length, 0) > 5000) throw new ReplayError('replay_lifecycle_work_limit')
   if (!ids.length) return { catalog, lifecycle, quotes: [] as Array<typeof quotes.$inferSelect> }
 
-  const transitionTimes = [...lifecycle.values()].flatMap((rows) => rows.flatMap((row) => {
-    if (!row.resolution && !['resolved', 'settled', 'disputed'].includes(row.lifecycle)) return []
-    const effective = row.resolution?.settlementTime ?? row.resolution?.knownAt ?? row.retrievedAt.toISOString()
-    const at = config.mode === 'knowledge' ? [effective, row.retrievedAt.toISOString()].sort().at(-1)! : effective
-    return at > config.from && at <= config.through ? [at] : []
-  }))
+  const transitionTimes = resolutionCutoffs(config, catalog, lifecycle)
   const clocks = [...new Set([config.from, config.through, ...transitionTimes, ...fxAnchors(config.cashFlows.map((row) => row.at)), ...config.positions.flatMap(({ entry, exits }) => [entry.at, ...exits.map((exit) => exit.at)])])]
   if (clocks.length > 600) throw new ReplayError('replay_reference_boundary_limit')
   const instrumentList = sql.join(ids.map((id) => sql`${id}`), sql`, `)

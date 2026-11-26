@@ -19,7 +19,19 @@ const fee = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('unknown') }).strict(),
   z.object({ mode: z.literal('provider') }).strict(),
 ])
-const operation = z.object({ at: time, execution, fee })
+const operation = z.object({ at: z.union([z.iso.datetime({ offset: true }), z.iso.date()]), execution, fee,
+  timing: z.enum(['exact_utc', 'hypothetical_utc_day_end']).optional() })
+const executionTime = <T extends z.infer<typeof operation>>(row: T) => {
+  const calendar = row.at.length === 10
+  return { ...row, at: new Date(calendar ? row.at + 'T23:59:59.999Z' : row.at).toISOString(),
+    timing: calendar ? 'hypothetical_utc_day_end' as const : row.timing ?? 'exact_utc' as const }
+}
+const redemption = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('immediate') }).strict(),
+  z.object({ mode: z.literal('at'), at: time }).strict(),
+  z.object({ mode: z.literal('delay'), seconds: z.number().int().min(1).max(366 * 86400) }).strict(),
+  z.object({ mode: z.literal('hold') }).strict(),
+])
 export const replayConfig = z.object({
   version: z.literal(1),
   from: time, through: time,
@@ -35,8 +47,9 @@ export const replayConfig = z.object({
       z.object({ mode: z.literal('quantity'), value: positive }).strict(),
       z.object({ mode: z.literal('amount'), value: positive }).strict(),
       z.object({ mode: z.literal('weight'), value: price.refine((value) => new Decimal(value).gt(0)) }).strict(),
-    ]) }).strict(),
-    exits: z.array(operation.extend({ quantity: positive }).strict()).max(8).default([]),
+    ]) }).strict().transform(executionTime),
+    exits: z.array(operation.extend({ quantity: positive }).strict().transform(executionTime)).max(8).default([]),
+    redemption: redemption.optional(),
     remainder: z.enum(['hold', 'settle']).default('hold'),
     allowUnverifiedWindow: z.boolean().default(false),
   }).strict()).max(20),

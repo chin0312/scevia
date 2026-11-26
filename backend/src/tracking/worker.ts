@@ -79,6 +79,8 @@ export class TrackingWorker {
       } else if (this.input.polymarket) {
         const result = await this.input.polymarket.trackingSnapshot(job.native, taskSignal, job.asset === 'USDC' ? this.input.ctf : undefined)
         lifecycle = result.lifecycle
+        tradingOpensAt = result.tradingOpensAt ? new Date(result.tradingOpensAt) : null
+        tradingClosesAt = result.tradingClosesAt ? new Date(result.tradingClosesAt) : null
         quotes = result.quotes
         resolution = 'resolution' in result ? result.resolution ?? null : null
         metadataAt = new Date(resolution?.knownAt ?? metadataAt)

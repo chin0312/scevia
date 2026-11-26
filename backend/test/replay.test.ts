@@ -58,6 +58,101 @@ describe('historical hypothetical replay', () => {
     expect(unsupported.positions[0]?.status).toBe('unsupported_payout')
   })
 
+  it('separates delayed cash, pending and zero payouts, and reviews acquired disputes retrospectively', () => {
+    const known = { ...journal('ALPHA', 1, 5), retrievedAt: new Date(at(1)) }
+    const resolution = { ...journal('ALPHA', 1, 5, 'resolved'), retrievedAt: new Date(at(5)), resolution: {
+      knownAt: at(5), settlementTime: at(5), unitPayout: '1' as const, winningInstrument: 'ALPHA:yes', source: 'kalshi_trade_api' as const,
+    } }
+    const data: ReplayEvidence = { catalog: [catalog(first, 'ALPHA'), catalog(second, 'BETA')],
+      lifecycle: new Map([['ALPHA', [known, resolution]], ['BETA', [journal('BETA', 1, 12)]]]),
+      quotes: [mark(first, 2, '0.4'), mark(second, 6, '0.5')] }
+    const firstTrade = { id: 'alpha', bucket: 'usd', instrumentId: first,
+      entry: { ...operation(2, '0.4'), size: { mode: 'quantity', value: '50' } }, remainder: 'settle' }
+    const secondTrade = { id: 'beta', bucket: 'usd', instrumentId: second,
+      entry: { ...operation(6, '0.5'), size: { mode: 'quantity', value: '30' } } }
+    const small = { ...base, buckets: [{ ...base.buckets[0], capital: '30' }] }
+    const delayed = evaluateReplay(config({ ...small, positions: [secondTrade,
+      { ...firstTrade, redemption: { mode: 'delay', seconds: 172800 } },
+    ] }), data, [], at(10))
+    expect(delayed.funding).toMatchObject({ status: 'unfunded', buckets: [{ closingCash: '45',
+      shortfalls: [{ at: at(6), required: '5' }] }] })
+    expect(delayed.history.find((row) => row.asOf === at(5))?.positions).toMatchObject([{ value: '50', quantity: '0' }])
+    expect(delayed.schedule.find((row) => row.type === 'redemption')).toMatchObject({ at: at(7), amount: '50' })
+    const immediate = evaluateReplay(config({ ...small, positions: [firstTrade, secondTrade] }), data, [], at(10))
+    expect(immediate.funding.status).toBe('funded')
+    const pending = evaluateReplay(config({ ...small, positions: [{ ...firstTrade, redemption: { mode: 'at', at: at(9) } }] }), data, [], at(10))
+    expect(pending.summary).toMatchObject({ ending: '60', cash: [{ balance: '10' }] })
+    expect(pending.positions[0]).toMatchObject({ redemption: { hypotheticalRedemptionAt: at(9), hypotheticalCashAvailableAt: null } })
+    const lost = evaluateReplay(config({ ...small, positions: [firstTrade] }), { ...data, lifecycle: new Map([
+      ['ALPHA', [known, { ...resolution, resolution: { ...resolution.resolution, winningInstrument: 'ALPHA:no' } }]],
+    ]) }, [], at(10))
+    expect(lost.summary.ending).toBe('10')
+    expect(lost.schedule.find((row) => row.type === 'redemption')?.amount).toBe('0')
+
+    const dispute = { ...journal('ALPHA', 1, 5, 'disputed'), revision: 'dispute', retrievedAt: new Date(at(9)) }
+    const disputed = { ...data, lifecycle: new Map(data.lifecycle).set('ALPHA', [known, resolution, dispute]) }
+    const retrospective = evaluateReplay(config({ ...small, positions: [firstTrade] }), disputed, [], at(10))
+    expect(retrospective.positions[0]?.status).toBe('conflicting_payout_evidence')
+    expect(retrospective.summary.ending).toBeNull()
+    expect(retrospective.schedule.some((row) => row.type === 'settlement')).toBe(false)
+    const knowledge = evaluateReplay(config({ ...small, mode: 'knowledge', through: at(10), positions: [firstTrade] }), disputed, [], at(11))
+    expect(knowledge.history.find((row) => row.asOf === at(5))?.completeValue).toBe('60')
+    expect(knowledge.history.find((row) => row.asOf === at(9))?.completeValue).toBeNull()
+  })
+
+  it('preserves earlier window bounds, labels first-day dates and makes same-time funding independent of input order', () => {
+    const market = catalog(first, 'ALPHA')
+    const known = { ...journal('ALPHA', 1, 5), tradingOpensAt: new Date('2025-02-01T00:00:00Z') }
+    const later = { ...known, revision: 'later', retrievedAt: new Date(at(10)), tradingOpensAt: null, tradingClosesAt: null }
+    const data: ReplayEvidence = { catalog: [market], lifecycle: new Map([['ALPHA', [known, later]]]),
+      quotes: [mark(first, 1, '0.5'), mark(first, 2, '0.5')] }
+    const early = { id: 'a', bucket: 'usd', instrumentId: first, entry: { ...operation(1, '0.5'), at: '2025-02-01',
+      execution: { mode: 'reference', maxAgeSeconds: 43200 }, size: { mode: 'quantity', value: '10' } },
+      exits: [{ ...operation(2, '0.5'), quantity: '10' }] }
+    const next = { id: 'b', bucket: 'usd', instrumentId: first, entry: { ...operation(2, '0.5'), size: { mode: 'quantity', value: '10' } } }
+    const small = { ...base, from: '2025-02-01T00:00:00Z', buckets: [{ ...base.buckets[0], capital: '5' }] }
+    const values = config({ ...small, positions: [next, early] })
+    validateReplay(values, at(11))
+    const result = evaluateReplay(values, data, [], at(11))
+    expect(result.positions.find((row) => row.id === 'a')).toMatchObject({ operations: [{
+      timing: 'hypothetical_utc_day_end', basis: 'prior_historical_reference', window: { status: 'verified' },
+    }, { type: 'sell' }] })
+    expect(result.funding.status).toBe('funded')
+    expect(result.schedule.filter((row) => row.at === at(2)).map((row) => row.type)).toEqual(['sell', 'buy'])
+    expect(evaluateReplay(config({ ...small, positions: [early, next] }), data, [], at(11)).schedule).toEqual(result.schedule)
+  })
+
+  it('marks missing requested entries and partial exits throughout the portfolio contract', () => {
+    const data: ReplayEvidence = { catalog: [catalog(first, 'ALPHA'), catalog(second, 'BETA')],
+      lifecycle: new Map([['ALPHA', [journal('ALPHA', 1, 10)]], ['BETA', [journal('BETA', 1, 10)]]]),
+      quotes: [mark(first, 2, '0.5')] }
+    const position = { id: 'good', bucket: 'usd', instrumentId: first, entry: { ...operation(2, '0.5'), size: { mode: 'quantity', value: '10' } } }
+    const missing = { ...position, id: 'unknown', bucket: 'other', instrumentId: second,
+      entry: { ...position.entry, execution: { mode: 'reference' } } }
+    const partial = evaluateReplay(config({ ...base, buckets: [...base.buckets, { ...base.buckets[0], id: 'other' }],
+      positions: [position, missing] }), data, [], at(11))
+    expect(partial).toMatchObject({ status: 'partial', summary: { starting: '200', ending: null, knownSubtotal: '100',
+      realized: expect.arrayContaining([expect.objectContaining({ bucket: 'other', value: null })]) },
+      native: [{ ending: { value: null }, returns: null }], risk: { coverage: 'known_components_only' },
+      completeness: { requestedOperationsComplete: false, missingOperations: [{ operation: 'entry:unknown' }] } })
+    const incompleteExit = evaluateReplay(config({ ...base, positions: [{ ...position,
+      exits: [{ ...operation(4, '0.6'), quantity: '5', execution: { mode: 'reference' } }],
+    }] }), data, [], at(11))
+    expect(incompleteExit).toMatchObject({ positions: [{ status: 'missing_exit_evidence' }],
+      attribution: [{ remainingInventory: null, acquisitionCost: { known: '5', value: null } }],
+      summary: { ending: null, fees: { reportingValue: null } } })
+    const zero = evaluateReplay(config({ ...base, buckets: [...base.buckets, { id: 'zero', venue: 'polymarket', asset: 'PUSD', capital: '0' }],
+      positions: [] }), data, [], at(11))
+    expect(zero.summary).toMatchObject({ ending: '100', twr: '0' })
+    const ambiguous = { ...data, quotes: [...data.quotes, { ...mark(first, 2, '0.6'), revision: 'conflicting-mark' }] }
+    const conflicted = evaluateReplay(config({ ...base, positions: [position] }), ambiguous, [], at(11))
+    expect(conflicted.discrepancies.some((row) => row.reason === 'same_time_marks_conflict')).toBe(true)
+    expect(conflicted.summary).toMatchObject({ ending: null, twr: null })
+    expect(() => evaluateReplay(config({ ...base, buckets: [{ id: 'usd', venue: 'polymarket', asset: 'PUSD', capital: '100' }],
+      positions: [position] }), data, [], at(11))).toThrow('incompatible_replay_instrument')
+
+  })
+
   it('uses separate native funding, historical non-parity rates and exact cash-flow boundaries', () => {
     const values = config({ ...base, currency: 'SGD', buckets: [...base.buckets,
       { id: 'pusd', venue: 'polymarket', asset: 'PUSD', capital: '100' }],
@@ -69,7 +164,8 @@ describe('historical hypothetical replay', () => {
     const data: ReplayEvidence = { catalog: [], lifecycle: new Map(), quotes: [] }
     const result = evaluateReplay(values, data, rates, at(10))
     expect(result.summary).toMatchObject({ starting: '225', ending: '262.5', investmentGain: '12.5', totalReturn: null,
-      cash: [{ asset: 'USD', balance: '120' }, { asset: 'PUSD', balance: '100' }] })
+      cash: expect.arrayContaining([expect.objectContaining({ asset: 'USD', balance: '120' }),
+        expect.objectContaining({ asset: 'PUSD', balance: '100' })]) })
     expect(Number(result.summary.twr)).toBeCloseTo(0.05)
     expect(evaluateReplay(values, data, rates.filter((row) => row.base !== 'PUSD'), at(10))).toMatchObject({
       status: 'partial', summary: { ending: null, twr: null },

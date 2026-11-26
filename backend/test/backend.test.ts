@@ -164,7 +164,7 @@ describe('migrations and canonical persistence', () => {
         entry: { at: at(2), execution: { mode: 'reference' }, size: { mode: 'quantity', value: '50' }, fee: { mode: 'fixed', amount: '1' } },
         exits: [{ at: at(4), quantity: '50', execution: { mode: 'reference' }, fee: { mode: 'fixed', amount: '1' } }] }],
     }
-    const evaluated = await request('POST', root + '/evaluate', configuration)
+    const evaluated = await request('POST', root + '/evaluate?detail=full', configuration)
     expect(evaluated.statusCode, evaluated.body).toBe(200)
     const preview = evaluated.json()
     expect(preview.result).toMatchObject({ status: 'evaluated', funding: { status: 'funded', buckets: [{ closingCash: '108', minimumKnownCash: '79' }] },
@@ -180,6 +180,20 @@ describe('migrations and canonical persistence', () => {
     const duplicate = await request('POST', root + '/' + id + '/duplicate', { name: 'Copy' })
     expect(duplicate.statusCode).toBe(201)
     expect((await request('POST', root + '/compare', { replayIds: [id, duplicate.json().id] })).json().compatible).toBe(true)
+    const compact = (await request('GET', root + '/' + id)).json().result
+    expect(compact.history[0]).not.toHaveProperty('cash')
+    expect(compact).not.toHaveProperty('schedule')
+    const snapshot = (await request('GET', root + '/' + id + '?at=' + encodeURIComponent(at(2)))).json().snapshot
+    expect(snapshot).toMatchObject({ cash: [{ value: '79' }], positions: [{ quantity: '50', reference: { price: '0.4' } }] })
+    const alternateConfiguration = { ...configuration, positions: [{ ...configuration.positions[0]!,
+      entry: { ...configuration.positions[0]!.entry, at: at(3) } }] }
+    const alternate = (await request('POST', root + '/evaluate', alternateConfiguration)).json()
+    const alternateSaved = (await request('POST', root, { name: 'Other execution time', previewToken: alternate.previewToken })).json()
+    const aligned = (await request('POST', root + '/compare', { replayIds: [id, alternateSaved.id] })).json()
+    expect(aligned.compatible).toBe(true)
+    expect(aligned.items.map((item: { normalized: Array<{ asOf: string }> }) => item.normalized.map((point) => point.asOf)))
+      .toEqual([aligned.grid, aligned.grid])
+    expect(aligned.grid).not.toContain(at(3))
     await database.update(sharedMarketObservations).set({ price: '0.7', revision: 'replay-refreshed' })
       .where(eq(sharedMarketObservations.revision, 'replay-mark-4'))
     expect((await request('GET', root + '/' + id)).json().result.summary.ending).toBe('108')
@@ -188,11 +202,19 @@ describe('migrations and canonical persistence', () => {
     const accepted = await request('PATCH', root + '/' + id, { revision: 1, previewToken: refreshed.previewToken })
     expect(accepted.json()).toMatchObject({ revision: 2, result: { summary: { ending: '113' } } })
     expect((await request('PATCH', root + '/' + id, { revision: 1, name: 'Stale' })).statusCode).toBe(409)
+    const changed = (await request('POST', root + '/compare', { replayIds: [id, duplicate.json().id] })).json()
+    expect(changed).toMatchObject({ compatible: false, dimensions: { sharedEvidence: false } })
+    expect(changed.sharedEvidenceChanges.length).toBeGreaterThan(0)
+    const originalClock = Date.now()
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(originalClock + 16 * 60 * 1000)
+    try {
+      expect((await request('PATCH', root + '/' + id, { revision: 2, previewToken: preview.previewToken })).statusCode).toBe(409)
+    } finally { clock.mockRestore() }
     expect((await request('POST', root + '/evaluate', { ...configuration, mode: 'knowledge' })).json().result).toMatchObject({
       status: 'partial', summary: { ending: null, twr: null },
     })
     expect((await request('DELETE', root + '/' + id + '?revision=2')).statusCode).toBe(204)
-    expect((await request('GET', root)).json().items).toHaveLength(1)
+    expect((await request('GET', root)).json().items).toHaveLength(2)
   })
 
   it('discovers an untracked V2 market and keeps mapped research leases and simulations owner scoped', async () => {
@@ -204,7 +226,8 @@ describe('migrations and canonical persistence', () => {
       ] })
       if (new URL(input).pathname === '/midpoints') return Response.json({ 333: '0.45', 444: '0.55' })
       return Response.json([{ conditionId: condition, version: 'v2', negRisk: false, active: true,
-        question: 'Untracked market', events: [{ id: 'native-event', title: 'Discovery event' }],
+        question: 'Untracked market', acceptingOrdersTimestamp: '2025-12-01T09:00:00Z',
+        endDate: '2026-02-01T00:00:00Z', events: [{ id: 'native-event', title: 'Discovery event' }],
         clobTokenIds: ['333', '444'], positionIds: ['111', '222'], outcomes: ['Yes', 'No'] }])
     })
     const marketData = new PolymarketMarketDataService(new PolymarketHttpClient(transport as typeof fetch))
@@ -217,6 +240,9 @@ describe('migrations and canonical persistence', () => {
     const first = await register(app)
     expect(first.json()).toMatchObject({ status: 'identified', quoteAvailability: 'observed' })
     const shared = first.json()
+    const [window] = await database.select().from(marketLifecycleEvidence).where(eq(marketLifecycleEvidence.marketId, shared.marketId))
+    expect(window).toMatchObject({ tradingOpensAt: new Date('2025-12-01T09:00:00Z'), tradingClosesAt: null,
+      expectedResolutionAt: new Date('2026-02-01T00:00:00Z') })
     expect((await register(other)).json().marketId).toBe(shared.marketId)
     const reference = await app.inject({ method: 'GET', url: '/v1/market-references?instruments=' + shared.outcomes[0].id, headers })
     expect(reference.json().references[0]).toMatchObject({ asset: 'PUSD', availability: 'recent_reference' })

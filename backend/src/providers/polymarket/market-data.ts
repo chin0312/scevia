@@ -153,6 +153,16 @@ export class PolymarketMarketDataService {
     return found[0]!
   }
 
+  private reportedTradingWindow(row: Record<string, unknown>, lifecycle: string, retrievedAt: string) {
+    const timestamp = (value: unknown) => {
+      if (!z.iso.datetime({ offset: true }).safeParse(value).success) return null
+      const date = isoDate(value)
+      return date && date <= retrievedAt ? date : null
+    }
+    return { tradingOpensAt: timestamp(row.acceptingOrdersTimestamp),
+      tradingClosesAt: ['closed', 'resolved'].includes(lifecycle) ? timestamp(row.closedTime) : null }
+  }
+
   async discoverCondition(conditionId: string, signal: AbortSignal) {
     const row = await this.exactCondition(conditionId, signal)
     const events = Array.isArray(row.events) ? row.events.flatMap((item) => {
@@ -166,10 +176,11 @@ export class PolymarketMarketDataService {
     const labels = parseStringArray(row.outcomes)
     const lifecycle = row.resolved === true || row.resolutionStatus === 'resolved' ? 'resolved'
       : row.closed === true || row.archived === true ? 'closed' : row.active === true ? 'open' : 'unknown'
+    const retrievedAt = new Date().toISOString()
     const candidate = {
       conditionId: conditionId.toLowerCase(), lifecycle, generation, title: stringValue(row.question) ?? stringValue(row.title),
       eventId: stringValue(event?.id), eventTitle: stringValue(event?.title), expectedResolutionAt: isoDate(row.endDate),
-      retrievedAt: new Date().toISOString(),
+      retrievedAt, ...this.reportedTradingWindow(row, lifecycle, retrievedAt),
     }
     if (!candidate.eventId || !candidate.title || row.negRisk !== false || positions.length !== 2 || clob.length !== 2
       || labels.length !== 2 || new Set(labels.map((label) => label.toLowerCase())).size !== 2
@@ -187,6 +198,7 @@ export class PolymarketMarketDataService {
     const version = stringValue(row.version)?.toLowerCase()
     const lifecycle = row.resolved === true || row.resolutionStatus === 'resolved' ? 'resolved'
       : row.closed === true || row.archived === true ? 'closed' : row.active === true ? 'open' : 'unknown'
+    const window = this.reportedTradingWindow(row, lifecycle, new Date().toISOString())
     const assets = parseStringArray(row.clobTokenIds)
     const positions = version === 'v1' ? assets : version === 'v2' ? parseStringArray(row.positionIds) : []
     const nativeIdsValid = positions.length === 2 && assets.length === 2 && new Set(assets).size === 2
@@ -196,14 +208,14 @@ export class PolymarketMarketDataService {
         && (lifecycle === 'closed' || lifecycle === 'resolved')) {
         try {
           const resolution = await ctf.standardCtfResolution(conditionId, positions, signal)
-          if (resolution) return { lifecycle: 'resolved', quotes: [], resolution }
+          if (resolution) return { lifecycle: 'resolved', quotes: [], resolution, ...window }
         } catch { signal.throwIfAborted() }
       }
-      return { lifecycle, quotes: [] }
+      return { lifecycle, quotes: [], ...window }
     }
     const result = recordSchema.parse(await this.client.postClob('midpoints', assets.map((token_id) => ({ token_id })), signal))
     const retrievedAt = new Date()
-    return { lifecycle, quotes: positions.flatMap((id, index) => {
+    return { lifecycle, ...window, quotes: positions.flatMap((id, index) => {
       const price = decimalString(result[assets[index]!])
       return price !== null && new Decimal(price).gte(0) && new Decimal(price).lte(1)
         ? [{ id, price, retrievedAt, asset: version === 'v1' ? 'USDC' : 'PUSD' }] : []

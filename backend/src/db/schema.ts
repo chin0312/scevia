@@ -637,7 +637,7 @@ export const historicalReplays = scevia.table('historical_replays', {
   description: text('description'),
   revision: integer('revision').default(1).notNull(),
   configuration: jsonb('configuration').$type<import('../replay/contracts.js').ReplayConfig>().notNull(),
-  result: jsonb('result').$type<ReturnType<typeof import('../replay/engine.js').evaluateReplay>>().notNull(),
+  result: jsonb('result').$type<import('../replay/result.js').FrozenReplayResult>().notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [index('historical_replays_collection_idx').on(table.collectionId, table.updatedAt)])

@@ -319,6 +319,7 @@ describe('Polymarket public market data', () => {
         expect(url.searchParams.get('condition_ids')).toBe(conditionId)
         expect(url.searchParams.get('closed')).toBe('any')
         return Response.json([{ conditionId, active: !closed, closed, version: 'v2',
+          acceptingOrdersTimestamp: '2025-01-01T00:00:00Z', closedTime: '2025-04-02T00:00:00Z',
           clobTokenIds: ['1234', '5678'], positionIds: ['9876', '5432'] }])
       }
       expect(JSON.parse(String(init?.body))).toEqual([{ token_id: '1234' }, { token_id: '5678' }])
@@ -328,7 +329,9 @@ describe('Polymarket public market data', () => {
     expect(await source.trackingSnapshot(conditionId, signal)).toMatchObject({ lifecycle: 'open',
       quotes: [{ id: '9876', asset: 'PUSD', price: '0.65' }, { id: '5432', asset: 'PUSD', price: '0.35' }] })
     closed = true
-    expect(await source.trackingSnapshot(conditionId, signal)).toEqual({ lifecycle: 'closed', quotes: [] })
+    expect(await source.trackingSnapshot(conditionId, signal)).toEqual({ lifecycle: 'closed', quotes: [],
+      tradingOpensAt: '2025-01-01T00:00:00.000Z', tradingClosesAt: '2025-04-02T00:00:00.000Z',
+    })
     expect(requests).toHaveLength(3)
   })
 
