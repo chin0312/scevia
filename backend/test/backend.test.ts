@@ -185,15 +185,27 @@ describe('migrations and canonical persistence', () => {
     expect(compact).not.toHaveProperty('schedule')
     const snapshot = (await request('GET', root + '/' + id + '?at=' + encodeURIComponent(at(2)))).json().snapshot
     expect(snapshot).toMatchObject({ cash: [{ value: '79' }], positions: [{ quantity: '50', reference: { price: '0.4' } }] })
+    const compactPoint = compact.history.find((point: { asOf: string }) => point.asOf === at(2))
+    expect(compactPoint).toMatchObject({ completeValue: '99', referenceQuality: {
+      valuationQuality: 'observed_references', oldestObservationAt: at(2), observedReferenceCount: 1,
+    } })
+    expect(snapshot).toMatchObject(compactPoint)
+    const detailed = (await request('GET', root + '/' + id + '?detail=full')).json().result
+    expect(detailed.history.find((point: { asOf: string }) => point.asOf === at(2))).toMatchObject(compactPoint)
+
+    await database.update(sharedMarketObservations).set({ source: 'alternate-fixture', method: 'historical_sample',
+      revision: 'replay-alternate-source' }).where(eq(sharedMarketObservations.revision, 'replay-mark-3'))
     const alternateConfiguration = { ...configuration, positions: [{ ...configuration.positions[0]!,
       entry: { ...configuration.positions[0]!.entry, at: at(3) } }] }
     const alternate = (await request('POST', root + '/evaluate', alternateConfiguration)).json()
     const alternateSaved = (await request('POST', root, { name: 'Other execution time', previewToken: alternate.previewToken })).json()
     const aligned = (await request('POST', root + '/compare', { replayIds: [id, alternateSaved.id] })).json()
     expect(aligned.compatible).toBe(true)
+    expect(aligned.evidenceQualifications.marketSourcePoints).toBeGreaterThan(0)
     expect(aligned.items.map((item: { normalized: Array<{ asOf: string }> }) => item.normalized.map((point) => point.asOf)))
       .toEqual([aligned.grid, aligned.grid])
     expect(aligned.grid).not.toContain(at(3))
+    expect(aligned.items[0].normalized[0]).toMatchObject({ referenceQuality: { marketPriceCoverage: 'not_required' } })
     await database.update(sharedMarketObservations).set({ price: '0.7', revision: 'replay-refreshed' })
       .where(eq(sharedMarketObservations.revision, 'replay-mark-4'))
     expect((await request('GET', root + '/' + id)).json().result.summary.ending).toBe('108')

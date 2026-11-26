@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { comparisonEvidenceQualifications, freezeReplay, presentReplay, replaySnapshot } from '../src/replay/result.js'
 import { replayConfig } from '../src/replay/contracts.js'
 import { evaluateReplay, validateReplay } from '../src/replay/engine.js'
 import type { ReplayEvidence, ReplayLifecycle } from '../src/replay/evidence.js'
@@ -133,7 +134,7 @@ describe('historical hypothetical replay', () => {
       positions: [position, missing] }), data, [], at(11))
     expect(partial).toMatchObject({ status: 'partial', summary: { starting: '200', ending: null, knownSubtotal: '100',
       realized: expect.arrayContaining([expect.objectContaining({ bucket: 'other', value: null })]) },
-      native: [{ ending: { value: null }, returns: null }], risk: { coverage: 'known_components_only' },
+      native: [{ ending: { value: null, knownValue: '100' }, returns: null }], risk: { coverage: 'known_components_only' },
       completeness: { requestedOperationsComplete: false, missingOperations: [{ operation: 'entry:unknown' }] } })
     const incompleteExit = evaluateReplay(config({ ...base, positions: [{ ...position,
       exits: [{ ...operation(4, '0.6'), quantity: '5', execution: { mode: 'reference' } }],
@@ -153,6 +154,38 @@ describe('historical hypothetical replay', () => {
 
   })
 
+  it('retains source age and market coverage in compact, frozen and compared valuations', () => {
+    const listing = { ...journal('ALPHA', 1, 11), retrievedAt: new Date(at(1)) }
+    const data: ReplayEvidence = { catalog: [catalog(first, 'ALPHA')], lifecycle: new Map([['ALPHA', [listing]]]),
+      quotes: [{ ...mark(first, 2, '0.6'), retrievedAt: new Date(at(5)) }] }
+    const configuration = config({ ...base, mode: 'knowledge', positions: [{ id: 'a', bucket: 'usd', instrumentId: first,
+      entry: { ...operation(5, '0.5'), size: { mode: 'quantity', value: '20' } },
+    }] })
+    const frozen = freezeReplay(evaluateReplay(configuration, data, [], at(11)))
+    const summary = presentReplay(frozen, false).summary
+    expect(summary).toMatchObject({ ending: '102', twr: '0.02', performanceQuality: {
+      twr: 'stale_reference_estimate', sampledDrawdown: 'stale_reference_estimate',
+    } })
+    const compact = presentReplay(frozen, false).history.find((row) => row.asOf === at(5))!
+    expect(compact.referenceQuality).toMatchObject({ valuationQuality: 'stale_reference_estimate', oldestObservationAt: at(2),
+      staleReferenceCount: 1, observedReferenceCount: 0, marketPriceCoverage: 'covered' })
+    expect(presentReplay(frozen, true).history.find((row) => row.asOf === at(5))).toMatchObject(compact)
+    expect(replaySnapshot(frozen, at(5))).toMatchObject(compact)
+    const another = freezeReplay(evaluateReplay(configuration, { ...data, quotes: [{ ...data.quotes[0]!,
+      source: 'another', method: 'historical_sample', revision: 'different-method' }] }, [], at(11)))
+    expect(comparisonEvidenceQualifications([frozen, another], [at(5)])).toMatchObject({ marketSourcePoints: 1, coveragePoints: 0 })
+
+    const retrospective = { ...configuration, mode: 'retrospective' as const, positions: configuration.positions.map((row) => ({
+      ...row, entry: { ...row.entry, at: at(2) },
+    })) }
+    const recent = freezeReplay(evaluateReplay(retrospective, data, [], at(11)))
+    expect(recent.history.find((row) => row.asOf === at(2))?.referenceQuality?.valuationQuality).toBe('observed_references')
+    expect(recent.history.find((row) => row.asOf === '2025-02-02T23:59:59.999Z')?.referenceQuality?.valuationQuality).toBe('carry_forward_reference_estimate')
+    const missing = freezeReplay(evaluateReplay(retrospective, { ...data, quotes: [] }, [], at(11)))
+    expect(missing.history.at(-1)).toMatchObject({ completeValue: null, knownComponentsSubtotal: '90',
+      referenceQuality: { marketPriceCoverage: 'missing', missingReferenceCount: 1 } })
+  })
+
   it('uses separate native funding, historical non-parity rates and exact cash-flow boundaries', () => {
     const values = config({ ...base, currency: 'SGD', buckets: [...base.buckets,
       { id: 'pusd', venue: 'polymarket', asset: 'PUSD', capital: '100' }],
@@ -167,6 +200,27 @@ describe('historical hypothetical replay', () => {
       cash: expect.arrayContaining([expect.objectContaining({ asset: 'USD', balance: '120' }),
         expect.objectContaining({ asset: 'PUSD', balance: '100' })]) })
     expect(Number(result.summary.twr)).toBeCloseTo(0.05)
+    const frozen = freezeReplay(result)
+    const roundTrip = JSON.parse(JSON.stringify(frozen)) as typeof frozen
+    const chart = presentReplay(roundTrip, false).history.at(-1)!
+    expect(chart.completeValue).toBe('262.5')
+    expect(presentReplay(roundTrip, true).history.at(-1)).toMatchObject(chart)
+    expect(replaySnapshot(roundTrip, at(8))).toMatchObject({ ...chart, fx: expect.arrayContaining([
+      expect.objectContaining({ asset: 'PUSD', rate: '1.125', legs: [
+        expect.objectContaining({ revision: 'PUSD8', rate: '0.9' }),
+        expect.objectContaining({ revision: 'USD8', rate: '1.25' }),
+      ] }),
+    ]) })
+    const replacement = rates.map((row) => row.base === 'USD' ? { ...row, source: 'alternative',
+      revision: row.revision + '-fallback' } : row)
+    const preferred = freezeReplay(evaluateReplay(values, data, rates.map((row) => row.base === 'USD' ? { ...row, source: 'ecb_euro_reference' } : row),
+      at(10), { fiatSource: 'ecb_euro_reference' }))
+    const alternate = freezeReplay(evaluateReplay(values, data, replacement, at(10), { fiatSource: 'ecb_euro_reference' }))
+    expect(comparisonEvidenceQualifications([preferred, alternate], [at(8)])).toMatchObject({ fxSourcePoints: 1, fallbackPoints: 1 })
+    expect(comparisonEvidenceQualifications([alternate, freezeReplay(evaluateReplay(values, data, [], at(10)))], [at(8)]).coveragePoints).toBe(1)
+    const legacy = { ...roundTrip, history: roundTrip.history.map(({ referenceQuality: _quality, ...row }) => row) }
+    expect(presentReplay(legacy, false).history.at(-1)).toMatchObject({ completeValue: '262.5', referenceQuality: null })
+
     expect(evaluateReplay(values, data, rates.filter((row) => row.base !== 'PUSD'), at(10))).toMatchObject({
       status: 'partial', summary: { ending: null, twr: null },
     })

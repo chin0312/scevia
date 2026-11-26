@@ -44,11 +44,13 @@ for (const days of ranges) {
   validateReplay(configuration, at(days + 2))
   const startTime = performance.now()
   const result = evaluateReplay({ ...configuration, currency: 'USD' }, data, [], at(days + 2))
+  const calculationEnd = performance.now()
   const frozen = freezeReplay(result)
   const encoded = JSON.stringify(presentReplay(frozen, false))
   const frozenSize = Buffer.byteLength(JSON.stringify(frozen))
   console.log(JSON.stringify({ days, instruments: data.catalog.length, positions: positions.length, marks: data.quotes.length,
-    valuationPoints: result.history.length, milliseconds: Math.round(performance.now() - startTime),
+    valuationPoints: result.history.length, calculationMs: Math.round(calculationEnd - startTime),
+    freezeAndSerializationMs: Math.round(performance.now() - calculationEnd),
     rssDeltaMiB: Math.round((process.memoryUsage().rss - before) / 2 ** 20), primaryBytes: Buffer.byteLength(encoded), frozenBytes: frozenSize,
     status: result.status, ending: result.summary.ending }))
 }

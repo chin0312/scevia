@@ -1,6 +1,18 @@
 import type { evaluateReplay } from './engine.js'
 
 type ReplayResult = ReturnType<typeof evaluateReplay>
+type ReplayPoint = ReplayResult['history'][number]
+type LegacyQuality<T> = Omit<T, 'referenceQuality'> & Partial<Pick<ReplayPoint, 'referenceQuality'>>
+type LegacySummary = Omit<ReplayResult['summary'], 'performanceQuality' | 'endingReferenceQuality'>
+  & Partial<Pick<ReplayResult['summary'], 'performanceQuality' | 'endingReferenceQuality'>>
+
+export function compactReplayPoint({ asOf, completeValue, knownComponentsSubtotal, index, twr, drawdown,
+  financialCoverage, fxCoverage, referenceQuality }: (Pick<ReplayPoint, 'asOf' | 'completeValue' | 'knownComponentsSubtotal'
+    | 'index' | 'twr' | 'drawdown' | 'financialCoverage' | 'fxCoverage'>
+    & { referenceQuality?: ReplayPoint['referenceQuality'] | null })) {
+  return { asOf, completeValue, knownComponentsSubtotal, index, twr, drawdown, financialCoverage, fxCoverage,
+    referenceQuality: referenceQuality ?? null }
+}
 
 export function freezeReplay(result: ReplayResult) {
   const snapshots = result.history.map(({ asOf, cash, positions, components }) => ({
@@ -17,15 +29,19 @@ export function freezeReplay(result: ReplayResult) {
       ...('lastKnown' in reference ? { lastKnownRevision: reference.lastKnown?.revision } : {}),
     })),
   }))
-  const history = result.history.map(({ asOf, completeValue, knownComponentsSubtotal, index, twr, drawdown, financialCoverage, fxCoverage }) => ({
-    asOf, completeValue, knownComponentsSubtotal, index, twr, drawdown, financialCoverage, fxCoverage,
-  }))
+  const history = result.history.map(compactReplayPoint)
   return { ...result, history, snapshots }
 }
 
-export type FrozenReplayResult = ReturnType<typeof freezeReplay> | ReplayResult
+type CompactResult = ReturnType<typeof freezeReplay>
+type StoredCompactResult = Omit<CompactResult, 'history' | 'summary'> & {
+  history: Array<Omit<CompactResult['history'][number], 'referenceQuality'> & { referenceQuality?: ReplayPoint['referenceQuality'] | null }>
+  summary: LegacySummary
+}
+type StoredExpandedResult = Omit<ReplayResult, 'history' | 'summary'> & { history: Array<LegacyQuality<ReplayPoint>>; summary: LegacySummary }
+export type FrozenReplayResult = StoredCompactResult | StoredExpandedResult
 
-function expandSnapshot(result: ReturnType<typeof freezeReplay>, snapshot: ReturnType<typeof freezeReplay>['snapshots'][number]) {
+function expandSnapshot(result: StoredCompactResult, snapshot: ReturnType<typeof freezeReplay>['snapshots'][number]) {
   const positions = result.positions.map(({ identity }) => identity)
   return { ...snapshot, positions: snapshot.positions.map(({ referenceRevision, ...row }) => {
     const identity = positions.find(({ instrumentId }) => instrumentId === row.instrument)
@@ -34,28 +50,36 @@ function expandSnapshot(result: ReturnType<typeof freezeReplay>, snapshot: Retur
   }) }
 }
 
+export const replaySummary = (result: FrozenReplayResult) => ({
+  ...result.summary, performanceQuality: result.summary.performanceQuality ?? null,
+  endingReferenceQuality: result.summary.endingReferenceQuality ?? null,
+})
+
 export function presentReplay(result: FrozenReplayResult, detail: boolean) {
+  const summary = replaySummary(result)
   if (detail) {
-    if (!('snapshots' in result)) return result
+    if (!('snapshots' in result)) return { ...result, summary,
+      history: result.history.map((point) => ({ ...point, ...compactReplayPoint(point) })) }
     const { snapshots, history, ...rest } = result
-    return { ...rest, history: history.map((point, index) => ({ ...point, ...expandSnapshot(result, snapshots[index]!) })) }
+    return { ...rest, summary, history: history.map((point, index) => ({ ...compactReplayPoint(point), ...expandSnapshot(result, snapshots[index]!) })) }
   }
   const { evidence: _evidence, schedule: _schedule, ...stored } = result
+  const history = stored.history.map(compactReplayPoint)
   if ('snapshots' in stored) {
     const { snapshots: _snapshots, ...primary } = stored
-    return primary
+    return { ...primary, summary, history }
   }
-  return { ...stored, history: stored.history.map(({ asOf, completeValue, knownComponentsSubtotal, index, twr, drawdown, financialCoverage, fxCoverage }) => ({
-    asOf, completeValue, knownComponentsSubtotal, index, twr, drawdown, financialCoverage, fxCoverage,
-  })) }
+  return { ...stored, summary, history }
 }
 
 export function replaySnapshot(result: FrozenReplayResult, asOf: string) {
-  if (!('snapshots' in result)) return result.history.find((point) => point.asOf === asOf) ?? null
+  const point = result.history.find((item) => item.asOf === asOf)
+  if (!point) return null
+  if (!('snapshots' in result)) return { ...point, ...compactReplayPoint(point) }
   const row = result.snapshots.find((point) => point.asOf === asOf)
   if (!row) return null
   const snapshot = expandSnapshot(result, row)
-  return { ...snapshot, fx: snapshot.fx.map((reference) => ({
+  return { ...compactReplayPoint(point), ...snapshot, fx: snapshot.fx.map((reference) => ({
     ...reference, legs: reference.revisions.flatMap(({ revision, inverted }) => {
       const evidence = result.evidence.fx.find((leg) => leg.revision === revision)
       return evidence ? [{ ...evidence, inverted }] : []
@@ -88,4 +112,68 @@ export function sharedEvidenceChanges(results: FrozenReplayResult[]) {
     }
   }
   return [...resultChanges].sort().map((key) => JSON.parse(key) as string[])
+}
+
+
+// Compare applied sources only where replays share a market/asset and a
+// timestamp. Source and fallback differences qualify otherwise comparable data.
+export function comparisonEvidenceQualifications(results: FrozenReplayResult[], grid: string[]) {
+  const atGrid = new Set(grid)
+  const sources = new Map<string, Set<string>>()
+  const differing = { marketSources: new Set<string>(), fxSources: new Set<string>(), fallback: new Set<string>(), coverage: new Set<string>() }
+  for (const result of results) {
+    const used = new Map<string, Set<string>>()
+    const add = (kind: keyof typeof differing, asOf: string, subject: string, values: unknown) => {
+      const key = JSON.stringify([kind, asOf, subject])
+      const entries = used.get(key) ?? new Set()
+      entries.add(JSON.stringify(values))
+      used.set(key, entries)
+    }
+    const market = new Map(result.evidence.market.map((row) => [row.revision, row]))
+    const fx = new Map(result.evidence.fx.map((row) => [row.revision, row]))
+    for (const row of result.history) if (atGrid.has(row.asOf)) {
+      add('coverage', row.asOf, '', [row.financialCoverage, row.fxCoverage, row.referenceQuality?.marketPriceCoverage ?? 'not_recorded'])
+    }
+    if ('snapshots' in result) {
+      for (const point of result.snapshots) {
+        if (!atGrid.has(point.asOf)) continue
+        for (const holding of point.positions) {
+          if (holding.quantity === '0') continue
+          const row = holding.referenceRevision ? market.get(holding.referenceRevision) : undefined
+          add('marketSources', point.asOf, holding.instrument, row ? [row.source, row.method, row.effectiveAt] : null)
+        }
+        for (const row of point.fx) {
+          add('fxSources', point.asOf, row.asset, [row.availability, row.rate, row.revisions.map(({ revision, inverted }) => {
+            const leg = fx.get(revision)
+            return leg ? [leg.source, leg.methodology, leg.observedAt, inverted] : [revision, inverted]
+          })])
+          add('fallback', point.asOf, row.asset, 'fallback' in row ? row.fallback ?? false : false)
+        }
+      }
+    } else {
+      for (const point of result.history) {
+        if (!atGrid.has(point.asOf)) continue
+        for (const holding of point.positions) if (holding.quantity !== '0') {
+          const row = holding.reference
+          const stored = row ? market.get(row.revision) : undefined
+          add('marketSources', point.asOf, holding.instrument, row ? [row.source, row.method, stored?.effectiveAt ?? row.observedAt] : null)
+        }
+        for (const { asset, reference } of point.components) {
+          add('fxSources', point.asOf, asset, [reference.availability, reference.rate,
+            reference.legs.map((leg) => [leg.source, leg.methodology, leg.observedAt, leg.inverted])])
+          add('fallback', point.asOf, asset, 'fallback' in reference ? reference.fallback ?? false : false)
+        }
+      }
+    }
+    for (const [key, values] of used) {
+      const prior = sources.get(key)
+      if (!prior) sources.set(key, values)
+      else if (prior.size !== values.size || [...values].some((value) => !prior.has(value))) {
+        const [kind, asOf] = JSON.parse(key) as [keyof typeof differing, string, string]
+        differing[kind].add(asOf)
+      }
+    }
+  }
+  return { marketSourcePoints: differing.marketSources.size, fxSourcePoints: differing.fxSources.size,
+    fallbackPoints: differing.fallback.size, coveragePoints: differing.coverage.size }
 }

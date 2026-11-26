@@ -8,7 +8,7 @@ import { historicalReplays as saved, portfolios, users } from '../db/schema.js'
 import { fxAnchors, loadFx, reportingCurrency } from '../fx/reference.js'
 import { replayConfig, ReplayError } from './contracts.js'
 import { evaluateReplay, validateReplay } from './engine.js'
-import { freezeReplay, presentReplay, replaySnapshot, sharedEvidenceChanges, type FrozenReplayResult } from './result.js'
+import { compactReplayPoint, comparisonEvidenceQualifications, freezeReplay, presentReplay, replaySnapshot, replaySummary, sharedEvidenceChanges, type FrozenReplayResult } from './result.js'
 import { replayEvidence, resolutionCutoffs } from './evidence.js'
 
 const collectionParams = z.object({ collectionId: z.uuid(), replayId: z.uuid().optional() })
@@ -172,7 +172,7 @@ export function registerHistoricalReplay(app: FastifyInstance, db: Database, max
     const grid = firstGrid.filter((asOf) => points.every((history) => history.has(asOf)))
     const dimensions = {
       period: comparable(({ configuration }) => [configuration.from, configuration.through]),
-      reporting: comparable(({ configuration, result }) => [configuration.currency, configuration.assumedUsdPerUnit ?? null, result.evidence.preference]),
+      reporting: comparable(({ configuration }) => [configuration.currency, configuration.assumedUsdPerUnit ?? null]),
       methodology: comparable(({ result }) => result.methodology),
       fees: comparable(({ configuration }) => [...new Set(configuration.positions.flatMap(({ entry, exits }) =>
         [entry.fee, ...exits.map((exit) => exit.fee)].map((fee) => digest(fee))))].sort()),
@@ -182,13 +182,20 @@ export function registerHistoricalReplay(app: FastifyInstance, db: Database, max
         && !result.warnings.some((warning) => warning.code === 'assumed_trading_window')),
     }
     const compatible = Object.values(dimensions).every(Boolean)
-    return { compatible, dimensions, grid, sharedEvidenceChanges: sharedChanges.slice(0, 100),
+    return { compatible, dimensions, grid,
+      evidenceQualifications: { ...comparisonEvidenceQualifications(ordered.map(({ result }) => result), grid),
+        sameSourcePreference: comparable(({ result }) => result.evidence.preference ?? null) },
+      sharedEvidenceChanges: sharedChanges.slice(0, 100),
       sharedEvidenceChangesTruncated: sharedChanges.length > 100,
       items: ordered.map(({ id, name, revision: version, result }, index) => ({
-        id, name, revision: version, evidenceRevision: result.evidenceRevision, summary: result.summary,
+        id, name, revision: version, evidenceRevision: result.evidenceRevision, summary: replaySummary(result),
         funding: result.funding, risk: result.risk, positions: result.positions, native: result.native,
-        history: result.history.map(({ asOf, completeValue }) => ({ asOf, completeValue })),
-        normalized: compatible ? grid.map((asOf) => ({ asOf, index: points[index]!.get(asOf)!.index })) : [],
+        history: result.history.map((point) => {
+          const { asOf, completeValue, knownComponentsSubtotal, financialCoverage, fxCoverage, referenceQuality } = compactReplayPoint(point)
+          return { asOf, completeValue, knownComponentsSubtotal, financialCoverage, fxCoverage, referenceQuality }
+        }),
+        normalized: compatible ? grid.map((asOf) => ({ asOf, index: points[index]!.get(asOf)!.index,
+          referenceQuality: points[index]!.get(asOf)!.referenceQuality ?? null })) : [],
       })) }
   })
 }

@@ -6,6 +6,7 @@ import { concentration } from '../analytics/performance.js'
 import { consolidatePerformance } from '../fx/consolidated.js'
 import { type FxOptions, type loadFx, reportAmounts } from '../fx/reference.js'
 import { ReplayError, type ReplayConfig } from './contracts.js'
+import { performanceValuationQuality, replayValuationQuality } from './valuation-quality.js'
 import type { ReplayEvidence, ReplayLifecycle } from './evidence.js'
 
 const D = Decimal.clone({ precision: 60 })
@@ -360,7 +361,10 @@ export function evaluateReplay(config: ReplayConfig & { currency: string }, data
     }))
     const projectedKnown = report([...cash.map(({ asset, value }) => ({ asset, value })),
       ...positions.map(({ asset, value }) => ({ asset, value }))], point.asOf)
-    return { ...point, knownComponentsSubtotal: projectedKnown.knownSubtotal, cash, positions }
+    const referenceQuality = replayValuationQuality(positions.map((row) => ({
+      quantity: row.quantity, mark: row.mark, observedAt: row.reference?.observedAt,
+    })), point.asOf)
+    return { ...point, referenceQuality, knownComponentsSubtotal: projectedKnown.knownSubtotal, cash, positions }
   })
   const closing = reporting.ending?.completeValue ?? null
   const starting = reporting.opening.completeValue
@@ -427,6 +431,20 @@ export function evaluateReplay(config: ReplayConfig & { currency: string }, data
   const metricAvailability = { starting: starting !== null, ending: closing !== null, investmentGain: metricEligible,
     twr: metricEligible && reporting.twr !== null, drawdown: metricEligible && reporting.maximumDrawdown !== null,
     totalReturn: metricEligible && !config.cashFlows.length && new D(starting!).gt(0), fees: usable(through) && feeTotal !== null }
+  const chartQuality = history.map((point) => point.referenceQuality)
+  const flowQuality = reporting.cashFlowBoundaries.map(({ before }) => {
+    const snapshot = projectAt(before.asOf)
+    return replayValuationQuality(snapshot.holdings.map((row) => ({
+      quantity: row.quantity, mark: row.mark, observedAt: row.marketReference?.observedAt,
+    })), before.asOf)
+  })
+  const performanceQuality = { twr: performanceValuationQuality([...chartQuality, ...flowQuality], metricAvailability.twr),
+    totalReturn: performanceValuationQuality([history[0]!.referenceQuality, endingPoint.referenceQuality], metricAvailability.totalReturn),
+    sampledDrawdown: performanceValuationQuality([...chartQuality, ...flowQuality], metricAvailability.drawdown) }
+  const knownNative = (asset: string) => {
+    const components = [...endingPoint.cash, ...endingPoint.positions].flatMap((row) => row.asset === asset && row.value !== null ? [row.value] : [])
+    return components.length ? sum(components).toFixed() : null
+  }
   const completeness = { requestedOperationsComplete: usable(through), missingOperations: missing,
     financialCoverage: reporting.ending?.financialCoverage ?? 'partial_or_unavailable',
     fxCoverage: reporting.ending?.fxCoverage ?? 'partial_or_unavailable', metrics: metricAvailability }
@@ -435,7 +453,7 @@ export function evaluateReplay(config: ReplayConfig & { currency: string }, data
       qualification: mode === 'knowledge' ? 'acquisition_clock_selection_is_not_unbiased_backtesting' : 'retrospective_hindsight_analysis' },
     status: fundingStatus === 'unfunded' ? 'unfunded' : !metricAvailability.twr || !metricAvailability.drawdown || history.some((point) => point.completeValue === null) ? 'partial' : 'evaluated',
     completeness,
-    summary: { currency, starting, ending: closing, knownSubtotal: endingPoint.knownComponentsSubtotal,
+    summary: { currency, starting, ending: closing, endingReferenceQuality: endingPoint.referenceQuality, performanceQuality, knownSubtotal: endingPoint.knownComponentsSubtotal,
       reportingAttribution: { availability: 'native_only', reason: 'market_and_fx_contributions_not_decomposed' },
       investmentGain: metricEligible ? gain.toFixed() : null, twr: metricEligible ? reporting.twr : null,
       totalReturn: metricEligible && !config.cashFlows.length && new D(starting!).gt(0) ? gain.div(starting!).toFixed() : null,
@@ -457,7 +475,8 @@ export function evaluateReplay(config: ReplayConfig & { currency: string }, data
       const eligible = complete && config.buckets.filter((bucket) => bucket.asset === row.asset)
         .every((bucket) => bucketFunding.find((item) => item.id === bucket.id && !item.unknown && !item.shortfalls.length))
       return { ...row, requestedOperationsComplete: complete,
-        ending: complete ? row.ending : { ...row.ending, value: null, knownValue: null, returnEligible: false, valuationQuality: 'unavailable' as const },
+        ending: { ...row.ending, knownValue: knownNative(row.asset),
+          ...(!complete ? { value: null, returnEligible: false, valuationQuality: 'unavailable' as const } : {}) },
         returns: eligible ? row.returns : null }
     }), history: metricEligible ? history : history.map((point) => ({ ...point, index: null, twr: null, drawdown: null })),
     evidenceRevision: digest([data.catalog, data.quotes.map((row) => row.revision).sort(), [...usedLifecycle].sort(), rates.map((row) => row.revision).sort(), preference]),
