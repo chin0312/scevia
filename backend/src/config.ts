@@ -40,6 +40,7 @@ export interface ServerConfig extends DatabaseConfig {
   polymarketLiveEnabled?: boolean
   polymarketPolygonRpc?: URL
   ecbReferenceAuthorized?: boolean
+  historicalReplayMaxDays?: number
   krakenFxAuthorized?: boolean
   coingeckoPusdKey?: string
   fxReferenceRetentionDays?: number
@@ -118,6 +119,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     ...(localDevelopment && env.COINGECKO_PUSD_REFERENCE_AUTHORIZED === 'YES' ? {
       coingeckoPusdKey: z.string().min(1).max(256).parse(env.COINGECKO_DEMO_API_KEY),
     } : {}),
+    historicalReplayMaxDays: z.coerce.number().int().min(1).max(365).parse(env.HISTORICAL_REPLAY_MAX_DAYS ?? '365'),
     krakenFxAuthorized: localDevelopment && env.KRAKEN_USDC_REFERENCE_AUTHORIZED === 'YES',
     polymarketStreamAuthorized: localDevelopment && env.POLYMARKET_MARKET_STREAM_AUTHORIZED === 'YES',
     ...(localDevelopment && env.CONTINUOUS_TRACKING_ENABLED === 'YES' ? { tracking: {

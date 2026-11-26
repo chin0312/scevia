@@ -155,6 +155,13 @@
       "when": 1795681172935,
       "tag": "0021_multi_source_fx_preferences",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1795686038297,
+      "tag": "0022_historical_replays",
+      "breakpoints": true
     }
   ]
 }

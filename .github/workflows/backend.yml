@@ -93,5 +93,15 @@ jobs:
 
           const positions = await fetch(`${baseUrl}/v1/portfolios/${portfolio.id}/positions`, { headers }).then((response) => response.json())
           assert(positions.items?.length > 0, 'Expected stored fixture positions from the API')
+
+          const simulation = await fetch(`${baseUrl}/v1/simulations`, { method: 'POST', headers }).then((response) => response.json())
+          assert(simulation.collection?.id, 'Expected an independent simulation collection')
+          const replay = await fetch(`${baseUrl}/v1/simulations/${simulation.collection.id}/replays/evaluate`, {
+            method: 'POST', headers: { ...headers, 'content-type': 'application/json' },
+            body: JSON.stringify({ version: 1, from: '2025-01-01T00:00:00Z', through: '2025-01-02T00:00:00Z',
+              buckets: [{ id: 'virtual', venue: 'kalshi', asset: 'USD', capital: '100' }], positions: [] }),
+          }).then((response) => response.json())
+          assert(replay.result?.summary.ending === '100' && replay.result?.funding.status === 'funded',
+            'Expected a funded historical replay without a provider account')
           NODE
       - run: npm audit --audit-level=high

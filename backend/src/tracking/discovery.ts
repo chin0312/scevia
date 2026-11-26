@@ -1,13 +1,14 @@
 import { IdentityConflict, registerInstrumentMappings } from './instrument-mapping.js'
-import { and, eq, gt, sql } from 'drizzle-orm'
+import { and, desc, eq, gt, sql } from 'drizzle-orm'
 import { z } from 'zod'
 import type { FastifyInstance } from 'fastify'
 import type { Database } from '../db/client.js'
-import { events, instruments, marketResearch, markets, marketTracking, sharedMarketObservations, users } from '../db/schema.js'
+import { events, instruments, marketLifecycleEvidence, type TrackedResolution, marketResearch, markets, marketTracking, sharedMarketObservations, users } from '../db/schema.js'
 import { normalizedRecordSchema } from '../domain/model.js'
 import { upsertMarket } from '../ingestion/persistence.js'
 import type { PolymarketMarketDataService } from '../providers/polymarket/market-data.js'
 import type { KalshiMarketDataService } from '../providers/kalshi/market-data.js'
+import { conflictingResolution } from './lifecycle.js'
 import { digest } from '../accounting/decisions.js'
 
 const selection = z.discriminatedUnion('provider', [
@@ -27,10 +28,17 @@ export function registerMarketEvidence(app: FastifyInstance, db: Database,
     let generation: string | null = null
     let quotes: Array<{ id: string; price: string; retrievedAt: Date; asset: string }> = []
     let metadata: unknown
+    let tradingOpensAt: Date | null = null
+    let tradingClosesAt: Date | null = null
+    let resolution: TrackedResolution | null = null
     if (input.provider === 'kalshi' && kalshi) {
       const row = await kalshi.lookup(input.market, signal)
       if (row.marketTicker !== input.market || row.establishedPayoutUnit !== '1') return { status: 'unsupported_contract' as const, metadata: row }
       metadata = row
+      tradingOpensAt = row.tradingOpensAt ? new Date(row.tradingOpensAt) : null
+      tradingClosesAt = row.tradingClosesAt ? new Date(row.tradingClosesAt) : null
+      resolution = row.resolution && row.outcomes.some((leg) => leg.id === row.resolution?.winningInstrument)
+        ? { ...row.resolution, source: 'kalshi_trade_api', settlementTime: row.resolution.knownAt } : null
       market = normalizedRecordSchema.parse({ kind: 'market', externalEventId: row.eventTicker, externalMarketId: row.marketTicker,
         eventName: row.eventTicker, marketTitle: row.title, marketLifecycle: row.lifecycle, eventLifecycle: 'unknown',
         eventDescription: null, resolutionRules: null, settlementRules: null, eventSourceUpdatedAt: row.retrievedAt,
@@ -73,6 +81,20 @@ export function registerMarketEvidence(app: FastifyInstance, db: Database,
       const legs = await tx.select().from(instruments).where(eq(instruments.marketId, entry!.id))
       if (mappings.length && generation && catalog.settlementAssetCode) {
         await registerInstrumentMappings(tx, entry!.id, catalog.settlementAssetCode, generation, mappings)
+      }
+      if (catalog.sourceUpdatedAt && catalog.marketLifecycle !== 'unknown') {
+        const [prior] = await tx.select({ resolution: marketLifecycleEvidence.resolution }).from(marketLifecycleEvidence)
+          .where(and(eq(marketLifecycleEvidence.marketId, entry!.id), sql`${marketLifecycleEvidence.resolution} is not null`))
+          .orderBy(desc(marketLifecycleEvidence.retrievedAt)).limit(1)
+        const conflict = conflictingResolution(prior?.resolution, resolution)
+        const proof = resolution ?? prior?.resolution ?? null
+        const retrievedAt = new Date(catalog.sourceUpdatedAt)
+        const expectedResolutionAt = catalog.eventResolvesAt ? new Date(catalog.eventResolvesAt) : null
+        await tx.insert(marketLifecycleEvidence).values({ marketId: entry!.id, retrievedAt, lifecycle: catalog.marketLifecycle,
+          tradingOpensAt, tradingClosesAt, expectedResolutionAt, resolution: proof, conflict,
+          revision: digest([entry!.id, retrievedAt.toISOString().slice(0, 10), catalog.marketLifecycle,
+            tradingOpensAt?.toISOString(), tradingClosesAt?.toISOString(), expectedResolutionAt?.toISOString(), proof, conflict]),
+        }).onConflictDoNothing()
       }
       let eligibleQuotes = 0
       for (const quote of quotes) {

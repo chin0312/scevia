@@ -135,6 +135,66 @@ afterAll(async () => {
 })
 
 describe('migrations and canonical persistence', () => {
+  it('evaluates, freezes and compares an independently funded historical replay using the canonical ledger', async () => {
+    const app = await createTestApp()
+    const another = await buildApp({ database, config: { ...testConfig(), devPrincipalId: OTHER_OWNER_ID } })
+    openApps.push(another)
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const request = (method: 'GET' | 'POST' | 'PATCH' | 'DELETE', url: string, payload?: object) =>
+      app.inject({ method, url, headers, ...(payload ? { payload } : {}) })
+    const collection = (await request('POST', '/v1/simulations')).json().collection.id
+    const root = '/v1/simulations/' + collection + '/replays'
+    const at = (day: number) => '2025-01-0' + day + 'T12:00:00.000Z'
+    const [event] = await database.insert(events).values({ providerCode: 'kalshi', externalId: 'replay-test-event', name: 'Replay fixture event' }).returning()
+    const [market] = await database.insert(markets).values({ providerCode: 'kalshi', externalId: 'REPLAY-TEST',
+      eventId: event!.id, title: 'Replay fixture market', settlementAssetCode: 'USD' }).returning()
+    const [yes] = await database.insert(instruments).values(['yes', 'no'].map((outcome) => ({ marketId: market!.id,
+      externalId: 'REPLAY-TEST:' + outcome, outcomeName: outcome, outcomeType: outcome, settlementAssetCode: 'USD' }))).returning()
+    await database.insert(marketLifecycleEvidence).values({ revision: 'replay-lifecycle', marketId: market!.id,
+      lifecycle: 'open', retrievedAt: new Date(at(5)), tradingOpensAt: new Date(at(1)), tradingClosesAt: new Date(at(6)) })
+    const marks = [['0.4', 2], ['0.3', 3], ['0.6', 4]] as const
+    await database.insert(sharedMarketObservations).values(marks.map(([price, day]) => ({
+      instrumentId: yes!.id, price, asset: 'USD', method: 'historical_close', source: 'fixture',
+      revision: 'replay-mark-' + day, retrievedAt: new Date(at(5)), observedAt: new Date(at(day)), effectiveAt: new Date(at(day)),
+    })))
+    const configuration = {
+      version: 1, from: at(1), through: at(5),
+      buckets: [{ id: 'virtual', venue: 'kalshi', asset: 'USD', capital: '100' }],
+      positions: [{ id: 'buy', bucket: 'virtual', instrumentId: yes!.id,
+        entry: { at: at(2), execution: { mode: 'reference' }, size: { mode: 'quantity', value: '50' }, fee: { mode: 'fixed', amount: '1' } },
+        exits: [{ at: at(4), quantity: '50', execution: { mode: 'reference' }, fee: { mode: 'fixed', amount: '1' } }] }],
+    }
+    const evaluated = await request('POST', root + '/evaluate', configuration)
+    expect(evaluated.statusCode, evaluated.body).toBe(200)
+    const preview = evaluated.json()
+    expect(preview.result).toMatchObject({ status: 'evaluated', funding: { status: 'funded', buckets: [{ closingCash: '108', minimumKnownCash: '79' }] },
+      summary: { starting: '100', ending: '108', investmentGain: '8', totalReturn: '0.08', twr: '0.08', maximumDrawdown: '-0.06',
+        fees: { reportingValue: '2' } } })
+    expect(preview.result.history.find((point: { asOf: string }) => point.asOf === at(2))).toMatchObject({
+      completeValue: '99', cash: [{ value: '79' }], positions: [{ quantity: '50', value: '20' }],
+    })
+    const saved = await request('POST', root, { name: 'Original', previewToken: preview.previewToken })
+    expect(saved.statusCode, saved.body).toBe(201)
+    const id = saved.json().id
+    expect((await another.inject({ method: 'GET', url: root + '/' + id, headers })).statusCode).toBe(404)
+    const duplicate = await request('POST', root + '/' + id + '/duplicate', { name: 'Copy' })
+    expect(duplicate.statusCode).toBe(201)
+    expect((await request('POST', root + '/compare', { replayIds: [id, duplicate.json().id] })).json().compatible).toBe(true)
+    await database.update(sharedMarketObservations).set({ price: '0.7', revision: 'replay-refreshed' })
+      .where(eq(sharedMarketObservations.revision, 'replay-mark-4'))
+    expect((await request('GET', root + '/' + id)).json().result.summary.ending).toBe('108')
+    const refreshed = (await request('POST', root + '/evaluate', configuration)).json()
+    expect(refreshed.result.summary.ending).toBe('113')
+    const accepted = await request('PATCH', root + '/' + id, { revision: 1, previewToken: refreshed.previewToken })
+    expect(accepted.json()).toMatchObject({ revision: 2, result: { summary: { ending: '113' } } })
+    expect((await request('PATCH', root + '/' + id, { revision: 1, name: 'Stale' })).statusCode).toBe(409)
+    expect((await request('POST', root + '/evaluate', { ...configuration, mode: 'knowledge' })).json().result).toMatchObject({
+      status: 'partial', summary: { ending: null, twr: null },
+    })
+    expect((await request('DELETE', root + '/' + id + '?revision=2')).statusCode).toBe(204)
+    expect((await request('GET', root)).json().items).toHaveLength(1)
+  })
+
   it('discovers an untracked V2 market and keeps mapped research leases and simulations owner scoped', async () => {
     const condition = '0x' + 'a'.repeat(64)
     const transport = vi.fn(async (input: URL | string) => {

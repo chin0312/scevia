@@ -2,6 +2,7 @@ import { registerMarketReferences } from '../tracking/market-references.js'
 import { refreshPusd } from '../fx/coingecko.js'
 import { refreshUsdc } from '../fx/kraken.js'
 import { registerMarketEvidence } from '../tracking/discovery.js'
+import { registerHistoricalReplay } from '../replay/routes.js'
 import { registerOwnerPreferences } from './simulations.js'
 import { refreshEcb } from '../fx/ecb.js'
 import { startPolymarketStream } from '../tracking/polymarket-stream.js'
@@ -686,6 +687,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     })
 
     registerOwnerPreferences(privateApi, options.database)
+    registerHistoricalReplay(privateApi, options.database, options.config.historicalReplayMaxDays)
     registerMarketReferences(privateApi, options.database,
       options.config.kalshi?.environment === 'production' || options.config.nodeEnv === 'test' ? kalshiMarketData : undefined,
       liveAllowed || options.marketData ? marketData : undefined)
