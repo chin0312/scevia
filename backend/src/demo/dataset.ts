@@ -18,12 +18,12 @@ const market = scope.extend({
   outcomes: z.array(z.object({ instrument: id, name: z.enum(['YES', 'NO']) }).strict()).length(2),
   feeSchedule: z.object({ version: z.literal('kalshi-centicent-quadratic-v1'), rate: nonnegative, makerRate: nonnegative,
     retrievedAt: instant, source: z.enum(['kalshi_series', 'kalshi_event_override']), denomination: z.literal('USD') }).strict().optional(),
-  resolution: z.object({ knownAt: instant, winningInstrument: id, unitPayout: z.literal('1') }).strict().optional(),
+  resolution: z.object({ knownAt: instant, winningInstrument: id, unitPayout: z.literal('1'), simulatedPayoutAt: instant.optional() }).strict().optional(),
 }).strict()
 const quote = z.object({
   provider, nativeMarket: id, instrument: id, price: nonnegative.refine((value) => new Decimal(value).lte(1)),
   method: z.enum(['historical_close', 'book_midpoint', 'last_trade']),
-  source: z.enum(['kalshi_candlesticks', 'kalshi_book', 'polymarket_clob', 'authorized_capture']),
+  source: z.enum(['kalshi_candlesticks', 'kalshi_book', 'polymarket_clob', 'polymarket_price_history', 'authorized_capture']),
   observedAt: instant.nullable(), retrievedAt: instant,
 }).strict()
 export const demoDatasetSchema = z.object({
@@ -53,7 +53,8 @@ export function parseDemoDataset(value: unknown, allowFixture = false) {
       || (row.provider === 'polymarket' && row.asset === 'USD') || row.nativeMarket.startsWith('demo:')
       || new Set(row.outcomes.map((leg) => leg.instrument)).size !== 2 || new Set(row.outcomes.map((leg) => leg.name)).size !== 2
       || (row.feeSchedule && (row.provider !== 'kalshi' || row.feeSchedule.retrievedAt > manifest.capturedAt))
-      || (row.resolution && (row.lifecycle !== 'resolved' || row.resolution.knownAt > manifest.capturedAt
+      || (row.resolution && (row.lifecycle !== 'resolved' || row.resolution.knownAt > row.retrievedAt
+        || (row.resolution.simulatedPayoutAt !== undefined && row.resolution.simulatedPayoutAt < row.resolution.knownAt)
         || !row.outcomes.some((leg) => leg.instrument === row.resolution!.winningInstrument)))) throw new Error('invalid_demo_market_scope')
   }
   for (const row of manifest.quotes) {
@@ -83,4 +84,18 @@ export async function readDemoDataset(path: string, allowFixture = false) {
     if (bytesRead !== info.size) throw new Error('demo_dataset_changed')
     return parseDemoDataset(JSON.parse(buffer.subarray(0, bytesRead).toString('utf8')), allowFixture)
   } finally { await file.close() }
+}
+
+
+export function demoMarketAt(capture: { revision: string; catalogRevision?: string; dataset: DemoDataset; priorMarkets?: DemoDataset['markets'] },
+  provider: string, market: string, cutoff: string) {
+  const prefix = 'simulation:' + (capture.catalogRevision ?? capture.revision) + ':'
+  if (!market.startsWith(prefix)) return null
+  const matches = (row: DemoDataset['markets'][number]) => row.provider === provider && prefix + row.nativeMarket === market
+  const active = capture.dataset.markets.find(matches)
+  if (!active) return null
+  const prior = active.retrievedAt <= cutoff ? active : (capture.priorMarkets ?? [])
+    .filter((row) => matches(row) && row.retrievedAt <= cutoff).sort((left, right) => right.retrievedAt.localeCompare(left.retrievedAt))[0]
+  const resolutionKnown = active.resolution && active.resolution.knownAt <= cutoff
+  return { identity: active, asOf: prior, lifecycle: resolutionKnown ? 'resolved' : prior?.lifecycle ?? 'unknown' }
 }

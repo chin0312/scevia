@@ -51,19 +51,43 @@ export function registerDemoRoutes(app: FastifyInstance, db: Database, settings?
       if (demo.dataset.evidenceKind !== capture.manifest.evidenceKind) return { status: 'stale' as const }
       const curated = new Map(demo.dataset.markets.map((row) => [marketKey(row), row]))
       const capturedMarkets = new Map(capture.manifest.markets.map((row) => [marketKey(row), row]))
-      const latest = capture.manifest.quotes.filter((quote) => {
-        const market = curated.get(marketKey(quote))
-        const incoming = capturedMarkets.get(marketKey(quote))
-        return market?.lifecycle === 'open' && incoming?.lifecycle === 'open' && incoming.nativeEvent === market.nativeEvent
-          && incoming.asset === market.asset && market.outcomes.some((leg) => leg.instrument === quote.instrument)
-          && quote.method === 'book_midpoint' && quote.retrievedAt > demo.dataset.capturedAt
+      const rank = { open: 0, closed: 1, resolved: 2 } as const
+      const matches = (original: typeof demo.dataset.markets[number], incoming: typeof demo.dataset.markets[number]) =>
+        incoming.asset === original.asset && incoming.nativeEvent === original.nativeEvent
+        && original.outcomes.every((leg) => incoming.outcomes.some((item) => item.instrument === leg.instrument && item.name === leg.name))
+      const updatedMarkets = demo.dataset.markets.map((original) => {
+        const incoming = capturedMarkets.get(marketKey(original))
+        if (!incoming || !matches(original, incoming) || incoming.retrievedAt <= original.retrievedAt
+          || rank[incoming.lifecycle] < rank[original.lifecycle]) return original
+        return { ...incoming, ...(original.resolution ? { resolution: original.resolution } : {}) }
       })
-      if (!latest.length) return { status: 'ok' as const, row: { id: portfolioId, demo } }
+      const marketRevisions = new Map(updatedMarkets.map((row) => [marketKey(row), row]))
+      const previousQuoteTimes = new Map<string, string>()
+      for (const quote of demo.dataset.quotes) {
+        const key = JSON.stringify([marketKey(quote), quote.instrument])
+        if (availableAt(quote) > (previousQuoteTimes.get(key) ?? '')) previousQuoteTimes.set(key, availableAt(quote))
+      }
+      const latest = capture.manifest.quotes.filter((quote) => {
+        const original = curated.get(marketKey(quote))
+        const incoming = marketRevisions.get(marketKey(quote))
+        const observedMarket = capturedMarkets.get(marketKey(quote))
+        return original && observedMarket && matches(original, observedMarket) && incoming?.lifecycle === 'open' && original.outcomes.some((leg) => leg.instrument === quote.instrument)
+          && quote.method === 'book_midpoint'
+          && quote.retrievedAt > (previousQuoteTimes.get(JSON.stringify([marketKey(quote), quote.instrument])) ?? '')
+      })
+      if (!latest.length && updatedMarkets.every((row, index) => row === demo.dataset.markets[index])) {
+        return { status: 'ok' as const, row: { id: portfolioId, demo } }
+      }
       if (latest.length + demo.dataset.quotes.length > 2000) return { status: 'limit' as const }
 
       const catalogRevision = demo.catalogRevision ?? revision
-      const nextDataset = { ...demo.dataset, capturedAt: capture.manifest.capturedAt, quotes: [...demo.dataset.quotes, ...latest] }
-      const nextDemo = { catalogRevision, dataset: nextDataset, revision: digest(nextDataset) }
+      const capturedAt = capture.manifest.capturedAt > demo.dataset.capturedAt ? capture.manifest.capturedAt : demo.dataset.capturedAt
+      const nextDataset = { ...demo.dataset, capturedAt, markets: updatedMarkets, quotes: [...demo.dataset.quotes, ...latest] }
+      const history = demo.dataset.markets.filter((row, index) => row !== updatedMarkets[index]
+        && (row.lifecycle !== updatedMarkets[index]!.lifecycle || row.title !== updatedMarkets[index]!.title))
+      const priorMarkets = [...(demo.priorMarkets ?? []), ...history]
+      if (priorMarkets.length > 500) return { status: 'limit' as const }
+      const nextDemo = { catalogRevision, dataset: nextDataset, priorMarkets, revision: digest([nextDataset, priorMarkets]) }
       const observations = new Map<string, FinancialObservation[]>()
       const accounts = await tx.select().from(providerAccounts).where(eq(providerAccounts.portfolioId, portfolioId))
       for (const [index, quote] of latest.entries()) {
@@ -168,23 +192,6 @@ export function registerDemoRoutes(app: FastifyInstance, db: Database, settings?
         }
         const replay = (list: FinancialObservation[], asOf: string) => replayAccounting(
           list.map((observation, row) => ({ observation, batchId: portfolioId, row })), asOf)
-        for (const entry of catalog.values()) {
-          const resolution = entry.market.resolution
-          if (!resolution) continue
-          const account = accounts.get(accountKey(entry.market))!
-          const state = replay(observations.get(account)!, resolution.knownAt)
-          for (const [native, instrument] of entry.instruments) {
-            const holding = state.holdings.find((row) => row.instrument === instrument)
-            if (!holding || holding.quantity === '0') continue
-            const id = 'simulation:settlement:' + instrument
-            const price = native === resolution.winningInstrument ? '1' : '0'
-            const amount = price === '1' ? holding.quantity : '0'
-            record(entry.market, { id, type: 'settlement', timestamp: resolution.knownAt, instrument, canonicalInstrumentId: instrument,
-              quantity: holding.quantity, price, amount, sequence: 10_001 })
-            record(entry.market, { id: id + ':payout', entitlementId: id, type: 'redemption', timestamp: resolution.knownAt,
-              instrument, canonicalInstrumentId: instrument, quantity: holding.quantity, amount, sequence: 10_002 })
-          }
-        }
         for (const [account, list] of observations) {
           if (replay(list, manifest.capturedAt).discrepancies.length) throw new Error('demo_dataset_replay_invalid')
           await tx.insert(financialImportBatches).values({ portfolioId, contentHash: 'simulation:' + revision + ':' + account,

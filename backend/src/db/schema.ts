@@ -74,7 +74,7 @@ export const portfolios = scevia.table(
     id: uuid('id').defaultRandom().primaryKey(),
     ownerId: uuid('owner_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
     name: text('name').notNull(),
-    demo: jsonb('demo').$type<{ revision: string; catalogRevision?: string; dataset: import('../demo/dataset.js').DemoDataset }>(),
+    demo: jsonb('demo').$type<{ revision: string; catalogRevision?: string; dataset: import('../demo/dataset.js').DemoDataset; priorMarkets?: import('../demo/dataset.js').DemoDataset['markets'] }>(),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [index('portfolios_owner_id_idx').on(table.ownerId)],

@@ -18,7 +18,7 @@ npm run dev
 
 The manifest uses `evidenceKind: "authorized_capture"`, `capturedAt`, `markets`, `quotes`, `capital` and `trades`. The schema command documents field shapes. The validator also checks references, currencies, market identities, chronology and trade eligibility. Operators must validate the underlying capture provenance. The manifest has no credential fields. Fixture manifests are accepted only by the injected test assembly.
 
-Each trade refers to a zero-based quote index. A candle close may be used at its provider observation time. A midpoint without a source timestamp becomes eligible at retrieval time. Historical executions are simulated at a reference price, with an assumed fee, and do not establish that someone could have executed at that price. An unknown fee remains unknown. Settlements require independently verified standard dollar-unit resolution evidence and occur at its known time. A demo payout is simulated. The model uses the same entitlement and redemption effects as actual accounting.
+Each trade refers to a zero-based quote index. A candle close may be used at its provider observation time. A midpoint without a source timestamp becomes eligible at retrieval time. Historical executions are simulated at a reference price, with an assumed fee, and do not establish that someone could have executed at that price. An unknown fee remains unknown. Settlements require independently verified standard dollar-unit resolution evidence and occur at its known time. A demo payout is simulated. The shared ledger derives quantity from the effective pre-resolution inventory for each replay. Corrections, exclusions, restorations and partial exits therefore affect entitlement, proceeds and basis. Payout defaults to the resolution-evidence timestamp, or a declared simulated timestamp on or after it. A resolved market with unverified payout stops the open-price reference without posting cash. Actual provider receipts remain separate evidence.
 
 ## API and verification
 
@@ -37,15 +37,22 @@ Use the returned portfolio ID for accounting, transaction corrections, historica
 
 ## Refresh and retention
 
-When authorized, refresh the open markets in a curated capture using the existing unsigned Kalshi and Polymarket public services.
+For an initial capture, supply a plan with native Kalshi tickers or supported Polymarket links and condition IDs, virtual capital, and explicit trade side, quantity, fee assumption and observation time. For Polymarket, supply the independently verified collateral denomination. Exact historical reference times are required for seeded trades. The tool fails if a selected observation is absent and never makes up a price or a resolution. The public Polymarket metadata path leaves payout unresolved pending independently supported evidence.
 
 ```sh
-npm run demo:dataset -- refresh /absolute/path/to/authorized-demo.json /absolute/path/to/next-demo.json
+npm run --silent demo:dataset -- capture-schema > /tmp/scevia-demo-capture.schema.json
+npm run demo:dataset -- capture /absolute/path/to/approved-plan.json /absolute/path/to/authorized-demo.json
+```
+
+When authorized, refresh a batch in the curated capture using the existing unsigned Kalshi and Polymarket public services.
+
+```sh
+npm run demo:dataset -- refresh /absolute/path/to/authorized-demo.json /absolute/path/to/next-demo.json 0 12
 npm run demo:dataset -- validate /absolute/path/to/next-demo.json
 ```
 
-Refresh is bounded to 12 selected market entries per run. A Polymarket market needs its supported `publicLink`. Kalshi requests require the production market environment and public-data authorization. Failed lookups retain the original captured data and time, and a wholly unavailable refresh writes nothing. The command appends eligible marks to a separate output without changing trade references. Updating the configured path or atomically replacing its content allows subsequent reset/initialization to use the new revision. Existing workspaces stay pinned. The local manifest cache defaults to 60 seconds. New resolutions, historical candles and larger curated universe changes require a reviewed capture revision.
+Each run accepts an offset and a limit of up to 12, and reports a next offset. Pass each resulting capture forward through the remaining pages. A failed page keeps earlier evidence and its original time. Market lifecycle and standard Kalshi resolution can advance without a midpoint. Each quote keeps its own timestamp. The local cache defaults to 60 seconds.
 
 Phase 6B requires a permitted real capture and a manual financial check against the captured market evidence. Automated tests use a separately labelled injected fixture. Production guest identity, retention and deletion are Phase 7 work.
 
-To add eligible new midpoint marks while keeping edits and saved scenarios, send `{ "portfolioId": "<workspace ID>", "revision": "<current revision>" }` to `POST /v1/demo/refresh` after configuring a newer approved capture. The endpoint appends only new midpoint marks for existing open instruments. It preserves the owner's transactions and canonical instrument IDs. It leaves archived assumptions and previously saved scenarios pinned. Newly selected markets and reviewed resolutions are applied through a new workspace revision on reset.
+To apply a newer approved capture without resetting, send `{ "portfolioId": "<workspace ID>", "revision": "<current revision>" }` to `POST /v1/demo/refresh`. Updates require exact native event, market, asset and outcome associations and monotonic lifecycle. The workspace keeps existing instrument IDs and user trade decisions. Repeated refresh with the returned revision is idempotent. Previously saved scenarios stay frozen, and newly selected markets remain a reset or explicit scenario-selection workflow. Refresh does not extend the original simulated history declaration or imply other providers' observations are fresh.

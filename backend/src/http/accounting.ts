@@ -1,3 +1,5 @@
+import { demoMarketAt } from '../demo/dataset.js'
+import { demoResolutionEvidence } from '../demo/resolutions.js'
 import { kalshiCsvMapping, parseMappedKalshiCsv } from '../accounting/kalshi-csv.js'
 import { registerScenarioRoutes } from './scenarios.js'
 import { methodology, scopedReference, ScenarioError, type ScenarioBaseline, type ScenarioHolding, type FundingBucket } from '../scenarios/engine.js'
@@ -274,15 +276,18 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       }).from(decisions).where(eq(decisions.portfolioId, portfolioId)).orderBy(decisions.recordKey, desc(decisions.revision)).limit(10001)
       const [last] = await tx.select({ revision: decisions.revision }).from(decisions)
         .where(eq(decisions.portfolioId, portfolioId)).orderBy(desc(decisions.revision)).limit(1)
-      return [confirmed, provider, latest, last?.revision ?? 0] as const
+      const [workspace] = await tx.select({ demo: portfolios.demo }).from(portfolios).where(eq(portfolios.id, portfolioId))
+      const resolutions = workspace?.demo ? await demoResolutionEvidence(tx, portfolioId, workspace.demo, provider.accounts) : []
+      return [confirmed, provider, latest, last?.revision ?? 0, resolutions, workspace?.demo] as const
     }
-    const [confirmed, provider, latest, decisionRevision] = read ? await readAll(read)
+    const [confirmed, provider, latest, decisionRevision, resolutions, demoCapture] = read ? await readAll(read)
       : await database.transaction(readAll, { isolationLevel: 'repeatable read', accessMode: 'read only' })
     const sources = new Map(provider.evidence.flatMap((item) =>
       'sourceRecordId' in item && !item.unresolvedReason ? [[item.sourceRecordId, item] as const] : []))
     const connected = new Set(provider.accounts.filter((account) => account.kind !== 'file_import').map((account) => account.account))
     const supplementCandidates = new Set<string>()
-    const imported: Evidence[] = (preview ? [...confirmed, preview] : confirmed).flatMap((batch) => batch.observations.map((row, index): Evidence => {
+    const imported: Evidence[] = (preview ? [...confirmed, preview] : confirmed).flatMap((batch) => batch.observations.map((row, index): Evidence | null => {
+      if (batch.contentHash.startsWith('simulation:') && row.id?.startsWith('simulation:settlement:')) return null
       const ref = { batchId: batch.id, row: index + 2 }
       const observation = { ...row, account: batch.associatedAccountId ?? row.account }
       const supportOnly = row.type === 'history_complete' || row.type === 'opening_cash' || row.type === 'opening_inventory' || row.type === 'opening_position' || row.type === 'mark'
@@ -304,7 +309,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
         return { ...ref, observation, unresolvedReason: requested ? 'linked_source_unavailable' : 'cross_source_overlap_unresolved' }
       }
       return { ...ref, observation }
-    }))
+    }).filter((row): row is Evidence => row !== null))
     const prior = imported.filter((item) => 'batchId' in item && item.batchId === replaces)
     const allEvidence = [...provider.evidence, ...imported.filter((item) => !('batchId' in item) || item.batchId !== replaces)]
     const candidateOverlaps = supplementCandidates.size ? potentialOverlaps(allEvidence) : new Map()
@@ -320,7 +325,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       rawEvidence.filter((item) => !('batchId' in item) || item.batchId !== preview?.id), decisionMap)
       : { changes: new Map<string, PortfolioDecision>(), report: [] }
     const applied = applyDecisions(rawEvidence, new Map([...decisionMap, ...replacement.changes]))
-    return { ...provider, ...applied, rawEvidence, decisionMap, decisionRevision, replacement,
+    return { ...provider, ...applied, evidence: [...applied.evidence, ...resolutions], resolutions, demoCapture, rawEvidence, decisionMap, decisionRevision, replacement,
       recordDecisionRevisions: new Map(latest.map(({ key, revision }) => [key, revision])),
       truncated: provider.truncated || latest.length > 10000,
       selected: applied.records.some((record) => record.decision !== null) }
@@ -491,7 +496,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       const { venue, account } = records.get(key)!.original
       return JSON.stringify([venue, account])
     }))
-    const revision = digest([selection ?? null, ordered, input.records.filter(({ original }) =>
+    const revision = digest([selection ?? null, ordered, input.resolutions.filter(({ observation }) => affectedAccounts.has(JSON.stringify([observation.venue, observation.account]))).map((row) => row.observation), input.records.filter(({ original }) =>
       affectedAccounts.has(JSON.stringify([original.venue, original.account])))
       .map(({ key, revision, decision }) => [key, revision, decision, input.recordDecisionRevisions.get(key) ?? null]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))])
     const next = new Map([...input.decisionMap, ...changes])
@@ -513,7 +518,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
           const proposed = applyDecisions(plan.input.rawEvidence, plan.next)
           const asOf = new Date().toISOString()
           const before = replayAccounting(plan.input.evidence, asOf)
-          const after = replayAccounting(proposed.evidence, asOf)
+          const after = replayAccounting([...proposed.evidence, ...plan.input.resolutions], asOf)
           return { revision: plan.revision, affected: plan.changes.size, before: before.cash, after: after.cash,
             beforeHoldings: before.holdings, afterHoldings: after.holdings,
             beforeDiscrepancyCount: before.discrepancies.length, afterDiscrepancyCount: after.discrepancies.length }
@@ -622,8 +627,9 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       || left.account.localeCompare(right.account)).map(({ venue, account, assets }) => ({ venue, account,
       knownAssets: [...assets].sort(), selectedAssetEvidence: assets.has(asset) ? 'observed' : 'unknown' }))
     return { evidence, context: { asOf, asset, accounts, accountIdentities, venue: venue ?? null,
-      evidenceRevision: digest(input.records.filter((record) => inScope(record.adjusted))
-        .map((record) => [record.key, record.revision, record.decision]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))),
+      evidenceRevision: digest([input.records.filter((record) => inScope(record.adjusted))
+        .map((record) => [record.key, record.revision, record.decision]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+        input.resolutions.filter((row) => inScope(row.observation) && row.observation.timestamp <= asOf).map((row) => row.observation)]),
       coverageRevision: digest(input.coverage.filter(inScope)
         .map((row) => [row.venue, row.account, row.entity, row.status, row.lastSuccessfulRunId, row.lastAttemptStatus,
           row.lastAttemptAt?.toISOString(), row.lastSuccessfulSyncAt?.toISOString()])
@@ -781,7 +787,13 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const held = canonicalHoldings.filter((row) => row.quantityStatus === 'reconstructed_from_declaration').map((row) => row.instrument)
     const recentSnapshotIds = snapshots.filter((row) => new AnalyticalDecimal(row.quantity).gt(0)
       && Date.parse(asOf) - row.observedAt.getTime() <= 86_400_000).map((row) => row.instrument)
-    const { metadata, rules, effective, reported } = await loadExposureCatalog(tx, asOf, asset, ids, held, recentSnapshotIds, selected)
+    const catalog = await loadExposureCatalog(tx, asOf, asset, ids, held, recentSnapshotIds, selected)
+    const { rules, effective, reported } = catalog
+    const metadata = catalog.metadata.map((row) => {
+      const view = input.demoCapture ? demoMarketAt(input.demoCapture, row.provider, row.providerMarket, asOf) : null
+      return view ? { ...row, lifecycle: view.lifecycle, title: view.asOf?.title ?? row.title,
+        resolvesAt: view.asOf?.resolvesAt ? new Date(view.asOf.resolvesAt) : null } : row
+    })
     const edgeOrder = (left: { left: string; right: string }, right: { left: string; right: string }) =>
       left.left.localeCompare(right.left) || left.right.localeCompare(right.right)
     const response = { context, metadataBasis: 'current_catalog',
@@ -803,29 +815,37 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
 
   registerScenarioRoutes(app, database, owned, async (tx, portfolioId, source, publicInstruments): Promise<ScenarioBaseline> => {
     const { mode, asset, local } = source
-    const publicMatches = publicInstruments.length ? await tx.select({ id: instruments.id, token: instruments.externalId,
+    const asOf = new Date(source.asOf).toISOString()
+    const [demoPortfolio] = await tx.select({ demo: portfolios.demo }).from(portfolios).where(eq(portfolios.id, portfolioId))
+    const capture = demoPortfolio?.demo
+    const namespace = capture ? 'simulation:' + (capture.catalogRevision ?? capture.revision) + ':' : null
+    const tokens = publicInstruments.flatMap((row) => namespace ? [row.nativeInstrument!, namespace + row.nativeInstrument] : [row.nativeInstrument!])
+    const publicMatches = tokens.length ? await tx.select({ id: instruments.id, token: instruments.externalId,
       market: markets.externalId, provider: markets.providerCode }).from(instruments).innerJoin(markets, eq(instruments.marketId, markets.id))
-      .where(and(inArray(markets.providerCode, ['polymarket', 'kalshi']), inArray(instruments.externalId, publicInstruments.map((row) => row.nativeInstrument!)))) : []
+      .where(and(inArray(markets.providerCode, ['polymarket', 'kalshi']), inArray(instruments.externalId, tokens))) : []
     const aliases: Record<string, string> = {}
     const normalizedPublic = publicInstruments.map((row) => {
-      const exact = publicMatches.find((entry) => entry.provider === row.provider && entry.market === row.nativeMarket && entry.token === row.nativeInstrument)
+      const matches = (prefix: string) => publicMatches.find((entry) => entry.provider === row.provider
+        && entry.market === prefix + row.nativeMarket && entry.token === prefix + row.nativeInstrument)
+      const exact = (namespace ? matches(namespace) : undefined) ?? matches('')
       if (exact) aliases[row.id] = exact.id
       return { ...row, id: exact?.id ?? row.id }
     })
     const catalog = [...new Set([...source.catalog, ...Object.values(aliases)])]
     const venueFor = (provider: string) => ['polymarket', 'kalshi'].includes(provider) ? provider : undefined
-    const [demoPortfolio] = await tx.select({ demo: portfolios.demo }).from(portfolios).where(eq(portfolios.id, portfolioId))
-    const capture = demoPortfolio?.demo
     const metadataFor = (entry: Awaited<ReturnType<typeof loadExposureCatalog>>['metadata'][number]) => {
       const venue = venueFor(entry.provider)
-      const simulated = capture?.dataset.markets.find((row) => row.provider === entry.provider
-        && 'simulation:' + (capture.catalogRevision ?? capture.revision) + ':' + row.nativeMarket === entry.providerMarket)
-      return { ...(simulated?.feeSchedule ? { feeSchedule: simulated.feeSchedule } : {}), market: entry.market, event: entry.event, outcome: entry.outcome, lifecycle: entry.lifecycle,
-        provider: entry.provider, nativeMarket: entry.providerMarket, nativeInstrument: entry.nativeInstrument, providerMarket: entry.providerMarket,
-        settlementAsset: entry.settlementAsset ?? entry.marketAsset, resolvesAt: entry.resolvesAt?.toISOString() ?? null,
+      const view = capture ? demoMarketAt(capture, entry.provider, entry.providerMarket, asOf) : null
+      const simulated = view?.identity
+      const updated = view?.asOf
+      const lifecycle = view?.lifecycle ?? entry.lifecycle
+      return { ...(updated?.feeSchedule ? { feeSchedule: updated.feeSchedule } : {}), market: entry.market, event: entry.event, outcome: entry.outcome, lifecycle,
+        provider: entry.provider, nativeMarket: simulated?.nativeMarket ?? entry.providerMarket,
+        nativeInstrument: simulated && namespace ? entry.nativeInstrument.slice(namespace.length) : entry.nativeInstrument,
+        providerMarket: entry.providerMarket,
+        settlementAsset: entry.settlementAsset ?? entry.marketAsset, resolvesAt: updated?.resolvesAt ?? entry.resolvesAt?.toISOString() ?? null,
         ...(venue ? { venue } : {}) }
     }
-    const asOf = new Date(source.asOf).toISOString()
     const actual = mode === 'actual' ? await loadExposureInputs(tx, portfolioId, asOf, asset,
       { accounts: source.accounts.join(','), ...(source.venue === undefined ? {} : { venue: source.venue }) }, catalog) : null
     const model = actual ?? await loadExposureCatalog(tx, asOf, asset, catalog, [], [], catalog)
@@ -998,11 +1018,12 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const rates: Record<string, string | undefined> = { USD: '1', USDC: rate, PUSD: pusd }
     const supported = groups.length > 0 && !unknownAccounts.length && groups.every((group) =>
       Boolean(rates[group.asset]) && group.value !== null)
+    const missingAssumption = groups.some((group) => (group.asset === 'USDC' || group.asset === 'PUSD') && !rates[group.asset])
     return { asOf, scope: 'selected_financial_evidence_only', groups, unknownAccounts,
-      indicativeUsd: (rate || pusd) && supported ? { value: groups.reduce((total, group) =>
+      indicativeUsd: supported ? { value: groups.reduce((total, group) =>
         total.plus(new AnalyticalDecimal(group.value!).mul(rates[group.asset]!)), new AnalyticalDecimal(0)).toFixed(),
         usdPerUsdc: rate, ...(pusd ? { usdPerPusd: pusd } : {}), methodology: 'user_assumed_rate', asOf, fundsTransferable: false } : null,
-      conversionAvailability: !rate ? 'assumption_required' : supported ? 'indicative' : 'incomplete_or_unsupported_evidence' }
+      conversionAvailability: supported ? 'indicative' : missingAssumption ? 'assumption_required' : 'incomplete_or_unsupported_evidence' }
   })
 
   app.get<{ Params: { portfolioId: string }; Querystring: unknown }>(prefix + '/analytics/exposure', {

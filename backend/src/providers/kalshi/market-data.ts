@@ -8,7 +8,8 @@ import { KalshiClient } from './client.js'
 
 const ticker = z.string().regex(/^[A-Z0-9][A-Z0-9_.-]{0,127}$/)
 const envelope = z.object({ markets: z.array(z.unknown()).max(100), cursor: z.string().max(4000).optional() })
-const quotes = z.object({ notional_value_dollars: decimalTextSchema.optional(), expected_expiration_time: z.iso.datetime({ offset: true }).nullable().optional(), last_price_dollars: decimalTextSchema.optional(), close_time: z.iso.datetime({ offset: true }).optional() })
+const quotes = z.object({ result: z.string().optional(), settlement_value_dollars: decimalTextSchema.nullable().optional(),
+  settlement_ts: z.iso.datetime({ offset: true }).nullable().optional(),  notional_value_dollars: decimalTextSchema.optional(), expected_expiration_time: z.iso.datetime({ offset: true }).nullable().optional(), last_price_dollars: decimalTextSchema.optional(), close_time: z.iso.datetime({ offset: true }).optional() })
 
 export function parseKalshiLink(input: string) {
   let url: URL
@@ -30,11 +31,16 @@ export function kalshiMarketChoice(raw: unknown, retrievedAt: string) {
   const quote = quotes.parse(raw)
   const yes = quote.last_price_dollars
   const standard = quote.notional_value_dollars !== undefined && new Decimal(quote.notional_value_dollars).eq(1)
+  const resolution = standard && record.marketLifecycle === 'resolved' && quote.settlement_ts
+    && (quote.result === 'yes' || quote.result === 'no') && quote.settlement_value_dollars != null
+    && new Decimal(quote.settlement_value_dollars).eq(quote.result === 'yes' ? 1 : 0)
+    && Date.parse(quote.settlement_ts) <= Date.parse(retrievedAt)
+    ? { knownAt: new Date(quote.settlement_ts).toISOString(), winningInstrument: record.externalMarketId + ':' + quote.result, unitPayout: '1' as const } : null
   const usable = standard && yes !== undefined && new Decimal(yes).gte(0) && new Decimal(yes).lte(1)
   return { provider: 'kalshi' as const, marketTicker: record.externalMarketId, eventTicker: record.externalEventId,
     title: record.marketTitle, lifecycle: record.marketLifecycle, tradingClosesAt: quote.close_time ?? null,
     settlementAsset: 'USD', reviewedPayout: false, feeSchedule: null as KalshiScenarioFeeSchedule | null, expectedResolutionAt: quote.expected_expiration_time ?? null,
-    establishedPayoutUnit: standard ? '1' : null,
+    establishedPayoutUnit: standard ? '1' : null, retrievedAt, resolution,
     outcomes: record.outcomes.map((item) => {
       const no = item.outcomeType === 'no'
       const midpoint = kalshiBookMidpoint(raw, no)
@@ -78,11 +84,18 @@ export class KalshiMarketDataService {
   private choice(raw: unknown, retrievedAt: string) {
     const item = kalshiMarketChoice(raw, retrievedAt)
     return { ...item, marketTicker: this.identityPrefix + item.marketTicker, eventTicker: this.identityPrefix + item.eventTicker,
+      resolution: item.resolution ? { ...item.resolution, winningInstrument: this.identityPrefix + item.resolution.winningInstrument } : null,
       outcomes: item.outcomes.map((outcome) => ({ ...outcome, id: this.identityPrefix + outcome.id })) }
   }
   async lookup(id: string, signal: AbortSignal) {
     const checked = ticker.parse(id)
-    const value = z.object({ market: z.unknown() }).parse(await this.client.read('market', new URLSearchParams(), signal, checked))
+    let response: unknown
+    try { response = await this.client.read('market', new URLSearchParams(), signal, checked) }
+    catch (error) {
+      if (!(error instanceof ProviderAdapterError) || error.code !== 'kalshi_http_404') throw error
+      response = await this.client.read('historicalMarket', new URLSearchParams(), signal, checked)
+    }
+    const value = z.object({ market: z.unknown() }).parse(response)
     const result = this.choice(value.market, new Date().toISOString())
     if (result.marketTicker !== this.identityPrefix + checked) throw new ProviderAdapterError('kalshi_market_identity_mismatch', false)
     return this.loadFees && result.lifecycle === 'open' && result.establishedPayoutUnit === '1'

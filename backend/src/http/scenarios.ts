@@ -164,10 +164,24 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
     validateSource(value)
     if (!frozenPublic && value.publicOutcomes.length && !resolvePublic) throw new ScenarioError('provider_live_disabled')
     const pending = new Map<string, Promise<unknown>>()
+    const requiresDemoIdentity = !frozenPublic && value.asset === 'PUSD' && value.publicOutcomes.length > 0
+    const [demoOwner] = requiresDemoIdentity ? await db.select({ demo: portfolios.demo }).from(portfolios)
+      .where(eq(portfolios.id, portfolioId)).limit(1) : []
     const resolved = frozenPublic ?? await Promise.all(value.publicOutcomes.map(async (selection) => {
       const key = selection.assetIdType === 'kalshi_outcome' ? 'kalshi:' + selection.url + ':' + selection.assetId : 'polymarket:' + selection.url
       if (!pending.has(key)) pending.set(key, resolvePublic!(selection.url, selection.assetIdType, selection.assetId))
-      return selectPublicOutcome(await pending.get(key), selection, value.asset, new Date(value.asOf).toISOString())
+      const market = await pending.get(key)
+      const asOf = new Date(value.asOf).toISOString()
+      if (requiresDemoIdentity && demoOwner?.demo && selection.assetIdType !== 'kalshi_outcome') {
+        if (selection.captureCurrentQuote) throw new ScenarioError('demo_pusd_quote_requires_captured_reference')
+        const identified = selectPublicOutcome(market, selection, 'USDC', asOf)
+        const exact = demoOwner.demo.dataset.markets.some((row) => row.provider === 'polymarket' && row.asset === 'PUSD'
+          && row.nativeMarket === identified.nativeMarket && row.outcomes.some((leg) => leg.instrument === identified.nativeInstrument))
+        if (!exact) throw new ScenarioError('public_market_asset_mismatch')
+        const { feeSchedule: _fees, markSource: _markSource, ...identity } = identified
+        return { ...identity, settlementAsset: 'PUSD', mark: null, markAt: null, latestPrice: null, latestPriceAt: null }
+      }
+      return selectPublicOutcome(market, selection, value.asset, asOf)
     }))
     return db.transaction(async (tx) => {
       const frozen = await baseline(tx, portfolioId, value, resolved)
@@ -361,12 +375,14 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
     }
     return { ...frozen, components: frozen.components.map((row) => ({ ...row, input: edits[row.baseline.asset] ?? row.input })) }
   }
-  route('PATCH', bundlePath + '/:scenarioId', z.object({ revision, inputs: componentInputs }).strict(),
+  route('PATCH', bundlePath + '/:scenarioId', z.object({ revision, inputs: componentInputs, assumedUsdPerUnit: denominationEvaluation.shape.assumedUsdPerUnit.unwrap().nullable().optional() }).strict(),
     async ({ portfolioId, scenarioId }, value, reply) => {
       const current = await getBundle(portfolioId, scenarioId!)
       if (!current) return notFound(reply)
       if (current.revision !== value.revision) return stale(reply)
-      return await bundleUpdate(portfolioId, scenarioId!, value.revision, applyComponentInputs(current.frozen, value.inputs)) ?? stale(reply)
+      const edited = applyComponentInputs(current.frozen, value.inputs)
+      const frozen = value.assumedUsdPerUnit === undefined ? edited : { ...edited, assumedUsdPerUnit: value.assumedUsdPerUnit ?? undefined }
+      return await bundleUpdate(portfolioId, scenarioId!, value.revision, frozen) ?? stale(reply)
     })
   route('POST', bundlePath + '/:scenarioId/instruments', extend.extend({ asset: sourceCommon.asset }),
     async ({ portfolioId, scenarioId }, value, reply) => {

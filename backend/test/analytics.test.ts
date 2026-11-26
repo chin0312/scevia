@@ -151,7 +151,7 @@ describe('independent analytics examples', () => {
       best: { contributions: [{ market: 'a', instrument: 'yes', account: 'a', venue: 'v', payout: '100' }] } })
   })
 
-  it('matches direct replay at daily boundaries including mark expiry and a later execution fee', () => {
+  it('matches direct replay at daily boundaries including carried marks and a later execution fee', () => {
     const item = (row: number, values: Partial<FinancialObservation>): Evidence => ({
       batchId: 'one', row, observation: {
         venue: 'v', account: 'a', asset: 'USD', id: String(row), timestamp: '2026-01-01T00:00:00.000Z',
@@ -168,9 +168,10 @@ describe('independent analytics examples', () => {
       item(7, { type: 'mark', instrument: 'yes', price: '0.6', timestamp: '2026-01-04T00:00:00.000Z' }),
     ]
     const result = analyzePerformance(evidence, ['a'], 'USD', '2026-01-01T00:00:00.000Z', '2026-01-05T01:00:00.000Z')
-    for (const point of result.history) expect(point.value).toBe(replayAccounting(evidence, point.asOf).cash[0]?.portfolioValue)
+    for (const point of result.history) expect(point.value).toBe(replayAccounting(evidence, point.asOf).cash[0]?.referencePortfolioValue)
     expect(result.history.some((point) => point.value === '100.8')).toBe(true)
-    expect(result.ending.value).toBeNull()
+    expect(result.ending).toMatchObject({ value: '100.8', valuationQuality: 'carry_forward_reference_estimate', staleReferenceCount: 1 })
+    expect(replayAccounting(evidence, result.ending.asOf).cash[0]?.portfolioValue).toBeNull()
   })
 
   it('includes cash and pending entitlement exactly once in selected allocation', () => {

@@ -34,6 +34,9 @@ describe('Polymarket provider adapter', () => {
     const from = '0x' + '1'.repeat(40)
     const topic = (value: string) => '0x' + value.slice(2).padStart(64, '0')
     const transfer = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+    const filled = '0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee'
+    const exchange = '0xe111180000d2663c0091e4f400237545b87b996b'
+    const fillData = '0x' + [0, 42, 400000, 1000000, 10000, 0, 0].map((n) => n.toString(16).padStart(64, '0')).join('')
     const reader = new PolymarketCollateralReader(new URL('https://rpc.example'), async (_url, options) => {
       const request = JSON.parse(String(options?.body))
       const block = { hash, number: '0x200', timestamp: '0x6553f100' }
@@ -41,12 +44,13 @@ describe('Polymarket provider adapter', () => {
         eth_chainId: '0x89', eth_getBlockByNumber: block, eth_call: '0x' + '6'.padStart(64, '0'),
         eth_getTransactionReceipt: { transactionHash: transaction, blockHash: hash, blockNumber: '0x200', status: '0x1',
           logs: [{ address: polygonPusd, topics: [transfer, topic(from), topic(WALLET)], data: '0x' + (2500000).toString(16).padStart(64, '0'),
-            logIndex: '0x7' }] },
+            logIndex: '0x7' }, { address: exchange, topics: [filled, '0x' + 'c'.repeat(64), topic(WALLET), topic(from)],
+            data: fillData, logIndex: '0x8' }] },
       }
       return jsonResponse({ jsonrpc: '2.0', id: 1, result: responses[request.method] })
     })
     expect(await reader.transferEvidence(WALLET, transaction, NO_ABORT)).toMatchObject({ chainId: 137, blockHash: hash,
-      items: [{ id: [137, polygonPusd, transaction, 7].join(':'), amount: '2.500000', asset: 'PUSD', classification: 'unresolved_transfer' }] })
+      items: [{ id: [137, polygonPusd, transaction, 7].join(':'), amount: '2.500000', asset: 'PUSD', classification: 'unresolved_transfer' }], fills: [{ side: 'buy', instrument: '42', grossCollateral: '0.400000', quantity: '1.000000', fee: '0.010000' }] })
   })
 
   it('reads exact native pUSD at a pinned finalized Polygon block', async () => {

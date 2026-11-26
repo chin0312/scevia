@@ -14,7 +14,7 @@ const metric = model({ value: nullableText, availability: { enum: ['calculated',
 const quality = { enum: ['unavailable', 'carry_forward_reference_estimate', 'reconstructed_selected_value'] }
 const qualityMetric = model({ ...metric.properties, quality })
 const valuation = model({ asOf: timestamp, knownValue: nullableText, value: nullableText,
-  accounts: natural, returnEligible: { type: 'boolean' }, valuationQuality: { enum: [
+  accounts: natural, oldestReferenceMarkAt: nullableText, staleReferenceCount: natural, returnEligible: { type: 'boolean' }, valuationQuality: { enum: [
     'unavailable', 'carry_forward_reference_estimate', 'reconstructed_selected_value',
   ] } })
 const historyPoint = model({ ...valuation.properties, returnIndex: nullableText, dailyReturn: nullableText, drawdown: nullableText,

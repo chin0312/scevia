@@ -3,6 +3,10 @@ import { ProviderAdapterError } from '../adapter.js'
 import { normalizedRecordSchema } from '../../domain/model.js'
 
 export const polygonPusd = '0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb'
+// CTF Exchange V2 deployments documented by Polymarket. Other exchange generations use different events.
+const ctfV2 = new Set(['0xe111180000d2663c0091e4f400237545b87b996b', '0xe2222d279d744050d28e00520010520000310f59'])
+const orderFilled = '0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee'
+const indexedAddress = /^0x0{24}[0-9a-f]{40}$/i
 const word = z.string().regex(/^0x[0-9a-f]{64}$/i)
 const quantity = z.string().regex(/^0x[0-9a-f]{1,16}$/i)
 const address = /^0x[0-9a-f]{40}$/i
@@ -70,8 +74,7 @@ export class PolymarketCollateralReader {
     const items = receipt.logs.flatMap((log) => {
       if (log.removed || log.address.toLowerCase() !== polygonPusd || log.topics.length !== 3
         || log.topics[0]?.toLowerCase() !== transferEvent || !word.safeParse(log.data).success) return []
-      const indexed = /^0x0{24}[0-9a-f]{40}$/i
-      if (!indexed.test(log.topics[1]!) || !indexed.test(log.topics[2]!)) return []
+      if (!indexedAddress.test(log.topics[1]!) || !indexedAddress.test(log.topics[2]!)) return []
       const from = '0x' + log.topics[1]!.slice(-40).toLowerCase()
       const to = '0x' + log.topics[2]!.slice(-40).toLowerCase()
       if (from !== normalizedWallet && to !== normalizedWallet) return []
@@ -79,11 +82,29 @@ export class PolymarketCollateralReader {
       return [{ id: ['137', polygonPusd, receipt.transactionHash.toLowerCase(), logIndex].join(':'),
         logIndex, from, to, amount: pusdAmount(BigInt(log.data)), asset: 'PUSD' as const, classification: 'unresolved_transfer' as const }]
     })
-    if (new Set(items.map((item) => item.id)).size !== items.length) {
+    const fills = receipt.logs.flatMap((log) => {
+      const exchange = log.address.toLowerCase()
+      if (log.removed || !ctfV2.has(exchange) || log.topics.length !== 4 || log.topics[0]?.toLowerCase() !== orderFilled
+        || !indexedAddress.test(log.topics[2]!) || '0x' + log.topics[2]!.slice(-40).toLowerCase() !== normalizedWallet
+        || !/^0x[0-9a-f]{448}$/i.test(log.data)) return []
+      const words = log.data.slice(2).match(/.{64}/g)!.map((value) => BigInt('0x' + value))
+      const [side, token, makerAmount, takerAmount, fee] = words as [bigint, bigint, bigint, bigint, bigint]
+      if ((side !== 0n && side !== 1n) || token === 0n || makerAmount === 0n || takerAmount === 0n) return []
+      const buy = side === 0n
+      const gross = buy ? makerAmount : takerAmount
+      if (!buy && fee > gross) return []
+      const logIndex = BigInt(log.logIndex).toString()
+      return [{ id: ['137', exchange, receipt.transactionHash.toLowerCase(), logIndex].join(':'),
+        exchange, logIndex, orderHash: log.topics[1]!, instrument: token.toString(), side: buy ? 'buy' as const : 'sell' as const,
+        grossCollateral: pusdAmount(gross), quantity: pusdAmount(buy ? takerAmount : makerAmount),
+        fee: pusdAmount(fee), asset: 'PUSD' as const, classification: 'ctf_v2_order_fill' as const }]
+    })
+    const ids = [...items, ...fills].map((item) => item.id)
+    if (new Set(ids).size !== ids.length) {
       throw new ProviderAdapterError('polymarket_polygon_duplicate_log', false)
     }
     return { chainId: 137, wallet: normalizedWallet, contract: polygonPusd,
-      transactionHash: receipt.transactionHash, blockHash: canonical.hash, blockNumber: canonical.number, observedAt, items }
+      transactionHash: receipt.transactionHash, blockHash: canonical.hash, blockNumber: canonical.number, observedAt, items, fills }
   }
 
   async balance(wallet: string, signal: AbortSignal) {
