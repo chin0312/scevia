@@ -27,7 +27,8 @@ import { BuildSummary, PositionsCard } from './lab/Builder'
 import { CompareView } from './lab/Compare'
 import { LabHome } from './lab/Home'
 import { AssumptionsBar, AssumptionsDrawer, StartSetup } from './lab/Setup'
-import { COLORS, EXAMPLES, evaluate, evaluateActual, type Evaluation, type SizeMode } from './lab/model'
+import { COLORS, EXAMPLES, describe, evaluate, evaluateActual, type Evaluation, type SizeMode } from './lab/model'
+import { PriceCheckModal } from './lab/PriceCheck'
 
 type View = 'Build' | 'Analyze' | 'Compare'
 const VIEWS = ['Build', 'Analyze', 'Compare'] as const
@@ -70,6 +71,7 @@ export default function ScenarioLab() {
   const [switchTo, setSwitchTo] = useState<Baseline | null>(null)
   const [adding, setAdding] = useState(false)
   const [assumptions, setAssumptions] = useState(false)
+  const [priceCheck, setPriceCheck] = useState(false)
   const [undo, setUndo] = useState<{ label: string; prev: Adjustment[]; key: string } | null>(null)
 
   const isHome = activeKey === 'base'
@@ -152,7 +154,7 @@ export default function ScenarioLab() {
 
   const create = (baseline: Baseline, funding: Partial<Record<Platform, number>> = {}) => {
     const key = nextKey()
-    setScenarios((ss) => [...ss, SC.create(key, nextColor(), baseline === 'scratch' ? 'From scratch' : 'Untitled scenario', baseline, baseline === 'portfolio' ? TODAY : null, funding)])
+    setScenarios((ss) => [...ss, SC.create(key, nextColor(), baseline === 'scratch' ? 'From scratch' : 'Untitled scenario', baseline, baseline === 'portfolio' ? TODAY : null, funding, settings.newFees === 'excluded' ? { fees: { mode: 'excluded' } } : {})])
     open(key); setRenaming(true)
     if (baseline === 'scratch') window.setTimeout(() => setAdding(true), 0)
   }
@@ -223,7 +225,7 @@ export default function ScenarioLab() {
           <div className="lab-nav">
             <Tabs label="Scenario views" options={VIEWS} value={view} onChange={(v) => { setView(v); window.scrollTo(0, 0) }}
               render={(o) => <span className="row" style={{ gap: 'var(--space-2)' }}>{o}{o === 'Build' && errorCount > 0 && <span className="tab-flag" aria-label={`${errorCount} incomplete`}>{errorCount}</span>}{o === 'Compare' && <small className="t3">{scenarios.length}</small>}</span>} />
-            <AssumptionsBar s={active} E={E} onEdit={() => setAssumptions(true)} />
+            <AssumptionsBar s={active} E={E} onEdit={() => setAssumptions(true)} onCheckPrices={() => setPriceCheck(true)} />
           </div>
           {rebased && <Callout icon="info">Created from your portfolio as of {fmtDate(active.baseAsOf!)}. It now starts from the portfolio as of {fmtDate(TODAY)}; held-position rows compare targets with today’s holdings.</Callout>}
 
@@ -263,6 +265,8 @@ export default function ScenarioLab() {
           toast(`Added ${list.length} position${list.length > 1 ? 's' : ''}.${blank ? ` ${blank === list.length ? (blank > 1 ? 'Enter their targets and prices' : 'Enter a target and price') : `${blank} need${blank > 1 ? '' : 's'} a target and price`} to be included.` : ' Held positions start at their current size.'}`, 'info')
           setView('Build')
         }} />}
+      {priceCheck && active && <PriceCheckModal adjs={adjs} baseAsOf={active.baseAsOf ?? null} titleOf={(a) => `${describe(a).title} · ${describe(a).side}`} onClose={() => setPriceCheck(false)}
+        onApply={(checks) => { setAdjs((as) => SC.applyLatestRefs(as, checks)); setPriceCheck(false); toast('Reference prices updated. Assumed prices and targets are unchanged.') }} />}
       {assumptions && active && <AssumptionsDrawer s={active} E={E} onChange={(patch) => update((s) => SC.configure(s, patch))} onClose={() => setAssumptions(false)} />}
       {pending && <AddToScenarioModal ids={pending.ids} from={pending.from} scenarios={scenarios} defaultTarget={active ? active.key : scenarios[0]?.key ?? 'new'} onCancel={() => setPending(null)} onConfirm={confirmAdd} />}
       {confirmDelete && active && (

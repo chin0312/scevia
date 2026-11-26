@@ -22,7 +22,11 @@ export interface AccountRef {
   /** How the account was added: connected (API / address tracking), imported (CSV only) or manual. */
   kind: 'connected' | 'imported' | 'manual'
   sources: AcquisitionKind[]
+  /** Native denomination of the account's cash and contracts. USD, USDC and PUSD are separate assets. */
+  denomination: Denomination
 }
+/** Native settlement and cash asset of an account. Combined reporting across them is indicative only. */
+export type Denomination = 'USD' | 'USDC' | 'PUSD'
 
 export interface OpenPosition {
   id: string; market: string; eventId: string; category: Category; platform: Platform; side: Side

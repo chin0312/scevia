@@ -6,6 +6,7 @@ import './styles/components.css'
 import './styles/pages.css'
 import './styles/app.css'
 import './styles/lab.css'
+import './styles/workspace.css'
 import './styles/responsive.css'
 import App from './App'
 

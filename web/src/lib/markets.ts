@@ -26,6 +26,11 @@ export interface CatalogMarket {
   refAsOf: string | null
   /** Fee parameters for this market (Phase 2: from the provider, e.g. Polymarket `feeRateBps`); null = unavailable. */
   fee: FeeSchedule | null
+  /** Lifecycle: when trading opened and closes (UTC dates); null when unknown. A market can't be traded outside them. */
+  listedAt?: string | null
+  closesAt?: string | null
+  /** Confirmed resolution, or null while unresolved. */
+  resolution?: { outcome: Outcome; at: string } | null
 }
 export interface CatalogEvent { provider: Platform; eventId: string; eventTitle: string; url: string; markets: CatalogMarket[]; available: boolean }
 

@@ -142,16 +142,35 @@ export function series(f: PlatformFilter, start = HISTORY_START, end = TODAY): S
 }
 
 /* ───────────── Periods ───────────── */
-export const PERIODS = ['1M', '3M', '6M', 'YTD', 'All'] as const
+export const PERIODS = ['1W', '1M', '3M', '6M', 'YTD', '1Y', 'All'] as const
 export type Period = (typeof PERIODS)[number]
 export interface Range { start: string; end: string }
-export function periodRange(p: Period): Range & { label: string; prior: Range | null } {
+const DAYS: Partial<Record<Period, number>> = { '1W': 7, '1M': 30, '3M': 91, '6M': 182, '1Y': 365 }
+const fmtLong = (d: string) => fmtDate(d, { month: 'short', day: 'numeric', year: 'numeric' })
+const startOf = (p: Period, end: string) => p === 'YTD' ? `${Number(end.slice(0, 4)) - 1}-12-31` : p === 'All' ? HISTORY_START : addDays(end, -(DAYS[p] ?? 0))
+/** A preset period is available only when the history covers its whole span ("All" always is). */
+export const periodAvailable = (p: Period) => p === 'All' || startOf(p, TODAY) >= addDays(HISTORY_START, -1)
+/** A preset period, or a custom range (dates are period boundaries: changes after `start`, up to and including `end`). */
+export function periodRange(p: Period | Range): Range & { label: string; prior: Range | null } {
+  if (typeof p !== 'string') {
+    const len = daysBetween(p.start, p.end), prior0 = { start: addDays(p.start, -len), end: p.start }
+    return { ...p, label: `${fmtLong(addDays(p.start, 1))} – ${fmtLong(p.end)}`, prior: prior0.start < addDays(HISTORY_START, -1) ? null : prior0 }
+  }
   const end = TODAY
-  const start = p === '1M' ? addDays(end, -30) : p === '3M' ? addDays(end, -91) : p === '6M' ? addDays(end, -182) : p === 'YTD' ? '2025-12-31' : HISTORY_START
+  const start = startOf(p, end)
   // Prior period: the same calendar span one year earlier for YTD, otherwise the window of equal length just before.
-  const prior0 = p === 'YTD' ? { start: '2024-12-31', end: `${Number(end.slice(0, 4)) - 1}${end.slice(4)}` } : { start: addDays(start, -daysBetween(start, end)), end: start }
+  const prior0 = p === 'YTD' ? { start: `${Number(end.slice(0, 4)) - 2}-12-31`, end: `${Number(end.slice(0, 4)) - 1}${end.slice(4)}` } : { start: addDays(start, -daysBetween(start, end)), end: start }
   const prior = p === 'All' || prior0.start < addDays(HISTORY_START, -1) ? null : prior0
-  return { start, end, label: `${fmtDate(addDays(start, 1), { month: 'short', day: 'numeric', year: 'numeric' })} – ${fmtDate(end, { month: 'short', day: 'numeric', year: 'numeric' })}`, prior }
+  return { start, end, label: `${fmtLong(addDays(start, 1))} – ${fmtLong(end)}`, prior }
+}
+/** Validate a custom range against the history: start before end, both inside [history start, data date]. */
+export function customRangeIssue(r: Range): string | null {
+  const ok = (d: string) => /^\d{4}-\d{2}-\d{2}$/.test(d) && Number.isFinite(Date.parse(d))
+  if (!ok(r.start) || !ok(r.end)) return 'Enter both dates.'
+  if (r.start >= r.end) return 'The end date must be after the start date.'
+  if (r.start < HISTORY_START) return `History starts on ${fmtLong(HISTORY_START)}.`
+  if (r.end > TODAY) return `Data runs to ${fmtLong(TODAY)}.`
+  return null
 }
 
 export interface PeriodStats {

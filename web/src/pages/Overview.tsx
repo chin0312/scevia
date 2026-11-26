@@ -13,8 +13,10 @@ import { Button, Callout, Card, CardHeader, Chip, Delta, HeroFigure, Legend, Pag
 import { CLOSED_TRADES, LAST_VISIT, TODAY } from '../data/portfolio'
 import { CATEGORIES, CAT_COLOR, PLATFORM_NAME } from '../data/labels'
 import type { Category, Platform } from '../data/types'
-import { PERIODS, account, accountsOn, allocation, coverage, sourceOf, exposures, fmtDate, netPnlAt, periodRange, positionsFor, series, tradeNet, type Period, type PlatformFilter, type Position } from '../lib/finance'
-import { fmt, int, kfmt, pct, sfmt } from '../lib/format'
+import { PERIODS, account, accountOf, accountsOn, allocation, coverage, sourceOf, exposures, fmtDate, netPnlAt, periodRange, positionsFor, series, tradeNet, type Period, type PlatformFilter, type Position } from '../lib/finance'
+import { fmt, fmtNative, fmtPx, int, kfmt, pct, sfmt } from '../lib/format'
+import { useActiveWorkspace } from '../lib/workspaceContext'
+import { STATE_LABEL } from '../lib/freshness'
 import { accountName } from '../lib/useWorkspace'
 
 const RAIL: RailSection[] = [
@@ -35,6 +37,8 @@ export default function Overview() {
   const nav = useNavigate()
   const connect = useConnect()
   const { settings } = useSettings()
+  const ws = useActiveWorkspace().snapshot
+  const px = (v: number) => fmtPx(v, settings.priceDisplay)
   const [plat, setPlat] = useState<PlatformLabel>(settings.defaultScope === 'pm' ? 'Polymarket' : settings.defaultScope === 'ks' ? 'Kalshi' : 'All')
   const [period, setPeriod] = useState<Period>(settings.defaultPeriod)
   const [chartTab, setChartTab] = useState<'Value' | 'Net P&L'>('Value')
@@ -127,7 +131,7 @@ export default function Overview() {
       </SectionRail>
 
       <main>
-        <PageHead caption={f === 'all' ? 'Sample portfolio · Polymarket + Kalshi' : `Sample portfolio: ${plat} only · ${plat === 'Polymarket' ? 'Kalshi' : 'Polymarket'} excluded`} title="Portfolio overview"
+        <PageHead caption={f === 'all' ? `${ws.summary.name} · Polymarket + Kalshi` : `${ws.summary.name}: ${plat} only · ${plat === 'Polymarket' ? 'Kalshi' : 'Polymarket'} excluded`} title="Portfolio overview"
           actions={<><Pills label="Platform" options={PLATFORM_FILTER} value={plat} onChange={setPlat} counts={counts} /></>} />
 
         <div className="grid g-21">
@@ -145,6 +149,12 @@ export default function Overview() {
                     <Delta value={periodChange}>{periodChange >= 0 ? '▲' : '▼'} {sfmt(periodChange, 2)}</Delta>
                     <span>{period} net P&amp;L (deposits excluded) · all-time {sfmt(acct.netPnl, 2)} on {fmt(acct.netDeposits)} net deposits</span>
                   </div>
+                  {chartTab === 'Value' && <div className="asof" aria-label="Valuation basis">
+                    <span>Valued at marks as of <b>{fmtDate(TODAY, { month: 'short', day: 'numeric', year: 'numeric' })}</b> · reconstructed from records</span>
+                    <span>Market data: <b>{STATE_LABEL[ws.streams.find((x) => x.id === 'market')?.state ?? 'unavailable']}</b></span>
+                    {(['pm', 'ks'] as Platform[]).filter((p) => f === 'all' || f === p).map((p) => { const src = sourceOf(p), d = accountsOn(p)[0]?.denomination ?? 'USD'; return <span key={p}>{PLATFORM_NAME[p]} <b>{fmtNative(account(p).totalValue, d)}</b>{src.stale ? <span className="stale"> · records as of {fmtDate(src.asOf)}</span> : ''}</span> })}
+                    {f === 'all' && <span>Total is indicative: it adds USDC and USD as equal in value.</span>}
+                  </div>}
                 </div>
                 {chartTab === 'Value' && <div style={{ marginTop: 'var(--space-6)' }}><Legend items={[{ label: 'Portfolio value', color: 'var(--color-gain-fg)', kind: 'ln' }, { label: 'Net deposits', kind: 'dash' }]} /></div>}
               </div>
@@ -276,17 +286,17 @@ export default function Overview() {
                 </div>
               )}
               <div className="dt-wrap"><table className="dt">
-                <thead><tr>{th('market', 'Market', false)}<th scope="col">Side</th>{th('shares', 'Shares')}<th scope="col" className="r">Avg → Mark</th>{th('cost', 'Cost')}{th('value', 'Value')}{th('upl', 'Unrealized')}<th scope="col" className="r" title="Share of open-position market value in the current scope">Weight</th><th scope="col">If against / for you</th>{th('days', 'Resolves', false)}<th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
+                <thead><tr>{th('market', 'Market', false)}<th scope="col">Side</th>{th('shares', 'Shares')}<th scope="col" className="r" title={settings.priceDisplay === 'implied' ? 'Average entry and current market price, shown as market-implied probability. It’s the market’s price, not a forecast by Scevia.' : 'Average entry price (incl. fees) and current market price per share'}>{settings.priceDisplay === 'implied' ? 'Entry → Implied' : 'Entry → Price'}</th>{th('cost', 'Cost')}{th('value', 'Value')}{th('upl', 'Unrealized')}<th scope="col" className="r" title="Share of open-position market value in the current scope">Weight</th><th scope="col">If against / for you</th>{th('days', 'Resolves', false)}<th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
                 <tbody>
                   {rows.length === 0 && <tr><td colSpan={11}><div className="empty"><p>No open positions match this filter{f === 'all' ? '' : ` on ${plat}`}.</p><button type="button" className="link" onClick={() => { setSel(null); setPlat('All') }}>Clear filters</button></div></td></tr>}
                   {rows.map((p) => {
                     const w = (v: number) => Math.min((Math.abs(v) / 8000) * 100, 100)
                     return (
                       <tr key={p.id} className="clickable" tabIndex={0} aria-label={`${p.market}: open details`} onClick={() => openPos(p)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); openPos(p) } }}>
-                        <td className="mkt"><div className="mk"><PlatformBadge p={p.platform} /><div><b>{p.market}</b><small>{p.category} · {PLATFORM_NAME[p.platform]}</small></div></div></td>
+                        <td className="mkt"><div className="mk"><PlatformBadge p={p.platform} /><div><b>{p.market}</b><small>{p.category} · {PLATFORM_NAME[p.platform]} · {accountOf(p.accountId)?.denomination ?? 'USD'}</small></div></div></td>
                         <td><SideChip side={p.side} /></td>
                         <td className="r">{int(p.shares)}</td>
-                        <td className="r"><span className="t3">{p.avg.toFixed(2)}</span> → {p.mark.toFixed(2)}</td>
+                        <td className="r"><span className="t3">{px(p.avg)}</span> → {px(p.mark)}{sourceOf(p.platform).stale && <small className="stale" style={{ display: 'block' }}>as of {fmtDate(sourceOf(p.platform).asOf)}</small>}</td>
                         <td className="r t2">{fmt(p.cost)}</td>
                         <td className="r">{fmt(p.value)}</td>
                         <td className={cx('r', p.upl >= 0 ? 'gain' : 'loss')}>{sfmt(p.upl)}</td>

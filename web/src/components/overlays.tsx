@@ -80,7 +80,7 @@ export function Menu({ trigger, children, align = 'right', width = 260, label }:
   const close = useCallback((refocus = true) => { setOpen(false); if (refocus) btn.current?.focus() }, [])
   useEffect(() => {
     if (!open) return
-    const items = () => [...(menu.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not([disabled])') ?? [])]
+    const items = () => [...(menu.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not([disabled]), [role="menuitemradio"]:not([disabled])') ?? [])]
     items()[0]?.focus()
     const onDown = (e: MouseEvent) => { if (wrap.current && !wrap.current.contains(e.target as Node)) close(false) }
     const onKey = (e: KeyboardEvent) => {

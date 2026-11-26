@@ -14,7 +14,9 @@ const GUIDES: { title: string; body: string; to: string; cta: string }[] = [
   { title: 'Overview', body: 'Portfolio value, P&L, allocation and what resolves next. Select a row or segment to inspect it in place.', to: '/overview', cta: 'Open Overview' },
   { title: 'Analytics', body: 'Where results came from over a period: realized vs. unrealized, attribution, entry prices and patterns. Every figure keeps its period and platform scope.', to: '/analytics', cta: 'Open Analytics' },
   { title: 'Risk', body: 'Exposure by event (the same outcome on two venues counts once), concentration against your guardrail, settlement outcomes and the resolution calendar.', to: '/risk', cta: 'Open Risk' },
-  { title: 'Scenario Lab', body: 'Build a hypothetical portfolio from your holdings or from scratch, analyze it, and compare scenarios. Nothing is traded and your actual holdings never change.', to: '/scenario-lab', cta: 'Open Scenario Lab' },
+  { title: 'Scenario Lab', body: 'Build a hypothetical portfolio from your holdings or from scratch in current markets, analyze it, and compare scenarios. Nothing is traded and your actual holdings never change.', to: '/scenario-lab', cta: 'Open Scenario Lab' },
+  { title: 'Historical replay', body: 'Inside Scenario Lab: a hypothetical portfolio over a past period, with markets that traded then and prices you assume. It’s hindsight analysis, not your performance or a strategy test.', to: '/scenario-lab/replay', cta: 'Open historical replay' },
+  { title: 'Portfolios & data status', body: 'Switch between the Sample portfolio (fictional), the Demo portfolio (real markets, virtual capital) and your own. The status pill beside it shows how current each data stream is.', to: '/portfolio/coverage', cta: 'Open data coverage' },
   { title: 'Accounts & sources', body: 'Each wallet or venue login is an account; API sync, CSV and manual entry are sources. One account can combine several sources.', to: '/portfolio/accounts', cta: 'Manage accounts' },
   { title: 'Transactions & reconciliation', body: 'Inspect records, include or exclude them, correct imported or manual rows, and resolve possible duplicates. Original records are never deleted.', to: '/portfolio/transactions', cta: 'Open transactions' },
   { title: 'Data coverage', body: 'What the figures are based on: source freshness, history, opening state and estimated values. Unknown values stay unavailable, never $0.', to: '/portfolio/coverage', cta: 'Open coverage' },
@@ -33,6 +35,13 @@ const NOW: [string, string][] = [
   ['Settlement payout / gain', 'A contract pays $1 per share if its outcome wins, $0 otherwise. Settlement gain or loss is payout − cost basis.'],
   ['Feasible outcome', 'A combination of event results that can happen given verified relationships (and, in a scenario, its hypothetical constraints). Not a probability.'],
   ['Drawdown', 'Largest fall of cumulative net P&L from a previous high, on weekly history.'],
+  ['Market price vs. implied probability', 'For a standard YES/NO contract the price and the market-implied probability are the same number: the market’s price, not Scevia’s forecast. Your historical win rate is a separate, observed measure.'],
+  ['Sample, Demo and your portfolios', 'Sample: fictional markets and records for exploring. Demo: virtual capital and hypothetical records on approved real-market data, using the same calculations as your own. Yours: connected accounts, imports and manual records. They never mix.'],
+  ['Data freshness', 'Market data, account data, valuation, history, sync and sources each have their own state (for example recently refreshed, delayed, stale, import only). One current stream never makes another look current.'],
+  ['Observed vs. carried-forward prices', 'History values each contract at its last recorded price until a newer one arrives (never a later price for an earlier date), keeping the original time. After a settlement the contract is worth its payout. Without any earlier price, a value is unavailable.'],
+  ['Frozen vs. latest scenario prices', 'A scenario keeps the reference prices from when it started. Latest prices can move; Check latest shows the difference and updates only if you confirm. Your assumed execution prices are separate.'],
+  ['Historical replay', 'Hypothetical trades over a past period at prices you state, settled at recorded resolutions. Because markets are chosen knowing the outcome, it’s hindsight analysis: not your actual performance and not an unbiased strategy backtest.'],
+  ['Native assets', 'Each account keeps its own asset (USD, USDC, PUSD). Totals across them are indicative and say so; they never fund a trade.'],
 ]
 const LATER: [string, string][] = [
   ['Time-weighted return', 'Return with external capital flows removed, linking periods between flows. Needs complete valuation history.'],
@@ -65,7 +74,7 @@ export function HelpCentre({ tab: initial, onClose }: { tab: HelpTab; onClose: (
           <dl className="kv help-kv">{NOW.map(([k, v]) => <div key={k} className="help-term"><dt>{k}</dt><dd>{v}</dd></div>)}</dl>
           <h5 className="caps">With connected accounts</h5>
           <dl className="kv help-kv">{LATER.map(([k, v]) => <div key={k} className="help-term"><dt>{k}</dt><dd>{v}</dd></div>)}</dl>
-          <p className="t3 help-note">Figures here come from a fictional sample portfolio. Scevia shows outcomes and ranges without probabilities and never gives investment advice.</p>
+          <p className="t3 help-note">Figures in the Sample portfolio come from fictional records and markets. Scevia is read-only: it never trades, never holds funds and keeps provider access on its servers, not in your browser. It shows outcomes and ranges without probabilities and never gives investment advice.</p>
         </>}
         {tab === 'Shortcuts' && <dl className="kv help-kv">
           {([[`${MOD} K`, 'Open search'], ['↑ ↓ · Enter', 'Move through search results · open'], ['Esc', 'Close the top panel, menu or dialog'], ['← →', 'Switch tabs when a tab is focused'], ['Tab · Shift Tab', 'Move between controls']] as const).map(([k, v]) => <div key={k} className="help-term"><dt><kbd className="kbd">{k}</kbd></dt><dd>{v}</dd></div>)}

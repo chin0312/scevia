@@ -3,13 +3,13 @@
    Notifications (what happened) · Settings (how the workspace behaves) · Account (who you are, your data). */
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { TODAY } from '../data/portfolio'
 import { PLATFORM_NAME } from '../data/labels'
-import { ACCOUNTS, POSITIONS, exposures, fmtDate, sourceOf } from '../lib/finance'
+import { POSITIONS, exposures, fmtDate } from '../lib/finance'
 import { qty } from '../lib/format'
 import { TYPE_LABEL } from '../lib/records'
 import { SettingsProvider, useSettings, type SettingsTab } from '../lib/settings'
 import { readStored } from '../lib/storage'
+import { WorkspaceProvider, useActiveWorkspace } from '../lib/workspaceContext'
 import { accountName, useWorkspaceSnapshot } from '../lib/useWorkspace'
 import { AccountMenu, PrivacyDialog } from './Account'
 import { DetailProvider, useDetails, type Detail } from './details'
@@ -18,7 +18,8 @@ import { Icon, type IconName } from './Icon'
 import { NotificationCentre } from './Notifications'
 import { Layer, Menu, ToastProvider } from './overlays'
 import { SettingsModal } from './Settings'
-import { PlatformBadge, cx } from './ui'
+import { DataStatus, PORTFOLIO_SECTIONS, PortfolioSelector, WorkspaceGate } from './Workspace'
+import { cx } from './ui'
 
 const AREAS = [
   { to: '/overview', label: 'Overview' },
@@ -26,14 +27,6 @@ const AREAS = [
   { to: '/risk', label: 'Risk' },
   { to: '/scenario-lab', label: 'Scenario Lab', lab: true },
 ]
-const PORTFOLIO_SECTIONS: { id: string; label: string; icon: IconName; sub: string }[] = [
-  { id: 'accounts', label: 'Accounts', icon: 'db', sub: 'wallets and venue logins' },
-  { id: 'sources', label: 'Sources', icon: 'link', sub: 'connections, CSV, manual' },
-  { id: 'transactions', label: 'Transactions', icon: 'list', sub: 'records and decisions' },
-  { id: 'imports', label: 'Imports & reconciliation', icon: 'download', sub: 'batches and review' },
-  { id: 'coverage', label: 'Data coverage', icon: 'shield', sub: 'what figures are based on' },
-]
-
 function Logo() {
   return <img className="brand-logo" src="/brand/scevia-logo.png" srcSet="/brand/scevia-logo@2x.png 2x" alt="Scevia" height={28} />
 }
@@ -41,9 +34,7 @@ function Logo() {
 interface Overlays { search: () => void; help: (t: HelpTab) => void; privacy: () => void }
 
 function TopNav({ open }: { open: Overlays }) {
-  const nav = useNavigate()
   const { open: openSettings } = useSettings()
-  const stale = ACCOUNTS.filter((a) => sourceOf(a.venue).stale).length
   return (
     <header className="topbar">
       <NavLink className="brand" to="/overview" aria-label="Scevia home"><Logo /></NavLink>
@@ -56,17 +47,7 @@ function TopNav({ open }: { open: Overlays }) {
       </nav>
       <div className="utils">
         <button type="button" className="search" onClick={open.search} aria-keyshortcuts="Meta+K Control+K" aria-label="Search"><Icon name="search" size={15} /><span>Search Scevia…</span><kbd>⌘K</kbd></button>
-        <Menu label="Portfolio" width={340} trigger={(t) => <button type="button" className="chip accent chip-btn" aria-label="Portfolio: Sample portfolio" {...t}><span className="chip-long">Sample portfolio</span><span className="chip-short">Sample</span><span className="chip-date"> · {fmtDate(TODAY)}</span></button>}>
-          {(close) => (<>
-            <div className="menu-h"><span>Sample portfolio<small>Fictional data · valued at {fmtDate(TODAY)} marks · {ACCOUNTS.length} accounts{stale ? ` · ${stale} stale` : ''}</small></span></div>
-            {ACCOUNTS.map((a) => { const src = sourceOf(a.venue); return (
-              <div className="menu-row acct-row" key={a.id}><span className="row"><PlatformBadge p={a.venue} size={18} /><span className="acct-name">{accountName(a.id)}</span></span><small className={src.stale ? 'stale' : 't3'}>{src.stale ? 'stale · ' : ''}{fmtDate(src.asOf)}</small></div>
-            ) })}
-            <div className="menu-row t3 menu-note">This is your only portfolio. Separate portfolios come with a Scevia account.</div>
-            <div className="menu-sep" />
-            {PORTFOLIO_SECTIONS.map((s) => <button key={s.id} type="button" role="menuitem" className="menu-i" onClick={() => { close(); nav(`/portfolio/${s.id}`) }}><Icon name={s.icon} />{s.label}<small className="t3" style={{ marginLeft: 'auto' }}>{s.sub}</small></button>)}
-          </>)}
-        </Menu>
+        <div className="ws-chips"><PortfolioSelector /><DataStatus /></div>
         <Menu label="Help" width={280} trigger={(t) => <button type="button" className="icon-btn" aria-label="Help" {...t}><Icon name="help" size={18} /></button>}>
           {(close) => (<>
             <div className="menu-h">Help</div>
@@ -101,6 +82,8 @@ function CommandPalette({ onClose, open }: { onClose: () => void; open: Overlays
   const details = useDetails()
   const { open: openSettings } = useSettings()
   const ws = useWorkspaceSnapshot()
+  // Portfolio content (accounts, positions, events, records, scenarios) is searched only in the portfolio it belongs to.
+  const isSample = useActiveWorkspace().snapshot.summary.mode === 'fixture'
   const [q, setQ] = useState('')
   const [i, setI] = useState(0)
   const [more, setMore] = useState<string | null>(null)
@@ -110,22 +93,28 @@ function CommandPalette({ onClose, open }: { onClose: () => void; open: Overlays
     const det = (d: Detail) => () => { onClose(); details.open(d) }
     const run = (f: () => void) => () => { onClose(); f() }
     const scenarios = readStored<{ key: string; name: string; baseline?: string; adjs?: unknown[] }[]>('scevia-scenarios-v4', [], (v) => (Array.isArray(v) ? (v as { key: string; name: string }[]).filter((x) => x && typeof x.key === 'string' && typeof x.name === 'string') : null))
+    const replays = readStored<{ key: string; name: string; start?: string; end?: string }[]>('scevia-replays-v1', [], (v) => (Array.isArray(v) ? (v as { key: string; name: string }[]).filter((x) => x && typeof x.key === 'string' && typeof x.name === 'string') : null))
+    const content: Item[] = isSample ? [
+      ...ws.accounts.map((a) => ({ id: `acct:${a.id}`, group: 'Accounts', label: a.label, sub: `${PLATFORM_NAME[a.venue]} · ${a.kind}${a.inAnalytics ? '' : ' · records only'}`, icon: 'db' as IconName, keys: `${PLATFORM_NAME[a.venue]} ${a.connection ?? ''} account wallet`.toLowerCase(), go: to(`/portfolio/transactions?account=${encodeURIComponent(a.id)}`) })),
+      ...POSITIONS.map((p) => ({ id: `pos:${p.id}`, group: 'Positions', label: p.market, sub: `${p.side} · ${qty(p.shares)} shares · ${PLATFORM_NAME[p.platform]} · ${accountName(p.accountId)}`, icon: 'layers' as IconName, keys: `${p.category} ${p.eventId} ${p.side}`.toLowerCase(), go: det({ kind: 'position', id: p.id }) })),
+      ...exposures().map((x) => ({ id: `evt:${x.event.id}`, group: 'Events', label: x.event.name, sub: `${x.positions.length} contract${x.positions.length > 1 ? 's' : ''} · resolves ${fmtDate(x.resolves)}`, icon: 'target' as IconName, keys: `${x.event.short} ${x.event.category}`.toLowerCase(), go: det({ kind: 'event', id: x.event.id }) })),
+      ...ws.records.map((r) => { const a = ws.accounts.find((x) => x.id === r.accountId); return { id: `rec:${r.key}`, group: 'Transactions', label: `${TYPE_LABEL[r.type]}${r.instrument ? ` · ${r.instrument} ${r.side ?? ''}` : ''}`, sub: `${a?.label ?? ''} · ${fmtDate(r.time.slice(0, 10))} · ${r.key}`, icon: 'list' as IconName, keys: `${r.key} ${r.sourceRef} ${r.batchId ?? ''} record transaction`.toLowerCase(), go: to(`/portfolio/transactions?q=${encodeURIComponent(r.key)}`) } }),
+      ...scenarios.map((s) => ({ id: `scn:${s.key}`, group: 'Scenarios', label: s.name, sub: `Current-market scenario · ${s.baseline === 'scratch' ? 'from scratch' : 'from current portfolio'} · ${s.adjs?.length ?? 0} positions`, icon: 'flask' as IconName, keys: 'scenario current', go: to(`/scenario-lab?open=${encodeURIComponent(s.key)}`) })),
+      ...replays.map((s) => ({ id: `rpl:${s.key}`, group: 'Scenarios', label: s.name, sub: `Historical replay${s.start && s.end ? ` · ${fmtDate(s.start)} – ${fmtDate(s.end)}` : ''}`, icon: 'clock' as IconName, keys: 'replay historical backtest hindsight', go: to(`/scenario-lab/replay?open=${encodeURIComponent(s.key)}`) })),
+    ] : []
     const all: Item[] = [
       { id: 'act:manual', group: 'Actions', label: 'Add a manual record', sub: 'Portfolio · transactions', icon: 'plus', keys: 'new transaction trade deposit', go: to('/portfolio/transactions?action=manual') },
       { id: 'act:import', group: 'Actions', label: 'Import transactions (CSV)', sub: 'Portfolio · imports', icon: 'download', keys: 'csv file upload import', go: to('/portfolio/imports?action=import') },
       { id: 'act:review', group: 'Actions', label: 'Review records that need attention', sub: 'Portfolio · reconciliation', icon: 'list', keys: 'unresolved duplicates reconcile review', go: to('/portfolio/transactions?status=review') },
       { id: 'act:sources', group: 'Actions', label: 'Manage data sources', sub: 'Portfolio · sources', icon: 'link', keys: 'connect wallet kalshi polymarket', go: to('/portfolio/sources') },
       { id: 'act:scenario', group: 'Actions', label: 'Create a scenario', sub: 'Scenario Lab', icon: 'flask', keys: 'new what-if simulate', go: to('/scenario-lab') },
+      { id: 'act:replay', group: 'Actions', label: 'Start a historical replay', sub: 'Scenario Lab', icon: 'clock', keys: 'replay historical backtest past hindsight', go: to('/scenario-lab/replay') },
       { id: 'act:settings', group: 'Actions', label: 'Open settings', sub: 'Workspace preferences', icon: 'gear', keys: 'preferences defaults guardrail', go: run(() => openSettings('General')) },
       { id: 'act:notif', group: 'Actions', label: 'Notification preferences', sub: 'Settings', icon: 'bell', keys: 'alerts notifications', go: run(() => openSettings('Notifications')) },
       { id: 'act:privacy', group: 'Actions', label: 'Data & privacy', sub: 'Account', icon: 'shield', keys: 'clear data storage privacy', go: run(open.privacy) },
       ...AREAS.map((a) => ({ id: `page:${a.to}`, group: 'Pages', label: a.label, sub: 'Page', icon: 'home' as IconName, keys: '', go: to(a.to) })),
       ...PORTFOLIO_SECTIONS.map((s) => ({ id: `pf:${s.id}`, group: 'Portfolio', label: s.label, sub: s.sub, icon: s.icon, keys: 'portfolio manage', go: to(`/portfolio/${s.id}`) })),
-      ...ws.accounts.map((a) => ({ id: `acct:${a.id}`, group: 'Accounts', label: a.label, sub: `${PLATFORM_NAME[a.venue]} · ${a.kind}${a.inAnalytics ? '' : ' · records only'}`, icon: 'db' as IconName, keys: `${PLATFORM_NAME[a.venue]} ${a.connection ?? ''} account wallet`.toLowerCase(), go: to(`/portfolio/transactions?account=${encodeURIComponent(a.id)}`) })),
-      ...POSITIONS.map((p) => ({ id: `pos:${p.id}`, group: 'Positions', label: p.market, sub: `${p.side} · ${qty(p.shares)} shares · ${PLATFORM_NAME[p.platform]} · ${accountName(p.accountId)}`, icon: 'layers' as IconName, keys: `${p.category} ${p.eventId} ${p.side}`.toLowerCase(), go: det({ kind: 'position', id: p.id }) })),
-      ...exposures().map((x) => ({ id: `evt:${x.event.id}`, group: 'Events', label: x.event.name, sub: `${x.positions.length} contract${x.positions.length > 1 ? 's' : ''} · resolves ${fmtDate(x.resolves)}`, icon: 'target' as IconName, keys: `${x.event.short} ${x.event.category}`.toLowerCase(), go: det({ kind: 'event', id: x.event.id }) })),
-      ...ws.records.map((r) => { const a = ws.accounts.find((x) => x.id === r.accountId); return { id: `rec:${r.key}`, group: 'Transactions', label: `${TYPE_LABEL[r.type]}${r.instrument ? ` · ${r.instrument} ${r.side ?? ''}` : ''}`, sub: `${a?.label ?? ''} · ${fmtDate(r.time.slice(0, 10))} · ${r.key}`, icon: 'list' as IconName, keys: `${r.key} ${r.sourceRef} ${r.batchId ?? ''} record transaction`.toLowerCase(), go: to(`/portfolio/transactions?q=${encodeURIComponent(r.key)}`) } }),
-      ...scenarios.map((s) => ({ id: `scn:${s.key}`, group: 'Scenarios', label: s.name, sub: `Scenario · ${s.baseline === 'scratch' ? 'from scratch' : 'from current portfolio'} · ${s.adjs?.length ?? 0} positions`, icon: 'flask' as IconName, keys: 'scenario', go: to(`/scenario-lab?open=${encodeURIComponent(s.key)}`) })),
+      ...content,
       ...([['Getting started', 'Getting started', 'how start tour'], ['Methodology', 'Methodology & glossary', 'cost basis pnl return drawdown definition calculate fees'], ['Shortcuts', 'Keyboard shortcuts', 'keys keyboard'], ['Guides', 'User guide', 'help guide']] as [HelpTab, string, string][])
         .map(([t, l, k]) => ({ id: `help:${t}`, group: 'Help', label: l, sub: 'Help', icon: 'help' as IconName, keys: k, go: run(() => open.help(t)) })),
     ]
@@ -137,7 +126,7 @@ function CommandPalette({ onClose, open }: { onClose: () => void; open: Overlays
       const shown = more === g ? inG : inG.slice(0, PER_GROUP)
       return shown.map((r, k) => ({ ...r.x, more: k === shown.length - 1 ? inG.length - shown.length : 0 }))
     })
-  }, [q, more, ws, nav, details, onClose, openSettings, open])
+  }, [q, more, ws, nav, details, onClose, openSettings, open, isSample])
   const sel = Math.min(i, items.length - 1)
   const activeId = items[sel] ? `${listId}-${sel}` : undefined
   return (
@@ -171,6 +160,12 @@ function CommandPalette({ onClose, open }: { onClose: () => void; open: Overlays
   )
 }
 
+/* The workspace provider sits inside Settings so the automatic-refresh preference applies. */
+function WorkspaceFromSettings({ children }: { children: ReactNode }) {
+  const { settings } = useSettings()
+  return <WorkspaceProvider autoRefreshMin={settings.autoRefresh}>{children}</WorkspaceProvider>
+}
+
 export function AppLayout() {
   const [palette, setPalette] = useState(false)
   const [help, setHelp] = useState<HelpTab | null>(null)
@@ -186,12 +181,14 @@ export function AppLayout() {
     <ToastProvider>
       <SettingsProvider onOpen={setSettingsTab}>
         <DetailProvider>
+        <WorkspaceFromSettings>
         <TopNav open={open} />
-        <Outlet />
+        <WorkspaceGate><Outlet /></WorkspaceGate>
         {palette && <CommandPalette onClose={() => setPalette(false)} open={open} />}
         {help && <HelpCentre tab={help} onClose={() => setHelp(null)} />}
         {privacy && <PrivacyDialog onClose={() => setPrivacy(false)} />}
         {settingsTab && <SettingsModal tab={settingsTab} onClose={() => setSettingsTab(null)} />}
+        </WorkspaceFromSettings>
         </DetailProvider>
       </SettingsProvider>
     </ToastProvider>

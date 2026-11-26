@@ -6,6 +6,7 @@ import { CATEGORY_LABEL, deriveNotifications, type NotifCategory, type Notif } f
 import { useSettings } from '../lib/settings'
 import { useSessionState } from '../lib/useSessionState'
 import { WORKSPACE_EVENT, readLocalEvents, useWorkspaceSnapshot } from '../lib/useWorkspace'
+import { useActiveWorkspace } from '../lib/workspaceContext'
 import { useDetails } from './details'
 import { Icon } from './Icon'
 import { Menu } from './overlays'
@@ -18,18 +19,20 @@ export function useNotificationsList() {
   const ws = useWorkspaceSnapshot()
   const [local, setLocal] = useState(readLocalEvents)
   useEffect(() => { const on = () => setLocal(readLocalEvents()); window.addEventListener(WORKSPACE_EVENT, on); return () => window.removeEventListener(WORKSPACE_EVENT, on) }, [])
-  const list = useMemo(() => deriveNotifications(settings, ws.records, local, new Set(ws.batches.map((b) => b.id))), [settings, ws.records, ws.batches, local])
+  // Notifications belong to the portfolio they describe: the sample's derived and local events only show for it.
+  const mode = useActiveWorkspace().snapshot.summary.mode
+  const list = useMemo(() => (mode === 'fixture' ? deriveNotifications(settings, ws.records, local, new Set(ws.batches.map((b) => b.id))) : []), [mode, settings, ws.records, ws.batches, local])
   const [read, setRead] = useSessionState<string[]>('scevia-notif-read', [], (v) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : null))
   const readSet = new Set(read)
   const markRead = (ids: string[]) => setRead((r) => [...new Set([...r, ...ids])].slice(-500))
-  return { list, isRead: (n: Notif) => readSet.has(n.id), markRead, unread: list.filter((n) => !readSet.has(n.id)).length }
+  return { mode, list, isRead: (n: Notif) => readSet.has(n.id), markRead, unread: list.filter((n) => !readSet.has(n.id)).length }
 }
 
 export function NotificationCentre() {
   const nav = useNavigate()
   const details = useDetails()
   const { open: openSettings } = useSettings()
-  const { list, isRead, markRead, unread } = useNotificationsList()
+  const { list, isRead, markRead, unread, mode } = useNotificationsList()
   const [show, setShow] = useState<'All' | 'Unread'>('All')
   const [cat, setCat] = useState<NotifCategory | 'all'>('all')
   const cats = [...new Set(list.map((n) => n.category))]
@@ -43,12 +46,12 @@ export function NotificationCentre() {
           {cats.length > 1 && <select className="select" aria-label="Notification category" value={cat} onChange={(e) => setCat(e.target.value as NotifCategory | 'all')}><option value="all">All categories</option>{cats.map((c) => <option key={c} value={c}>{CATEGORY_LABEL[c]}</option>)}</select>}
         </div>
         <div className="notif-list">
-          {shown.length === 0 && <div className="menu-row t3">{list.length === 0 ? 'No notifications with your current preferences.' : show === 'Unread' ? 'You’re all caught up.' : 'Nothing in this category.'}</div>}
+          {shown.length === 0 && <div className="menu-row t3">{list.length === 0 ? (mode === 'fixture' ? 'No notifications with your current preferences.' : 'No notifications for this portfolio.') : show === 'Unread' ? 'You’re all caught up.' : 'Nothing in this category.'}</div>}
           {shown.map((n) => (
             <div key={n.id} className={cx('notif-item', !isRead(n) && 'unread')}>
               <button type="button" role="menuitem" className="menu-i notif" onClick={() => { close(); markRead([n.id]); if (n.detail) details.open(n.detail); else if (n.to) nav(n.to) }}>
                 <span className={`ic ${n.tone}`}><Icon name={n.icon} size={14} /></span>
-                <span><b>{n.title}</b><small>{n.body}</small><small className="notif-meta">{CATEGORY_LABEL[n.category]} · {ago(n.at)} · {n.origin === 'sample' ? 'sample portfolio' : 'this tab'}</small></span>
+                <span><b>{n.title}</b><small>{n.body}</small><small className="notif-meta">{CATEGORY_LABEL[n.category]} · {ago(n.at)} · {n.origin === 'sample' ? 'Sample portfolio' : 'Sample records · this tab'}</small></span>
               </button>
               {!isRead(n) && <button type="button" role="menuitem" className="icon-btn notif-dot" aria-label={`Mark “${n.title}” as read`} title="Mark as read" onClick={() => markRead([n.id])}><span /></button>}
             </div>

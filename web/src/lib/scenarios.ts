@@ -47,8 +47,8 @@ export const status = (s: Scenario): ScenarioStatus => (!s.saved ? 'new' : same(
 export const isDirty = (s: Scenario) => status(s) !== 'saved'
 export const statusLabel = (s: Scenario) => ({ new: 'Not saved', saved: 'Saved', modified: 'Unsaved changes' })[status(s)]
 
-export const create = (key: string, color: string, name = 'Untitled scenario', baseline: Baseline = 'portfolio', baseAsOf: string | null = null, funding: Snapshot['funding'] = {}): Scenario => {
-  const base: Snapshot = { name, adjs: [], baseline, funding: { ...funding }, assumptions: {} }
+export const create = (key: string, color: string, name = 'Untitled scenario', baseline: Baseline = 'portfolio', baseAsOf: string | null = null, funding: Snapshot['funding'] = {}, assumptions: Snapshot['assumptions'] = {}): Scenario => {
+  const base: Snapshot = { name, adjs: [], baseline, funding: { ...funding }, assumptions: { ...assumptions } }
   return { ...base, key, saved: null, savedAt: null, color, start: snap({ ...base, funding: {} }), baseAsOf }
 }
 /** A new, unsaved scenario prefilled from an example (examples are never added to the workspace on their own). */
@@ -161,4 +161,21 @@ export function addPositions(s: Scenario, adds: Adjustment[]) {
   const present = new Set(s.adjs.map((a) => a.id))
   const added = adds.filter((a) => !present.has(a.id))
   return { scenario: { ...s, adjs: [...s.adjs, ...copyAdjs(added)] }, added: added.map((a) => a.id), skipped: adds.filter((a) => present.has(a.id)).map((a) => a.id) }
+}
+
+/* ───────────── Frozen vs. latest reference prices ─────────────
+   A scenario keeps the reference price each instrument had when it was added (frozen). The latest market reference
+   may move afterwards; it never changes a scenario silently. The user's assumed execution price is a third, separate
+   value and is never touched by a price check. */
+export type RefStatus = 'same' | 'moved' | 'no-latest' | 'no-frozen'
+export interface RefCheck { id: string; frozen: number | null; frozenAt: string | null; latest: number | null; latestAt: string | null; assumed: number | null; status: RefStatus }
+export function refStatus(frozen: number | null, latest: number | null): RefStatus {
+  if (latest == null) return 'no-latest'
+  if (frozen == null) return 'no-frozen'
+  return Math.abs(latest - frozen) < 1e-9 ? 'same' : 'moved'
+}
+/** Rebase the frozen references of moved instruments to the latest; assumed prices and targets are unchanged. */
+export function applyLatestRefs(adjs: Adjustment[], checks: RefCheck[]): Adjustment[] {
+  const by = new Map(checks.filter((c) => c.status === 'moved' || c.status === 'no-frozen').map((c) => [c.id, c]))
+  return adjs.map((a) => { const c = by.get(a.id); return c && a.instrument ? { ...a, instrument: { ...a.instrument, refPrice: c.latest, refAsOf: c.latestAt } } : a })
 }

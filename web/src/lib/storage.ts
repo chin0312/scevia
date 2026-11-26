@@ -58,8 +58,8 @@ export function clearScevia(): { ok: boolean; removed: number } {
 
 /** Logical groups of local data, so a user can clear one without losing the others. */
 export const DATA_GROUPS = {
-  preferences: { label: 'Preferences', keys: (k: string) => k === 'scevia-settings' || k === 'scevia-guardrail' || k.startsWith('scevia-lab-') },
-  scenarios: { label: 'Scenarios', keys: (k: string) => k.startsWith('scevia-scenarios') || k.startsWith('scevia-active') || k.startsWith('scevia-handoff') },
+  preferences: { label: 'Preferences', keys: (k: string) => k === 'scevia-settings' || k === 'scevia-guardrail' || k === 'scevia-workspace' || k.startsWith('scevia-lab-') },
+  scenarios: { label: 'Scenarios & replays', keys: (k: string) => k.startsWith('scevia-scenarios') || k.startsWith('scevia-active') || k.startsWith('scevia-handoff') || k.startsWith('scevia-replay') },
   records: { label: 'Sample records & import history', keys: (k: string) => k.startsWith('scevia-records') },
   notifications: { label: 'Notification read state & activity', keys: (k: string) => k.startsWith('scevia-notif') },
 } as const

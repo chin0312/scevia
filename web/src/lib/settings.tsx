@@ -9,6 +9,12 @@ import { useSessionState } from './useSessionState'
 export interface Settings {
   /** Platform scope Overview opens in. */
   defaultScope: PlatformFilter
+  /** Check the selected portfolio's sources every N minutes while Scevia is open (0 = only on request). */
+  autoRefresh: 0 | 5 | 15 | 60
+  /** How market prices of standard binary contracts are shown: $0.64 or 64% (market-implied). */
+  priceDisplay: 'price' | 'implied'
+  /** Fee assumption new scenarios and replays start with. Saved ones keep their own. */
+  newFees: 'provider' | 'excluded'
   /** Period Overview's chart and Analytics open in. */
   defaultPeriod: Period
   /** Grouping Overview's allocation and Analytics' attribution open in. */
@@ -33,13 +39,13 @@ export interface Settings {
   }
 }
 export const DEFAULT_SETTINGS: Settings = {
-  defaultScope: 'all', defaultPeriod: '6M', defaultGrouping: 'category', labSize: 'shares', guardrail: 15,
+  defaultScope: 'all', autoRefresh: 15, priceDisplay: 'price', newFees: 'provider', defaultPeriod: '6M', defaultGrouping: 'category', labSize: 'shares', guardrail: 15,
   alerts: { resolvingWithin: 30, priceMove: 100, concentration: true, settlements: true, dataQuality: true, imports: true },
 }
 export const GUARDRAIL_RANGE = [5, 40] as const
 /** Settings sections, each with its own Restore defaults. */
 export const SECTION_FIELDS = {
-  General: ['defaultScope'], Analytics: ['defaultPeriod', 'defaultGrouping'], Risk: ['guardrail'], 'Scenario Lab': ['labSize'], Notifications: ['alerts'],
+  General: ['defaultScope', 'autoRefresh', 'priceDisplay'], Analytics: ['defaultPeriod', 'defaultGrouping'], Risk: ['guardrail'], 'Scenario Lab': ['labSize', 'newFees'], Notifications: ['alerts'],
 } as const satisfies Record<string, readonly (keyof Settings)[]>
 export type SettingsTab = keyof typeof SECTION_FIELDS
 
@@ -53,6 +59,9 @@ export function readSettings(raw: unknown): Settings {
   const D = DEFAULT_SETTINGS, DA = D.alerts
   return {
     defaultScope: o.defaultScope === 'pm' || o.defaultScope === 'ks' ? o.defaultScope : 'all',
+    autoRefresh: o.autoRefresh === 0 || o.autoRefresh === 5 || o.autoRefresh === 60 ? o.autoRefresh : D.autoRefresh,
+    priceDisplay: o.priceDisplay === 'implied' ? 'implied' : 'price',
+    newFees: o.newFees === 'excluded' ? 'excluded' : 'provider',
     defaultPeriod: PERIODS.includes(o.defaultPeriod as Period) ? (o.defaultPeriod as Period) : D.defaultPeriod,
     defaultGrouping: o.defaultGrouping === 'platform' ? 'platform' : 'category',
     labSize: o.labSize === 'amount' || o.labSize === 'weight' ? o.labSize : 'shares',

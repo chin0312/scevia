@@ -7,6 +7,7 @@ const Analytics = lazy(() => import('./pages/Analytics'))
 const Risk = lazy(() => import('./pages/Risk'))
 const ScenarioLab = lazy(() => import('./pages/ScenarioLab'))
 const Portfolio = lazy(() => import('./pages/Portfolio'))
+const Replay = lazy(() => import('./pages/Replay'))
 
 /* Remount a page when its route changes (not on ?query changes). */
 function Page({ el: El }: { el: React.ComponentType }) {
@@ -23,6 +24,7 @@ export default function App() {
         <Route path="/analytics" element={<Page el={Analytics} />} />
         <Route path="/risk" element={<Page el={Risk} />} />
         <Route path="/scenario-lab" element={<Page el={ScenarioLab} />} />
+        <Route path="/scenario-lab/replay" element={<Page el={Replay} />} />
         <Route path="/portfolio" element={<Navigate to="/portfolio/accounts" replace />} />
         <Route path="/portfolio/:section" element={<Page el={Portfolio} />} />
         <Route path="/accounts" element={<Navigate to="/portfolio/accounts" replace />} />

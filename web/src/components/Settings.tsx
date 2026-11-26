@@ -10,6 +10,7 @@ import { Button, Seg, Tabs, cx } from './ui'
 const SCOPE: Record<string, PlatformFilter> = { All: 'all', Polymarket: 'pm', Kalshi: 'ks' }
 const SIZE = { Shares: 'shares', '$ Amount': 'amount', '% of start': 'weight' } as const
 const RESOLVE = { Off: 0, '7 days': 7, '14 days': 14, '30 days': 30 } as const
+const REFRESH = { 'On request': 0, '5 min': 5, '15 min': 15, '1 hour': 60 } as const
 const MOVE = { Off: 0, '$100': 100, '$250': 250, '$500': 500 } as const
 const key = <T extends Record<string, unknown>>(m: T, v: unknown) => (Object.keys(m) as (keyof T & string)[]).find((k) => m[k] === v)
 
@@ -36,7 +37,11 @@ export function SettingsModal({ tab: initial, onClose }: { tab: SettingsTab; onC
         {tab === 'General' && <>
           <Row label="Default platform scope" help="Overview opens in this scope. Switching on the page is a view filter: it never changes the portfolio.">
             <Seg label="Default platform scope" options={['All', 'Polymarket', 'Kalshi'] as const} value={(key(SCOPE, s.defaultScope) ?? 'All') as 'All'} onChange={(v) => update({ defaultScope: SCOPE[v] })} /></Row>
-          <Row label="Amounts" help="Prediction-market balances are in USD or USD stablecoins. Scevia doesn’t convert between currencies or collateral assets."><span className="t2">USD</span></Row>
+          <Row label="Automatic refresh" help="How often Scevia checks the selected portfolio’s sources while it’s open. Figures change only when a source has new data; scenarios, filters and inputs are never changed.">
+            <Seg label="Automatic refresh" options={Object.keys(REFRESH) as (keyof typeof REFRESH)[]} value={(key(REFRESH, s.autoRefresh) ?? '15 min') as keyof typeof REFRESH} onChange={(v) => update({ autoRefresh: REFRESH[v] })} /></Row>
+          <Row label="Market prices" help="For a standard YES/NO contract the price and the market-implied probability are the same number. It’s the market’s price, not Scevia’s forecast.">
+            <Seg label="Market prices" options={['$0.64', '64%'] as const} value={s.priceDisplay === 'implied' ? '64%' : '$0.64'} onChange={(v) => update({ priceDisplay: v === '64%' ? 'implied' : 'price' })} /></Row>
+          <Row label="Amounts" help="Each account keeps its native asset (USD, USDC or PUSD). Totals across them are indicative and assume they’re equal in value; that assumption never funds a trade or changes a scenario."><span className="t2">Native first</span></Row>
         </>}
         {tab === 'Analytics' && <>
           <Row label="Default period" help="Overview’s chart and Analytics open with this period.">
@@ -52,7 +57,9 @@ export function SettingsModal({ tab: initial, onClose }: { tab: SettingsTab; onC
         {tab === 'Scenario Lab' && <>
           <Row label="Show targets as" help="How position targets are shown when Scenario Lab opens. It’s a view: each saved scenario keeps the unit every target was typed in.">
             <Seg label="Default sizing" options={Object.keys(SIZE) as (keyof typeof SIZE)[]} value={(key(SIZE, s.labSize) ?? 'Shares') as keyof typeof SIZE} onChange={(v) => update({ labSize: SIZE[v] })} /></Row>
-          <small className="t3">Fees, capital and constraints are set per scenario, in its assumptions.</small>
+          <Row label="Fees on new scenarios" help="The fee assumption a new scenario or historical replay starts with. Saved ones keep their own; change it per scenario in its assumptions.">
+            <Seg label="Fees on new scenarios" options={['Provider estimate', 'Excluded'] as const} value={s.newFees === 'excluded' ? 'Excluded' : 'Provider estimate'} onChange={(v) => update({ newFees: v === 'Excluded' ? 'excluded' : 'provider' })} /></Row>
+          <small className="t3">Capital and constraints are set per scenario, in its assumptions.</small>
         </>}
         {tab === 'Notifications' && <>
           <Row label="Upcoming resolutions" help="Events scheduled to resolve within this window (one notification per event).">

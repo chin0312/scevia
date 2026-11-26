@@ -67,9 +67,37 @@ Each platform's curve is its own history, never a scaled copy of the total.
 
 > The sample's intermediate marks are synthetic paths between real anchors. With real data they should come from platform price history. Until then, anything measured *between* snapshots (for example intraweek drawdown) can't be seen.
 
+### Missing observations: last observation carried forward (LOCF)
+
+Real price history has gaps. Charts stay continuous without inventing prices (`web/src/lib/history.ts`, tests in `lib/intelligence.test.ts`):
+
+- **Per instrument, then the portfolio.** Each contract's last eligible observed price (0–1) carries forward until a newer observation arrives. The portfolio is valued from those instrument prices on each date; the previous portfolio total is never copied.
+- **No backward fill.** Before a contract's first observation its price is unavailable. A later price never values an earlier date.
+- **No carry across settlement.** From the settlement time on, a contract is worth its settlement value (1 or 0 per share).
+- **Provenance is kept.** Each carried price keeps its original observation time. It is labelled *observed* on its own date, *carried forward* afterwards, and *stale* after 7 days (still shown, never dropped). Tooltips and Data coverage carry these labels instead of breaking the line.
+- **Cash flows, trades, fees and settlements** apply at their own times whether or not a price changed.
+- **Partial points.** When a held contract has no eligible price on a date, the point keeps its known subtotal (cash plus valued holdings) and the total is unavailable.
+- **Qualified metrics.** Return and drawdown need a value on every date. They are flagged when more than a quarter of valued dates use stale carried prices.
+- A carried-forward price is a reference, not evidence that anyone could have traded at it.
+
+The backend is authoritative for historical valuation; the frontend presents its observed/carried/stale labels and applies the same rules to Historical Replay.
+
+### Historical Replay (Scenario Lab)
+
+A retrospective hypothetical portfolio over a past period (`web/src/lib/replay.ts`):
+
+- **Lifecycle.** No entry before a market's listing date or on/after the date trading closed (or it resolved). An exit must fall after the entry, inside the period and before trading closed. The period ends on or before the data date.
+- **Sizing.** Shares, an amount at the assumed execution price, or a % of that account's starting capital, rounded down to the 0.01 share step.
+- **Prices and fees.** Entry and exit use the execution prices the user states. Fees use `estimateFee()` with the replay's fee assumption; an unknown fee leaves the affected figures unavailable.
+- **Settlement.** A held position settles at its recorded resolution on its recorded date (1 or 0 per share).
+- **Valuation.** An open holding at the end is valued from recorded observations with LOCF; without one it is unavailable.
+- **Native assets and funding.** Capital stays in its account and native asset. A shortfall (purchases beyond available cash at that time) is reported per account. Totals are given per denomination. A combined total exists only when every part is valued, and it is labelled indicative (USDC/PUSD treated as equal to USD).
+- **Hindsight.** Markets are selected knowing how they resolved, so a replay is hindsight analysis. It is neither the user's actual performance nor a point-in-time strategy backtest, and it is labelled as such.
+- **Comparison.** Every difference in setup is listed (period, markets, dates, sizes, capital, execution prices, fees, evidence). Absolute P&L is compared only when capital per denomination matches; return only when every replay is complete.
+
 ## Periods
 
-- **Ranges:** 1M = 30 days, 3M = 91 days, 6M = 182 days, YTD from Jan 1, All from `historyStart`. A trade belongs to the period in which it **closed** (start exclusive, end inclusive), so consecutive periods never double count.
+- **Ranges:** 1W = 7 days, 1M = 30 days, 3M = 91 days, 6M = 182 days, 1Y = 365 days, YTD from Jan 1 of the data date's year, All from `historyStart`. A preset is available only when the history covers its whole span. A custom range must lie inside [`historyStart`, `asOf`] with start before end. A trade belongs to the period in which it **closed** (start exclusive, end inclusive), so consecutive periods never double count.
 - **Period net P&L:** net P&L at the end minus net P&L at the start. Deposits are excluded by construction.
 - **Decomposition:** net = realized + change in unrealized − fees on new fills.
   - Realized counts each trade closed in the period **in full**, including P&L that built up before the period started. That earlier part reappears as a negative contribution in "change in unrealized", so the rows always add up.

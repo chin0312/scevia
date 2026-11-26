@@ -120,8 +120,8 @@ const CLOSED_TRADES: ClosedTrade[] = generateClosedTrades()
 export const SAMPLE_PORTFOLIO: PortfolioData = {
   asOf: TODAY, historyStart: HISTORY_START, lastVisit: LAST_VISIT, isSample: true,
   accounts: [
-    { id: 'pm-main', venue: 'pm', label: 'Wallet 0x7a…c2', kind: 'connected', sources: ['api'] },
-    { id: 'ks-main', venue: 'ks', label: 'Main account', kind: 'connected', sources: ['api'] },
+    { id: 'pm-main', venue: 'pm', label: 'Wallet 0x7a…c2', kind: 'connected', sources: ['api'], denomination: 'USDC' },
+    { id: 'ks-main', venue: 'ks', label: 'Main account', kind: 'connected', sources: ['api'], denomination: 'USD' },
   ],
   cashFlows: CASH_FLOWS, openPositions: OPEN_POSITIONS, closedTrades: CLOSED_TRADES, events: EVENTS,
   relations: [

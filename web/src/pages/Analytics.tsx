@@ -1,4 +1,6 @@
 import { useMemo, useRef, useState } from 'react'
+import { HISTORY_START, TODAY } from '../data/portfolio'
+import { PeriodControl, type PeriodValue } from '../components/PeriodControl'
 import { useSettings } from '../lib/settings'
 import { useWidth } from '../components/charts'
 import { useDetails } from '../components/details'
@@ -6,7 +8,7 @@ import { SectionRail, useHashScroll, type RailSection } from '../components/shel
 import { Button, Callout, Card, CardHeader, Chip, Delta, Legend, PageHead, Pills, Seg, Tabs, cx } from '../components/ui'
 import { PLATFORM_NAME } from '../data/labels'
 import type { Platform } from '../data/types'
-import { PERIODS, attribution, entryBuckets, fmtDate, insights, periodRange, periodStats, series, tradeNet, type Period, type PeriodStats, type PlatformFilter } from '../lib/finance'
+import { attribution, entryBuckets, fmtDate, insights, periodRange, periodStats, series, tradeNet, type PeriodStats, type PlatformFilter } from '../lib/finance'
 import { fmt, kfmt, pct, sfmt } from '../lib/format'
 import type { ClosedTrade } from '../data/types'
 
@@ -81,7 +83,7 @@ function PnlChart({ f, start, end, prior, stats, tab, onMonth }: { f: PlatformFi
 export default function Analytics() {
   useHashScroll()
   const [plat, setPlat] = useState<PlatformLabel>('All')
-  const [period, setPeriod] = useState<Period>(useSettings().settings.defaultPeriod)
+  const [period, setPeriod] = useState<PeriodValue>(useSettings().settings.defaultPeriod)
   const [compareOn, setCompareOn] = useState(true)
   const [tab, setTab] = useState<'Net' | 'Realized' | 'By platform'>('Net')
   const [attrBy, setAttrBy] = useState<'Category' | 'Platform'>(useSettings().settings.defaultGrouping === 'platform' ? 'Platform' : 'Category')
@@ -128,10 +130,11 @@ export default function Analytics() {
         <PageHead caption={`Performance · ${range.label} · ${scope}`} title="Where your results come from"
           actions={<>
             <Pills label="Platform" options={PLATFORM_FILTER} value={plat} onChange={setPlat} />
-            <Seg label="Period" options={PERIODS} value={period} onChange={setPeriod} />
             <Button icon="compare" variant={compare ? undefined : 'ghost'} disabled={!prior} title={prior ? undefined : 'Your history doesn’t cover a full prior period'} onClick={() => setCompareOn((c) => !c)}>{!prior ? 'No prior period' : compare ? 'Comparing to prior' : 'Compare to prior'}</Button>
           </>} />
 
+        <div className="period-row"><PeriodControl value={period} onChange={setPeriod} />
+          <div className="asof"><span>History from <b>{fmtDate(HISTORY_START, { month: 'short', day: 'numeric', year: 'numeric' })}</b> · weekly snapshots at sample marks</span><span>The period ends at the current valuation (marks as of {fmtDate(TODAY)})</span></div></div>
         <p className="summary">
           Over this period you made <b className={stats.netPnl >= 0 ? 'gain' : 'loss'}>{sfmt(stats.netPnl, 2)}</b> net{compare && prior ? <>, <b>{sfmt(stats.netPnl - prior.netPnl)}</b> vs. the prior period</> : ''}: <b>{sfmt(stats.realized)}</b> realized on {stats.trades.length} trades closed in the period, and <b>{sfmt(stats.unrealizedChange)}</b> change in unrealized P&amp;L{stats.openFillFees ? <> (after <b>{fmt(stats.openFillFees, 2)}</b> fees on new purchases)</> : ''}.
           {top && top.net > 0 && <> <a href="#attribution">{top.label}</a> made {gains > 0 ? pct((top.net / gains) * 100, 0) : '—'} of realized gains.</>}

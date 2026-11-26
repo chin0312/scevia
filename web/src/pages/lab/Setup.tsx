@@ -6,7 +6,7 @@ import { Button, Card, Chip, PlatformBadge, Seg, cx } from '../../components/ui'
 import { PLATFORM_NAME } from '../../data/labels'
 import { PROVENANCE_TEXT, REL_TEXT } from '../../data/relations'
 import type { Platform } from '../../data/types'
-import { MAX_FUNDING, accountsOn, validFunding, type Baseline, type Constraint } from '../../lib/finance'
+import { MAX_FUNDING, accountsOn, fmtDate, validFunding, type Baseline, type Constraint } from '../../lib/finance'
 import { DEFAULT_FEES, MAX_CUSTOM_FEE_PCT, feeLabel, validFeePct, type FeeAssumption } from '../../lib/fees'
 import { fmt } from '../../lib/format'
 import { parseMoney, parsePct } from '../../lib/inputs'
@@ -17,7 +17,7 @@ import { accountName } from '../../lib/useWorkspace'
 type Patch = Partial<Pick<Scenario, 'baseline' | 'funding' | 'assumptions'>>
 
 /** The one-line summary of a scenario's assumptions, with the editor one click away. */
-export function AssumptionsBar({ s, E, onEdit }: { s: Scenario; E: Evaluation; onEdit: () => void }) {
+export function AssumptionsBar({ s, E, onEdit, onCheckPrices }: { s: Scenario; E: Evaluation; onEdit: () => void; onCheckPrices?: () => void }) {
   const fees = s.assumptions.fees ?? DEFAULT_FEES, cs = s.assumptions.constraints ?? []
   return (
     <div className="assume-bar" role="group" aria-label="Scenario assumptions">
@@ -25,7 +25,8 @@ export function AssumptionsBar({ s, E, onEdit }: { s: Scenario; E: Evaluation; o
       <span><span className="t3">Added capital</span> {E.funding ? fmt(E.funding) : 'none'}</span>
       <span><span className="t3">Fees</span> {feeLabel(fees).toLowerCase()}</span>
       <span><span className="t3">Constraints</span> {cs.length ? `${cs.length} hypothetical` : 'none'}</span>
-      <span><span className="t3">Prices</span> your assumptions, not quotes</span>
+      <span><span className="t3">References</span> frozen{s.baseAsOf ? ` ${fmtDate(s.baseAsOf)}` : ' when added'}{onCheckPrices && <> · <button type="button" className="link" onClick={onCheckPrices}>Check latest</button></>}</span>
+      <span><span className="t3">Execution</span> your assumed prices</span>
       <button type="button" className="link" onClick={onEdit}>Edit assumptions</button>
     </div>
   )

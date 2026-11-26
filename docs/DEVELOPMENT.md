@@ -7,7 +7,8 @@ _Last updated: 2026-11-25_
 ## Current state
 
 - **Frontend:** all four modules are built (Overview, Analytics, Risk, Scenario Lab). It is a dark-only design system enforced by lint.
-- **Data:** a deterministic **sample portfolio** (`web/src/data/sample.ts`) used as both fixture and exploration mode. There is no backend, no auth and no account connections.
+- **Data:** a deterministic **sample portfolio** (`web/src/data/sample.ts`), the `fixture` workspace, used for exploring and tests. There is no backend connection, no auth and no account connections. The Demo portfolio is selectable but reports itself unavailable until the backend demo (`/v1/demo`, PR #8) is connected.
+- **Workspace boundary:** `data/workspace.ts` (`WorkspaceService`, contract readers) + `lib/workspaceContext.tsx` (selected workspace, revisions, per-stream freshness, refresh). See *Workspace boundary and Phase 7 handoff* below.
 - **Portfolio workspace:** `/portfolio/:section` organizes accounts, sources, transactions, imports & reconciliation and data coverage. Its records are an isolated sample of record management; they never change portfolio figures.
 - **Calculations:** one pure module (`web/src/lib/finance.ts`) with 50+ unit tests. Scenario bookkeeping is in `web/src/lib/scenarios.ts`.
 - **Persistence:** scenarios (with their fee treatment and constraints) and the guardrail are kept in `sessionStorage` (one browser tab) through `lib/storage.ts`.
@@ -189,6 +190,26 @@ The backend scenario engine becomes the authority for integrated scenario result
 | `knownAdditionalCapitalRequired` vs. complete requirement | "Needs $X more" (sample cash always known) | Show "at least $X more" when the complete requirement is unavailable, and the exact figure only when it's complete. |
 | Exact vs. bounded settlement coverage; event dates as schedule hints | 16-event exact enumeration; "scheduled resolution" wording | Show the covered subset and unsupported holdings; keep schedule-hint wording and unknown dates. |
 
+
+## Workspace boundary and Phase 7 handoff (reference: PR #8 at `eaa58b0`)
+
+The frontend now separates *which portfolio* from *how its figures are computed*. Status of each part:
+
+| Area | Implemented in the frontend | Fixture-driven today | Reviewed backend contract (PR #8) | Phase 7 integration still required |
+|---|---|---|---|---|
+| Workspace identity & mode | `WorkspaceProvider` / `useActiveWorkspace()`; selector with Sample (`fixture`), Demo (`demo`), My portfolios (`actual`); selection in `scevia-workspace`; other workspaces' state untouched | Bundled service: fixture + unavailable demo, no actual portfolios | `GET/POST /v1/portfolios` (`mode: fixture \| demo \| actual`), parsed by `readPortfolioList` | API-backed `WorkspaceService`; *Create portfolio* (disabled now); per-workspace keys for scenarios and records |
+| Demo portfolio | Selectable; explicit unavailable state (`authorized_demo_dataset_unavailable`); never falls back to the fixture | Always unavailable | `GET/POST /v1/demo` (initialize, resume, `resetFromPortfolioId`), `POST /v1/demo/refresh` (revision, 409 `demo_workspace_changed`), parsed by `readDemo` / `demoStreams` | Initialize/resume/reset/refresh actions; capture cutoff as valuation date; quotes as `cached_snapshot` / `stale` |
+| Freshness | Independent streams (market, account, valuation, history, sync, sources) with explicit states; `summaryState` never says "Streaming" unless all core streams do; refresh keeps data mounted; optional periodic check (Settings › General) | Every fixture stream is "Fixed sample" or "Unavailable"; refresh records the check and reports no new data | `/coverage`, `/sync-runs`, `POST /provider-accounts/{id}/sync?scope=current\|history`, quote `freshness` | Map coverage and sync runs to stream states; measured thresholds; streaming/polling per provider capability |
+| Financial revision vs. market revision | Separate fields on the snapshot; figures change only when a revision moves | Constant fixture revisions | ledger, catalog and settlement-rule revisions in analytics responses | Invalidate and refetch per revision after mutations and new marks |
+| Decimals & availability | `readDecimal` (strings, nulls, malformed → unavailable) | n/a | Decimal strings everywhere | Use in all view-model adapters |
+| Overview | Valuation basis line (as-of, reconstructed, market-data state), native amounts per venue, indicative total note, Entry → Price / Implied column (one column; preference), stale source dates per row | Fixture marks | `/accounting?view=summary`, `/analytics/exposure` (`knownCombinedSubtotal` etc.), `/analytics/denominations` | Reported vs. reconstructed side by side; known subtotal ≠ NAV; "What changed" from actual changes since last visit |
+| Analytics | 1W–All + custom range, availability from history coverage, coverage line | Fixture weekly history | `/analytics/performance` (gaps, unavailable reasons) | Render return gaps and observed/carried/stale labels from the backend (LOCF methodology in `METHODOLOGY.md`) |
+| Risk | Acquisition cost vs. marked value, worst outcome vs. current value, as-of line | Fixture | `/analytics/exposure` | Per-denomination exposure; pending settlement/redemption exposure |
+| Scenario Lab (current market) | Frozen vs. latest reference check (`PriceCheckModal`, `applyLatestRefs`), assumed price separate, fee preference for new scenarios | Sample catalog references | Baseline tokens, `captureCurrentQuote`, rebase preview, revisions, `/evaluate-denominations` | Replace local evaluation with baseline/evaluate/save; rebase preview UI from the API |
+| Historical Replay | `/scenario-lab/replay`: Build · Analyze · Compare; lifecycle validation, explicit execution prices, LOCF valuation, per-account funding, native totals, hindsight labels, comparability flags; stored in `scevia-replays-v1` | Sample catalog with sample listing dates and one recorded resolution; no price history, so value over time is unavailable | `/v1/market-data/prices-history`, `/v1/market-catalog/kalshi/history` (bounded history); no replay engine in PR #8 | Backend replay service (Phase 7) using recorded observations; point-in-time mode is not offered |
+| Notifications & search | Scoped to the selected workspace; sample vs. local-sample labels; replays searchable | Sample-derived | Sync runs, settlements | Actual account, market, settlement and source-problem events |
+
+Rules kept: no fake streaming or random prices; a retrieved last-trade price isn't presented as a current executable quote; provider credentials never reach the browser; frontend calculations remain fixture, validation or presentation logic and are not authoritative for connected accounts.
 
 ## Adding sources (CSV, providers)
 
