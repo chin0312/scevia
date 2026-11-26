@@ -8,6 +8,7 @@ import { SAMPLE_PORTFOLIO } from './sample'
 import type { PortfolioData } from './types'
 import { fixtureCatalog, type CatalogEvent, type MarketCatalog } from '../lib/markets'
 import { SAMPLE_MARKET_EVENTS } from './sampleMarkets'
+import { fixtureFx, type FxService } from '../lib/fx'
 
 export const DEV_FLAG = 'scevia-dev-workspaces'
 const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
@@ -103,3 +104,29 @@ export function devCatalog(): MarketCatalog | undefined {
   return devService() ? (catalogCached ??= devDiscovery()) : undefined
 }
 let catalogCached: MarketCatalog | undefined
+
+/** Development-only exchange-rate variants, for checking how rate states are presented with data other than the
+ *  default fixture. Set `scevia-dev-fx` in this tab (with the development workspaces enabled) to `stale` (USD to EUR
+ *  and GBP observed weeks ago), `missing` (no USD to EUR/GBP and no pUSD to USD rate) or `alt` (the same rates from
+ *  differently named providers). Anything else uses the default fixture. */
+export const DEV_FX_FLAG = 'scevia-dev-fx'
+const fxCache = new Map<string, FxService>()
+export function devFx(): FxService | undefined {
+  if (!devService()) return undefined
+  const mode = window.sessionStorage.getItem(DEV_FX_FLAG) ?? ''
+  if (!['stale', 'missing', 'alt'].includes(mode)) return undefined
+  if (fxCache.has(mode)) return fxCache.get(mode)
+  const old = '2026-10-01'
+  const base = mode === 'stale' ? fixtureFx(undefined, undefined, { EUR: { rate: 0.9, observedAt: old }, GBP: { rate: 0.78, observedAt: old } }) : mode === 'missing' ? fixtureFx(undefined, undefined, {}) : fixtureFx()
+  const svc: FxService = {
+    label: base.label, live: base.live,
+    reference(b, q) {
+      const r = base.reference(b, q)
+      if (mode === 'missing' && b === 'PUSD') return { ...r, rate: null, freshness: 'unavailable' }
+      if (mode === 'alt' && r.freshness !== 'identity') return { ...r, sourceName: r.kind === 'stablecoin' ? 'Example Stablecoin Index' : 'Example Fiat Reference' }
+      return r
+    },
+  }
+  fxCache.set(mode, svc)
+  return svc
+}

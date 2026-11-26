@@ -19,6 +19,7 @@ import { validFeePct } from '../lib/fees'
 import { fmt, int } from '../lib/format'
 import { claimHandoff, readHandoff } from '../lib/handoff'
 import * as SC from '../lib/scenarios'
+import { MarketDataLabel } from '../components/Workspace'
 import { readStored, removeStored, scopedKey, writeStored } from '../lib/storage'
 import { useSettings } from '../lib/settings'
 import { useSessionState, useStorageHealthy } from '../lib/useSessionState'
@@ -32,6 +33,7 @@ import { AssumptionsBar, AssumptionsDrawer, StartSetup } from './lab/Setup'
 import { COLORS, EXAMPLES, describe, evaluate, evaluateActual, type Evaluation, type SizeMode } from './lab/model'
 import { PriceCheckModal } from './lab/PriceCheck'
 import { useFinance, useFinanceCtx } from '../lib/financeContext'
+import { count } from '../lib/text'
 
 type View = 'Build' | 'Analyze' | 'Compare'
 const VIEWS = ['Build', 'Analyze', 'Compare'] as const
@@ -170,7 +172,7 @@ export default function ScenarioLab() {
       setScenarios((ss) => [...ss, SC.addPositions({ ...SC.create(key, COLORS[ss.length % COLORS.length], name, 'portfolio', TODAY), ...frozenFor() }, adds).scenario])
     } else setScenarios((ss) => ss.map((x) => (x.key === target ? SC.addPositions(x, adds).scenario : x)))
     open(key); setPending(null)
-    const what = ids.length > 1 ? `${ids.length} positions` : `“${POS_BY_ID[ids[0]].market}”`
+    const what = ids.length > 1 ? `${count(ids.length, 'position')}` : `“${POS_BY_ID[ids[0]].market}”`
     toast(dest === 'portfolio' ? `Added ${what} to “${name}” at current size and mark: no change until you edit ${ids.length > 1 ? 'them' : 'it'}`
       : copyQty ? `Added ${what} to “${name}” as purchases of your current quantities, from an empty portfolio`
         : `Added ${what} to “${name}” from zero: enter quantities and prices to include ${ids.length > 1 ? 'them' : 'it'}`, 'info')
@@ -300,7 +302,7 @@ export default function ScenarioLab() {
           )}
           {(active.baseline !== 'portfolio' || !!active.frozen) && view === 'Analyze' && <AnalyzeView E={E} onEdit={editRow} />}
           {(active.baseline !== 'portfolio' || !!active.frozen) && view === 'Compare' && <CompareView key={activeKey} scenarios={scenarios} evals={evals} actual={actual} activeKey={activeKey} onOpen={(k) => open(k, 'Compare')} />}
-          <div className="footer-note"><span>Scenario results show what happens under the outcomes and prices you choose. They aren’t forecasts or recommendations.</span><span>Sample market data</span></div>
+          <div className="footer-note"><span>Scenario results show what happens under the outcomes and prices you choose. They aren’t forecasts or recommendations.</span><span><MarketDataLabel /></span></div>
         </>)}
       </main>
 

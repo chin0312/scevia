@@ -3,7 +3,9 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Icon } from '../../components/Icon'
-import { Button, PlatformBadge, cx } from '../../components/ui'
+import { Button, Chip, PlatformBadge, cx } from '../../components/ui'
+import { MarketDataLabel } from '../../components/Workspace'
+import { count } from '../../lib/text'
 import { PLATFORM_NAME } from '../../data/labels'
 import type { Platform } from '../../data/types'
 import { fmtDate, validFunding } from '../../lib/finance'
@@ -36,73 +38,76 @@ export function LabHome({ hasPortfolio, scenarios, evals, onCurrent, onScratch, 
   return (
     <div className="lab-home">
       <section className="page-head anchor" id="summary">
-        <div><div className="caps"><span className="accent">Scenario Lab</span></div><h1>What do you want to explore?</h1><p className="t2 lab-intro">Simulate portfolios with virtual money. Nothing here places a trade or touches your accounts.</p></div>
+        <div><h1>Scenario Lab</h1><p className="t2 lab-intro">Test portfolio changes and hypothetical trades with virtual funds. Scenario Lab never places trades or changes your accounts.</p></div>
       </section>
 
       <div className="start-grid three">
         <section className="start-card" aria-labelledby="start-current">
           <div className="start-ic"><Icon name="layers" size={18} /></div>
           <h2 id="start-current">Modify your current portfolio</h2>
-          <p className="t2">Start from what you hold now: resize, exit or add positions in current markets and see what changes.</p>
+          <p className="t2">Adjust existing positions or add new ones, and see how the changes affect your portfolio.</p>
           {hasPortfolio ? <>
           <dl className="start-facts">
-            <div><dt>Value at marks</dt><dd>{fmt(a.totalValue)}</dd></div>
+            <div><dt>Portfolio value</dt><dd>{fmt(a.totalValue)}</dd></div>
             <div><dt>Cash</dt><dd>{fmt(a.cash)}</dd></div>
-            <div><dt>Positions</dt><dd>{POSITIONS.length} <small className="t3">in {events} events</small></dd></div>
+            <div><dt>Positions</dt><dd>{POSITIONS.length}{' '}<small className="t3">in {count(events, 'event')}</small></dd></div>
           </dl>
           <div className="start-accts">{ACCOUNTS.map((x) => <span key={x.id} className="row"><PlatformBadge p={x.venue} size={16} />{accountName(x.id)} on {PLATFORM_NAME[x.venue]}</span>)}</div>
-          <small className="t3">{ws.summary.name}, reconstructed from records as of {fmtDate(TODAY)}. Prices are saved when the scenario starts. Your actual holdings never change.</small>
-          </> : <p className="unavailable" role="status">{ws.summary.name} has no portfolio data {ws.status === 'loading' ? 'yet (loading)' : 'available right now'}, so there’s nothing to start from. Building from scratch and historical replays need no portfolio.</p>}
+          <small className="t3">Holdings as of {fmtDate(TODAY)}. Prices are saved when a scenario starts, and your actual holdings never change.</small>
+          </> : <p className="unavailable" role="status">{ws.status === 'loading' ? `${ws.summary.name} is still loading.` : `${ws.summary.name} has no portfolio data right now.`} Build from scratch and Historical Replay don’t need a portfolio.</p>}
           <Button variant="primary" icon="layers" onClick={onCurrent} disabled={!hasPortfolio}>Modify current portfolio</Button>
         </section>
         <section className="start-card" aria-labelledby="start-scratch">
           <div className="start-ic"><Icon name="plus" size={18} /></div>
           <h2 id="start-scratch">Build from scratch</h2>
-          <p className="t2">A hypothetical portfolio with virtual capital you choose. No account, holdings or real funds are needed.</p>
-          <fieldset className="setup-f"><legend className="l">Virtual starting capital <span className="t3">(optional, by venue)</span></legend>
+          <p className="t2">Create a hypothetical portfolio using virtual funds. No connected account is needed.</p>
+          <fieldset className="setup-f"><legend className="l">Starting capital <span className="t3">(optional)</span></legend>
             <div className="row" style={{ gap: 'var(--space-2)', flexWrap: 'wrap' }}>
               {(['pm', 'ks'] as Platform[]).map((p) => (
                 <label key={p} className={cx('fund', parsed[p].state === 'invalid' && 'has-error')}><PlatformBadge p={p} size={18} />
                   <input className="num-input" inputMode="decimal" placeholder={`${PLATFORM_NAME[p]} ${DEFAULT_ASSET[p]}`} aria-label={`Starting capital on ${PLATFORM_NAME[p]}`} value={cap[p]} aria-invalid={parsed[p].state === 'invalid'} onChange={(e) => setCap((c) => ({ ...c, [p]: e.target.value }))} /></label>
               ))}
             </div>
-            <small className={cx(bad ? 'loss' : 't3')}>{bad ? 'Enter amounts such as 5000 or 5,000.50.' : 'You can add or change it later. Cash stays on its venue.'}</small>
+            <small className={cx(bad ? 'loss' : 't3')}>{bad ? 'Enter amounts such as 5000 or 5,000.50.' : 'Virtual funds for each platform. You can change them later.'}</small>
           </fieldset>
           <Button icon="plus" disabled={bad} onClick={() => onScratch(funding)}>Build from scratch</Button>
         </section>
         <section className="start-card" aria-labelledby="start-replay">
           <div className="start-ic"><Icon name="clock" size={18} /></div>
-          <h2 id="start-replay">Historical replay</h2>
-          <p className="t2">See how a set of trades would have done over a past period, using markets that traded then and prices you enter.</p>
+          <h2 id="start-replay">Historical Replay</h2>
+          <p className="t2">Explore how hypothetical trades would have performed in past markets. Positions settle at each market’s recorded outcome.</p>
           <dl className="start-facts">
-            <div><dt>Period</dt><dd>Up to today</dd></div>
-            <div><dt>Prices</dt><dd>Yours</dd></div>
-            <div><dt>Settles at</dt><dd>Actual results</dd></div>
+            <div><dt>Starting capital</dt><dd>Virtual funds</dd></div>
+            <div><dt>Entry and exit prices</dt><dd>Set by you</dd></div>
+            <div><dt>Outcomes</dt><dd>Historical</dd></div>
           </dl>
-          <Button icon="clock" onClick={() => nav('/scenario-lab/replay?new=1')}>Start a historical replay</Button>
+          <Button icon="clock" onClick={() => nav('/scenario-lab/replay?new=1')}>Start Historical Replay</Button>
         </section>
       </div>
 
       <section className="anchor" id="saved" aria-labelledby="saved-h">
-        <div className="home-h"><h3 id="saved-h">Your scenarios</h3><small className="t3">{scenarios.length + replays.length ? `${scenarios.length + replays.length} in this session` : ''}</small></div>
+        <div className="home-h"><h3 id="saved-h">Your scenarios</h3>{scenarios.length + replays.length > 0 && <small className="t3">{scenarios.length + replays.length} in this browser tab</small>}</div>
         {scenarios.length + replays.length === 0 ? <p className="t3 home-empty">No scenarios yet. They appear here once you start one, and stay in this browser tab.</p> : (
           <div className="scn-cards">
             {scenarios.map((s) => {
               const e = evals[s.key], st = SC.status(s)
+              const noStart = s.baseline === 'portfolio' && !s.frozen
+              const flags = noStart ? [] : [Object.keys(e.sim.errors).length > 0 && 'Incomplete inputs', e.A.shortfall > 0 && 'Needs funding'].filter((x): x is string => !!x)
               return (
                 <button type="button" key={s.key} className="scn-card" onClick={() => onOpen(s.key)} aria-label={`Open ${s.name}`}>
-                  <span className="scn-kind">{s.baseline === 'scratch' ? 'From scratch' : `From ${s.source?.name ?? 'a portfolio'}${s.frozen ? `, ${fmtDate(s.frozen.asOf)}` : ''}`}</span>
+                  <span className="scn-kind">{s.baseline === 'scratch' ? 'Starts empty' : `From ${s.source?.name ?? 'a portfolio'}${s.frozen ? `, ${fmtDate(s.frozen.asOf)}` : ''}`}</span>
                   <span className="row"><i className="sw" style={{ background: s.color }} /><b>{s.name}</b><small className={cx('scn-st', st)}>{st === 'saved' ? 'Saved' : st === 'new' ? 'Not saved' : 'Unsaved changes'}</small></span>
-                  <span className="t3">{s.adjs.length} position{s.adjs.length === 1 ? '' : 's'}{e.funding ? `, ${fmt(e.funding)} added capital` : ''}</span>
-                  <span className="scn-v">{s.baseline === 'portfolio' && !s.frozen ? <span className="t3">Original starting portfolio unavailable</span> : e.A.totalValue == null ? <span className="t3">Value unavailable</span> : fmt(e.A.totalValue)}<small className="t3"> at marks{Object.keys(e.sim.errors).length ? ' , incomplete' : ''}{e.A.shortfall > 0 ? ' , needs funding' : ''}</small></span>
+                  <span className="t3">{count(s.adjs.length, 'position')}{e.funding ? `, ${fmt(e.funding)} added capital` : ''}</span>
+                  <span className="scn-v">{noStart ? <span className="t3">Starting portfolio unavailable</span> : e.A.totalValue == null ? <span className="t3">Value unavailable</span> : <>{fmt(e.A.totalValue)}{' '}<small className="t3">portfolio value</small></>}</span>
+                  {flags.length > 0 && <span className="scn-flags">{flags.map((f) => <Chip key={f} tone="warn">{f}</Chip>)}</span>}
                 </button>
               )
             })}
             {replays.map((r) => (
               <button type="button" key={r.key} className="scn-card" onClick={() => nav(`/scenario-lab/replay?open=${encodeURIComponent(r.key)}`)} aria-label={`Open ${r.name}`}>
-                <span className="scn-kind">Historical replay</span>
+                <span className="scn-kind">Historical Replay</span>
                 <span className="row"><i className="sw" style={{ background: r.color }} /><b>{r.name}</b></span>
-                <span className="t3">{fmtDate(r.start, { month: 'short', day: 'numeric', year: 'numeric' })} – {fmtDate(r.end, { month: 'short', day: 'numeric', year: 'numeric' })}, {r.positions.length} position{r.positions.length === 1 ? '' : 's'}</span>
+                <span className="t3">{fmtDate(r.start, { month: 'short', day: 'numeric', year: 'numeric' })} – {fmtDate(r.end, { month: 'short', day: 'numeric', year: 'numeric' })}, {count(r.positions.length, 'position')}</span>
                 <span className="scn-v t3">Open to analyze</span>
               </button>
             ))}
@@ -115,7 +120,7 @@ export function LabHome({ hasPortfolio, scenarios, evals, onCurrent, onScratch, 
         <div className="row" style={{ flexWrap: 'wrap' }}>{EXAMPLES.map((ex, i) => ex.adjs(F) && <Button key={ex.name} size="sm" variant="ghost" icon="flask" onClick={() => onExample(i)}>{ex.name}</Button>)}</div>
         <small className="t3">Examples start from your current portfolio and are only added if you open one.</small>
       </section>}
-      <div className="footer-note"><span>Scenario results show what happens under the outcomes and prices you choose. They aren’t forecasts or recommendations.</span><span>Sample market data</span></div>
+      <div className="footer-note"><span>Scenario results show what happens under the outcomes and prices you choose. They aren’t forecasts or recommendations.</span><span><MarketDataLabel /></span></div>
     </div>
   )
 }

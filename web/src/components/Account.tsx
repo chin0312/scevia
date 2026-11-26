@@ -21,7 +21,7 @@ export function AccountMenu({ onPrivacy }: { onPrivacy: () => void }) {
 }
 
 const GROUP_DESC: Record<DataGroup, string> = {
-  preferences: 'Settings such as default scope, period, sizing, guardrail and notification preferences.',
+  preferences: 'Settings such as default scope, period, sizing, concentration limit and notification preferences.',
   scenarios: 'Saved and unsaved Scenario Lab scenarios.',
   records: 'Sample accounts, records, decisions, corrections and import history in Portfolio.',
   notifications: 'Which notifications you’ve read, and local import activity.',

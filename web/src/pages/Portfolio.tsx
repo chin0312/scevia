@@ -21,6 +21,7 @@ import * as R from '../lib/records'
 import { pushLocalEvent, useWorkspace, type Workspace } from '../lib/useWorkspace'
 import { useFinance } from '../lib/financeContext'
 import { WorkspaceLabel } from '../components/Workspace'
+import { count } from '../lib/text'
 
 export const SECTIONS = [
   { id: 'accounts', label: 'Accounts', icon: 'db' },
@@ -265,7 +266,7 @@ function Transactions({ ws, commit }: { ws: Workspace; commit: (label: string, w
           </tbody>
         </table>
       </div>
-      <div className="foot"><span>{rows.length} matching of {ws.records.length} records, page {pg + 1} of {pages}</span>
+      <div className="foot"><span>{rows.length} matching of {count(ws.records.length, 'record')}, page {pg + 1} of {pages}</span>
         <span className="row"><Button size="sm" variant="ghost" disabled={pg === 0} onClick={() => setPage(pg - 1)}>Previous</Button><Button size="sm" variant="ghost" disabled={pg >= pages - 1} onClick={() => setPage(pg + 1)}>Next</Button></span></div>
     </Card>
     {confirm && <ConfirmBulk action={confirm} keys={picked} ws={ws} onCancel={() => setConfirm(null)}
@@ -323,7 +324,7 @@ function RecordDetail({ r, ws, dups, onClose, onChange }: { r: R.ManagedRecord; 
         <dt>Cash effect</dt><dd>{R.cashEffect(e) == null ? 'Unknown' : sfmt(R.cashEffect(e)!, 2)}{e.type === 'settlement' ? '. Cash arrives when it’s redeemed' : ''}</dd>
       </dl>
       {cands.length > 0 && !r.duplicateOf && r.identity !== 'distinct' && (
-        <fieldset className="setup-f drawer-sec"><legend className="l">Possible duplicate of {cands.length > 1 ? `${cands.length} records` : 'another record'}</legend>
+        <fieldset className="setup-f drawer-sec"><legend className="l">Possible duplicate of {cands.length > 1 ? `${count(cands.length, 'record')}` : 'another record'}</legend>
           <small className="t3">Same account, type and terms. It may be one transaction recorded twice, or two real identical trades.</small>
           {cands.map((c) => { const ce = R.effective(c), eligible = R.statusOf(c, ws.records) === 'included' && !c.duplicateOf; return (
             <label key={c.key} className={cx('choice', dupTarget === c.key && 'on')} style={eligible ? undefined : { opacity: 0.6 }} title={eligible ? undefined : 'Only an included record can be the original'}><input type="radio" name="dup" disabled={!eligible} checked={dupTarget === c.key} onChange={() => setDupTarget(c.key)} />
@@ -425,11 +426,11 @@ function ImportFlow({ ws, preset, onClose, onDone }: { ws: Workspace; preset: { 
     <Modal title="Import a CSV file" sub="Sample files only: nothing is read from your computer or uploaded" onClose={onClose} width={700}
       footer={<>{step > 0 && step < 4 && <Button variant="ghost" onClick={() => setStep(step - 1)}>Back</Button>}<span className="spacer" />
         {step < 3 && <Button variant="primary" disabled={step === 1 && isNew && !newLabel.trim()} onClick={() => setStep(step + 1)}>Continue</Button>}
-        {step === 3 && <Button variant="primary" onClick={finish}>{p.replaces ? `Replace with ${p.rows.length} rows` : `Import ${p.rows.length} rows`}</Button>}
+        {step === 3 && <Button variant="primary" onClick={finish}>{p.replaces ? `Replace with ${count(p.rows.length, 'row')}` : `Import ${count(p.rows.length, 'row')}`}</Button>}
         {step === 4 && <Button variant="primary" onClick={() => onDone(`Imported ${sf.name} into ${isNew ? newLabel.trim() : ws.accounts.find((a) => a.id === accountId)?.label}`, result!.ws, review, p.batchId)}>Done</Button>}</>}>
       <ol className="steps" aria-label="Import steps">{STEPS.map((s, i) => <li key={s} className={cx(i === step && 'on', i < step && 'done')} aria-current={i === step ? 'step' : undefined}>{s}</li>)}</ol>
       {step === 0 && <fieldset className="add-list"><legend className="l">Choose a file</legend>
-        {SAMPLE_FILES.map((x) => <label key={x.name} className={cx('choice', file === x.name && 'on')}><input type="radio" name="file" checked={file === x.name} onChange={() => setFile(x.name)} /><span>{x.name} <Chip>Sample file</Chip><small>{x.about}, {x.rows.length} rows</small></span></label>)}
+        {SAMPLE_FILES.map((x) => <label key={x.name} className={cx('choice', file === x.name && 'on')}><input type="radio" name="file" checked={file === x.name} onChange={() => setFile(x.name)} /><span>{x.name} <Chip>Sample file</Chip><small>{x.about}, {count(x.rows.length, 'row')}</small></span></label>)}
         <small className="t3">Importing your own files needs a Scevia account, which isn’t available yet.</small></fieldset>}
       {step === 1 && <>
         <label className="add-field"><span className="l">Account these records belong to</span>
@@ -444,7 +445,7 @@ function ImportFlow({ ws, preset, onClose, onDone }: { ws: Workspace; preset: { 
             <Seg label="Import relationship" options={['Supplements its history', 'Independent records'] as const} value={mode === 'supplement' ? 'Supplements its history' : 'Independent records'} onChange={(v) => setMode(v === 'Independent records' ? 'independent' : 'supplement')} />
             <small className="t3">{mode === 'supplement' ? 'Rows that exactly match records the account already has are flagged for review. Nothing is merged automatically.' : 'Every row is added as its own record in this account, without overlap checks.'}</small></fieldset>
         )}
-        {p.replaces && <Callout tone="warn" icon="alert">This file is already imported into this account (batch {p.replaces.id}). Continuing replaces that batch; your decisions carry over to matching rows.</Callout>}
+        {p.replaces && <Callout tone="warn" icon="alert">This file is already imported into this account (batch {p.replaces.id}). Continuing replaces that batch. Your decisions carry over to matching rows.</Callout>}
         {isNew && <small className="t3">A new imported account is independent: its records aren’t matched against other accounts, even on the same venue.</small>}
       </>}
       {step === 2 && <>
@@ -453,7 +454,7 @@ function ImportFlow({ ws, preset, onClose, onDone }: { ws: Workspace; preset: { 
           <tbody>{p.rows.map((x) => <tr key={x.n}><td>{x.n}</td><td className="tnum">{when(x.rec.time)}</td><td>{R.TYPE_LABEL[x.rec.type]}</td><td>{x.rec.instrument ? `${x.rec.instrument} ${x.rec.side}` : '—'}</td><td className="r">{x.rec.quantity == null ? '—' : qty(x.rec.quantity)}</td><td className="r">{x.rec.price != null ? x.rec.price.toFixed(2) : x.rec.amount != null ? fmt(x.rec.amount, 2) : '—'}</td><td>{x.warnings.length ? <span className="stale">{x.warnings.join('. ')}</span> : <span className="t3">—</span>}</td></tr>)}</tbody></table></div>
       </>}
       {step === 3 && <>
-        <p className="t2">{effMode === 'independent' ? `All ${p.rows.length} rows will be added to ${isNew ? newLabel.trim() : acctName(ws, accountId)} as its own records.` : `${overlaps} overlapping row${overlaps === 1 ? '' : 's'} will wait for your review (duplicate or separate). ${p.rows.length - overlaps} row${p.rows.length - overlaps === 1 ? ' has' : 's have'} no match.`}</p>
+        <p className="t2">{effMode === 'independent' ? `All ${count(p.rows.length, 'row')} will be added to ${isNew ? newLabel.trim() : acctName(ws, accountId)} as its own records.` : `${overlaps} overlapping row${overlaps === 1 ? '' : 's'} will wait for your review (duplicate or separate). ${p.rows.length - overlaps} row${p.rows.length - overlaps === 1 ? ' has' : 's have'} no match.`}</p>
         {effMode === 'supplement' && p.rows.length - overlaps > 0 && <label className="choice"><input type="checkbox" checked={accept} onChange={(e) => setAccept(e.target.checked)} /><span>Include the {p.rows.length - overlaps} rows without a match<small>Otherwise they also wait for review. You can change any row later.</small></span></label>}
         {p.replaces && <small className="t3">Batch {p.replaces.id} will be marked superseded and kept in the import history.</small>}
       </>}
@@ -543,7 +544,7 @@ function Coverage({ ws }: { ws: Workspace }) {
             <td className={cx(s.stale ? 'stale' : 't2')}>{fmtDate(s.asOf)}{s.stale ? ' (out of date)' : ''}</td><td className="r">{c.open}</td><td className="r">{c.fills}</td><td className="r">{c.settlements}</td>
             <td className={cx('r', c.feeEstimates > 0 && 'warn-fg')}>{c.feeEstimates}</td><td>{x.openingDeclared ? 'Declared' : 'Unknown'}</td></tr>) })}</tbody>
       </table></div>
-      <div className="foot"><span>Figures are reconstructed from the sample records at {fmtDate(TODAY)} marks; value {fmt(a.totalValue)}. Estimated fees are labelled where they’re used.</span><span /></div>
+      <div className="foot"><span>Portfolio value {fmt(a.totalValue)} at prices as of {fmtDate(TODAY)}. Estimated fees are labelled where they’re used.</span><span /></div>
     </Card>
     <div className="grid g-2">
       <Card><CardHeader title="How values are labelled" sub="The same states are used wherever a figure appears" />

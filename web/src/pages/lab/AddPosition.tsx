@@ -14,6 +14,7 @@ import { qty } from '../../lib/format'
 import { instrumentFrom, type CatalogEvent, type LinkResolution } from '../../lib/markets'
 import { accountName } from '../../lib/useWorkspace'
 import { useFinance } from '../../lib/financeContext'
+import { count } from '../../lib/text'
 
 type Source = 'Your holdings' | 'Search markets' | 'Paste link'
 /** One pick: an instrument, and the actual holding it refers to when picked from your holdings (account-specific). */
@@ -165,7 +166,7 @@ function PasteLink({ inScenario, isPicked, toggle }: PickProps) {
       <input data-autofocus autoFocus className="text-input" style={{ flex: 1, minWidth: 220 }} inputMode="url" placeholder="Market link, or a Polymarket / Kalshi market id" aria-label="Market link" value={url} onChange={(e) => { setUrl(e.target.value); seq.current++; setState({ loading: false, res: null }) }} />
       <Button type="submit" disabled={!url.trim() || state.loading}>{state.loading ? 'Resolving market…' : 'Find market'}</Button>
     </form>
-    <p className="t3 note">Supported: Polymarket and Kalshi market links. Scevia doesn’t open the link; it looks up the market reference. {MARKET_CATALOG.live ? '' : `In this version, links resolve only against the ${MARKET_CATALOG.label.toLowerCase()}.`}</p>
+    <p className="t3 note">Supported: Polymarket and Kalshi market links. Scevia doesn’t open the link. It only reads the market reference. {MARKET_CATALOG.live ? '' : `Links resolve only against the ${MARKET_CATALOG.label.toLowerCase()}.`}</p>
     <div aria-live="polite">
       {state.loading && <div className="skeleton" style={{ height: 80 }} />}
       {state.failed && <Callout tone="warn" icon="alert">The link couldn’t be looked up. <button type="button" className="link" onClick={() => void resolve()}>Try again</button></Callout>}
@@ -176,7 +177,7 @@ function PasteLink({ inScenario, isPicked, toggle }: PickProps) {
       {r?.status === 'unsupported-market' && <Callout tone="warn" icon="alert">This {PLATFORM_NAME[r.provider]} market type isn’t supported: {r.reason}</Callout>}
       {(r?.status === 'temporarily-unavailable' || r?.status === 'access-unavailable') && <Callout tone="warn" icon="alert">{r.status === 'temporarily-unavailable' ? 'Market data is temporarily unavailable for this link.' : 'Market data access isn’t available for this link.'} Nothing is shown in its place. <button type="button" className="link" onClick={() => void resolve()}>Try again</button></Callout>}
       {r?.status === 'resolved' && <>
-        <p className="t2 note">{r.event.markets.length > 1 ? `This link covers ${r.event.markets.length} markets. Choose the markets and outcomes to add.` : 'Choose the outcome to add.'} <Chip tone="warn">{MARKET_CATALOG.label}</Chip></p>
+        <p className="t2 note">{r.event.markets.length > 1 ? `This link covers ${count(r.event.markets.length, 'market')}. Choose the markets and outcomes to add.` : 'Choose the outcome to add.'} <Chip tone="warn">{MARKET_CATALOG.label}</Chip></p>
         <EventCard ev={r.event} inScenario={inScenario} isPicked={isPicked} toggle={toggle} />
       </>}
     </div>
@@ -189,7 +190,7 @@ function EventCard({ ev, inScenario, isPicked, toggle }: PickProps & { ev: Catal
   const { holdingsOfInstrument } = useFinance()
   return (
     <div className="addpos-event">
-      <div className="row"><PlatformBadge p={ev.provider} /><b>{ev.eventTitle}</b>{ev.markets.length > 1 && <small className="t3">{ev.markets.length} markets, pick any</small>}</div>
+      <div className="row"><PlatformBadge p={ev.provider} /><b>{ev.eventTitle}</b>{ev.markets.length > 1 && <small className="t3">{count(ev.markets.length, 'market')}, pick any</small>}</div>
       {ev.markets.map((m) => (
         <div className="addpos-market" key={m.marketId}>
           <div className="addpos-t"><span>{m.marketTitle}</span>

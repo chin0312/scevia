@@ -7,8 +7,10 @@
    Switching or refreshing never changes a scenario, a record or an input. */
 import { useEffect, useState, type ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { FRESHNESS_LABEL, assetLabel } from '../lib/fx'
+import { FRESHNESS_LABEL, assetLabel, sourceName } from '../lib/fx'
+import { phrase } from '../lib/text'
 import { useReporting } from '../lib/reporting'
+import { useMarketCatalog } from '../lib/marketContext'
 import { FIXTURE_ID, MODE_LABEL, type WorkspaceSnapshot } from '../data/workspace'
 import { PLATFORM_NAME } from '../data/labels'
 import { fmtDate } from '../lib/finance'
@@ -34,7 +36,9 @@ function useNow() {
   return now
 }
 
-const shortName = (s: WorkspaceSnapshot) => (s.summary.mode === 'fixture' ? 'Sample' : s.summary.mode === 'demo' ? 'Demo' : s.summary.name)
+/** The first word of the portfolio's own name (e.g. "Sample", "Demo"), for narrow screens. The full name is the
+ *  button's accessible name and is shown in the menu. */
+const shortName = (s: WorkspaceSnapshot) => s.summary.name.split(/\s+/)[0]
 
 export function PortfolioSelector() {
   const nav = useNavigate()
@@ -150,6 +154,13 @@ export function WorkspaceGate({ children }: { children: ReactNode }) {
 }
 
 /** The selected portfolio's name and data basis, for page footers ("Sample portfolio (fictional data)"). */
+/** The market data disclosure for Scenario Lab and Historical Replay: the catalog's own label when it isn't live
+ *  provider data (e.g. "Sample market data"); nothing when it is. */
+export function MarketDataLabel() {
+  const c = useMarketCatalog()
+  return c.live ? null : <>{c.label}</>
+}
+
 export function WorkspaceLabel({ suffix }: { suffix?: string }) {
   const { snapshot: s } = useActiveWorkspace()
   const basis = s.summary.mode === 'fixture' ? 'fictional data' : s.summary.mode === 'demo' ? 'real markets, virtual capital' : 'your records'
@@ -163,7 +174,8 @@ export function ReportingNote({ denominations }: { denominations: string[] }) {
   const { currency, assetReference, reference } = useReporting()
   const assets = [...new Set(denominations)]
   if (currency === 'USD' && assets.every((d) => d === 'USD')) return null
-  const parts = assets.map((d) => { const r = assetReference(d); return r.rate == null ? `no ${assetLabel(d)} rate` : d === currency ? null : `1 ${assetLabel(d)} = ${r.rate.toFixed(4)} ${currency}` }).filter(Boolean)
-  const title = [reference, ...assets.map((d) => assetReference(d))].map((r) => `${r.base}→${r.quote}: ${r.source}, ${r.methodology}${r.observedAt ? `, observed ${r.observedAt}` : ''} (${FRESHNESS_LABEL[r.freshness].toLowerCase()})`).join('\n')
-  return <span title={title}>Shown in {currency}{parts.length ? ` (${parts.join(', ')})` : ''}</span>
+  const parts = assets.map((d) => { const r = assetReference(d); return r.rate == null ? `no ${assetLabel(d)} rate` : d === currency ? null : `1 ${assetLabel(d)} = ${r.rate.toFixed(4)} ${currency}${r.freshness === 'stale' ? ', out of date' : ''}` })
+  const title = [reference, ...assets.map((d) => assetReference(d))].map((r) => `${assetLabel(r.base)} to ${r.quote}: ${sourceName(r)}, ${r.methodology}${r.observedAt ? `, observed ${r.observedAt}` : ''} (${FRESHNESS_LABEL[r.freshness].toLowerCase()})`).join('\n')
+  const detail = phrase(...parts)
+  return <span title={title}>Shown in {currency}{detail && ` (${detail})`}</span>
 }

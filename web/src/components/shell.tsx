@@ -12,7 +12,7 @@ import { SAMPLE_WORKSPACE_ID, readStored } from '../lib/storage'
 import { WorkspaceProvider, hasData, useActiveWorkspace } from '../lib/workspaceContext'
 import { FinanceProvider } from '../lib/financeContext'
 import { ReportingProvider } from '../lib/reporting'
-import { devCatalog, devService } from '../data/devWorkspaces'
+import { devCatalog, devFx, devService } from '../data/devWorkspaces'
 import { MarketCatalogProvider } from '../lib/marketContext'
 import { accountName, emptyRecords, initialWorkspace, notifyRecords, setActiveRecords, useWorkspaceSnapshot } from '../lib/useWorkspace'
 import { AccountMenu, PrivacyDialog } from './Account'
@@ -24,6 +24,7 @@ import { Layer, Menu, ToastProvider } from './overlays'
 import { SettingsModal } from './Settings'
 import { DataStatus, PORTFOLIO_SECTIONS, PortfolioSelector, WorkspaceGate } from './Workspace'
 import { cx } from './ui'
+import { phrase } from '../lib/text'
 import { useFinanceCtx } from '../lib/financeContext'
 
 const AREAS = [
@@ -105,7 +106,7 @@ function CommandPalette({ onClose, open }: { onClose: () => void; open: Overlays
       ...ws.accounts.map((a) => ({ id: `acct:${a.id}`, group: 'Accounts', label: a.label, sub: `${PLATFORM_NAME[a.venue]} ${a.kind}${a.inAnalytics ? '' : ', records only'}`, icon: 'db' as IconName, keys: `${PLATFORM_NAME[a.venue]} ${a.connection ?? ''} account wallet`.toLowerCase(), go: to(`/portfolio/transactions?account=${encodeURIComponent(a.id)}`) })),
       ...POSITIONS.map((p) => ({ id: `pos:${p.id}`, group: 'Positions', label: p.market, sub: `${p.side}, ${qty(p.shares)} shares in ${accountName(p.accountId)}`, icon: 'layers' as IconName, keys: `${p.category} ${p.eventId} ${p.side}`.toLowerCase(), go: det({ kind: 'position', id: p.id }) })),
       ...exposures().map((x) => ({ id: `evt:${x.event.id}`, group: 'Events', label: x.event.name, sub: `${x.positions.length} contract${x.positions.length > 1 ? 's' : ''}, resolves ${fmtDate(x.resolves)}`, icon: 'target' as IconName, keys: `${x.event.short} ${x.event.category}`.toLowerCase(), go: det({ kind: 'event', id: x.event.id }) })),
-      ...ws.records.map((r) => { const a = ws.accounts.find((x) => x.id === r.accountId); return { id: `rec:${r.key}`, group: 'Transactions', label: `${TYPE_LABEL[r.type]}${r.instrument ? `: ${r.instrument} ${r.side ?? ''}` : ''}`, sub: `${a?.label ?? ''}, ${fmtDate(r.time.slice(0, 10))}`, icon: 'list' as IconName, keys: `${r.key} ${r.sourceRef} ${r.batchId ?? ''} record transaction`.toLowerCase(), go: to(`/portfolio/transactions?q=${encodeURIComponent(r.key)}`) } }),
+      ...ws.records.map((r) => { const a = ws.accounts.find((x) => x.id === r.accountId); return { id: `rec:${r.key}`, group: 'Transactions', label: `${TYPE_LABEL[r.type]}${r.instrument ? `: ${r.instrument} ${r.side ?? ''}` : ''}`, sub: phrase(a?.label, fmtDate(r.time.slice(0, 10))), icon: 'list' as IconName, keys: `${r.key} ${r.sourceRef} ${r.batchId ?? ''} record transaction`.toLowerCase(), go: to(`/portfolio/transactions?q=${encodeURIComponent(r.key)}`) } }),
     ] : []
     // Scenarios and replays are the user's Scenario Lab collection: searchable whichever portfolio is selected.
     const lab: Item[] = [
@@ -175,7 +176,7 @@ function CommandPalette({ onClose, open }: { onClose: () => void; open: Overlays
 function WorkspaceFromSettings({ children }: { children: ReactNode }) {
   const { settings } = useSettings()
   // Keyed by reporting currency so every figure is shown again in the new currency (presentation only).
-  return <ReportingProvider currency={settings.reportingCurrency} prefs={settings.fx} key={settings.reportingCurrency}><WorkspaceProvider autoRefreshMin={settings.autoRefresh} service={devService()}><ActiveFinance><MarketCatalogProvider catalog={devCatalog()}>{children}</MarketCatalogProvider></ActiveFinance></WorkspaceProvider></ReportingProvider>
+  return <ReportingProvider currency={settings.reportingCurrency} prefs={settings.fx} fx={devFx()} key={settings.reportingCurrency}><WorkspaceProvider autoRefreshMin={settings.autoRefresh} service={devService()}><ActiveFinance><MarketCatalogProvider catalog={devCatalog()}>{children}</MarketCatalogProvider></ActiveFinance></WorkspaceProvider></ReportingProvider>
 }
 /* Binds the read model to the selected workspace. A workspace without data (loading, unavailable, failed) gets an
    empty portfolio, never another workspace's data. Detail panels are reset when the workspace changes. */

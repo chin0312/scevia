@@ -18,6 +18,7 @@ import { useActiveWorkspace } from '../lib/workspaceContext'
 import { accountName } from '../lib/useWorkspace'
 import { useFinance } from '../lib/financeContext'
 import { ReportingNote, WorkspaceLabel } from '../components/Workspace'
+import { count, joinList, phrase } from '../lib/text'
 
 const RAIL: RailSection[] = [
   { id: 'summary', label: 'Summary', icon: 'home' },
@@ -119,7 +120,7 @@ export default function Overview() {
       </button>
     </th>
   )
-  const scope = f === 'all' ? 'Polymarket + Kalshi' : `${plat} only`
+  const scope = f === 'all' ? joinList((['pm', 'ks'] as Platform[]).filter((p) => accountsOn(p).length).map((p) => PLATFORM_NAME[p])) : `${plat} only`
 
   return (
     <div className="shell">
@@ -190,11 +191,11 @@ export default function Overview() {
         </div>
 
         <div className="tiles">
-          <Tile label="Realized P&L" info="Closed trades: shares × (exit − entry) − that trade’s fees. All time." value={sfmt(acct.realized, 2)} tone={acct.realized >= 0 ? 'gain' : 'loss'} foot={`${acct.closedCount} closed trades, after ${fmt(acct.closedFees, 2)} fees`} />
+          <Tile label="Realized P&L" info="Closed trades: shares × (exit − entry) − that trade’s fees. All time." value={sfmt(acct.realized, 2)} tone={acct.realized >= 0 ? 'gain' : 'loss'} foot={acct.closedCount ? `${count(acct.closedCount, 'closed trade')}, after ${fmt(acct.closedFees, 2)} fees` : 'No closed trades yet'} />
           <Tile label="Unrealized P&L" info="Open positions at mark price minus cost basis. Cost basis includes fees paid on those purchases, so unrealized P&L is after acquisition fees." value={sfmt(acct.unrealized, 2)} tone={acct.unrealized >= 0 ? 'gain' : 'loss'} foot={`${acct.openCount} open positions, after ${fmt(acct.openFees, 2)} purchase fees`} />
           <Tile label="Capital committed" info="Cost basis of open positions, including purchase fees: what you’d lose if every open contract resolved against you." value={fmt(acct.committed)} foot={`${pct((acct.committed / acct.totalValue) * 100, 0)} of portfolio value`} />
-          <Tile label="Cash" info="Net deposits + realized P&L − cost and fees of open fills, per platform." value={fmt(acct.cash, 2)} foot={f === 'all' ? `Polymarket ${fmt(account('pm').cash)}, Kalshi ${fmt(account('ks').cash)}` : `${plat} balance`} />
-          <Tile label="Win rate" info="Resolved positions that settled in your favour ÷ all resolved positions (early exits excluded). Small samples are noisy." value={acct.resolved ? `${Math.round((acct.wins / acct.resolved) * 100)}%` : 'No data'} foot={`${acct.wins} of ${acct.resolved} resolved trades`} />
+          <Tile label="Cash" info="Net deposits + realized P&L − cost and fees of open fills, per platform." value={fmt(acct.cash, 2)} foot={f === 'all' ? phrase(...(['pm', 'ks'] as Platform[]).filter((p) => accountsOn(p).length).map((p) => `${PLATFORM_NAME[p]} ${fmt(account(p).cash)}`)) : `${plat} balance`} />
+          <Tile label="Win rate" info="Resolved positions that settled in your favour ÷ all resolved positions (early exits excluded). Small samples are noisy." value={acct.resolved ? `${Math.round((acct.wins / acct.resolved) * 100)}%` : 'No data'} foot={acct.resolved ? `${acct.wins} of ${count(acct.resolved, 'resolved trade')}` : 'No resolved trades yet'} />
         </div>
 
         <div className="grid g-3 anchor" id="breakdown">
@@ -203,7 +204,7 @@ export default function Overview() {
             <div className="card-b alloc">
               {alloc.length === 0 ? <div className="empty" style={{ gridColumn: '1 / -1' }}><p>No open positions in {scope}.</p></div> : <>
               <Donut parts={alloc.map((a) => ({ key: a.key, value: a.value, color: a.color }))} active={hotSlice ?? shownBy?.key ?? null} onHover={setHotSlice} onSelect={select}
-                center={(() => { const c = hot ?? alloc.find((x) => x.key === shownBy?.key); return <div><b>{fmt(c ? c.value : allocTotal)}</b><span className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>{c ? `${c.label}, ${pct(c.share * 100, 0)}` : `${pos.length} positions`}</span></div> })()} />
+                center={(() => { const c = hot ?? alloc.find((x) => x.key === shownBy?.key); return <div><b>{fmt(c ? c.value : allocTotal)}</b><span className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>{c ? `${c.label}, ${pct(c.share * 100, 0)}` : `${count(pos.length, 'position')}`}</span></div> })()} />
               <div role="group" aria-label={`Allocation by ${allocBy.toLowerCase()}. Choose a segment to filter holdings.`}>
                 {alloc.map((a) => {
                   const on = active?.by === allocBy && active.key === a.key
@@ -245,7 +246,7 @@ export default function Overview() {
               {[...exps].sort((a, b) => a.days - b.days).slice(0, 6).map((e) => (
                 <button type="button" key={e.event.id} className="tl-row tl-btn" aria-label={`${e.event.name}: view event exposure`} onClick={() => details.open({ kind: 'event', id: e.event.id, scope: f })}>
                   <div className="date"><b>{fmtDate(e.resolves, { day: 'numeric' })}</b><span>{fmtDate(e.resolves, { month: 'short' })}</span></div>
-                  <div className="t">{e.event.name} {e.positions.length > 1 && <Chip tone="accent">{e.positions.length} contracts</Chip>}<small>{e.side === 'Mixed' ? 'YES and NO' : e.side} on {e.platforms.map((p) => PLATFORM_NAME[p]).join(' and ')}, in {e.days} days</small></div>
+                  <div className="t">{e.event.name} {e.positions.length > 1 && <Chip tone="accent">{count(e.positions.length, 'contract')}</Chip>}<small>{e.side === 'Mixed' ? 'YES and NO' : e.side} on {e.platforms.map((p) => PLATFORM_NAME[p]).join(' and ')}, in {count(e.days, 'day')}</small></div>
                   <span>{fmt(e.cost)}</span>
                 </button>
               ))}
@@ -258,7 +259,7 @@ export default function Overview() {
               <p className="t3" style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--space-2)' }}>{wsName}{wsMode === 'fixture' ? '. No account is connected.' : ''}</p>
               {(['pm', 'ks'] as Platform[]).filter((p) => f === 'all' || p === f).map((p) => {
                 const c = coverage(p), src = sourceOf(p)
-                return <div className="cov" key={p}><PlatformBadge p={p} /><span>{accountsOn(p).map((a) => accountName(a.id)).join(', ')}: {c.fills} fills, {c.settlements} settlements</span><span className={src.stale ? 'stale' : 't3'} title={src.stale ? 'Older than 24 hours' : undefined}>{src.stale ? 'Out of date, ' : ''}{fmtDate(src.asOf)}</span></div>
+                return <div className="cov" key={p}><PlatformBadge p={p} /><span>{accountsOn(p).length > 0 && `${joinList(accountsOn(p).map((a) => accountName(a.id)))}: `}{count(c.fills, 'fill')}, {count(c.settlements, 'settlement')}</span><span className={src.stale ? 'stale' : 't3'} title={src.stale ? 'Older than 24 hours' : undefined}>{src.stale ? 'Out of date, ' : ''}{fmtDate(src.asOf)}</span></div>
               })}
               {(() => { const ps = (['pm', 'ks'] as Platform[]).filter((p) => f === 'all' || p === f).map(coverage); const t = (k: keyof (typeof ps)[number]) => ps.reduce((a, c) => a + c[k], 0)
                 return <div className="cov-mini"><div><b>{t('open')}</b>open positions</div><div><b>{t('fills')}</b>fills</div><div><b>{t('settlements')}</b>settlements</div><div><b>{t('feeEstimates')}</b>fee estimates</div></div> })()}
@@ -282,7 +283,7 @@ export default function Overview() {
             <>
               {(active || selInvalid) && (
                 <div className="filter-bar" role="status">
-                  {active ? <>Showing <b>{segLabel(active.by, active.key)}</b>: {rows.length} of {pos.length} positions, {fmt(selSeg!.value)} or {pct(selSeg!.share * 100, 0)} of open value</>
+                  {active ? <>Showing <b>{segLabel(active.by, active.key)}</b>: {rows.length} of {count(pos.length, 'position')}, {fmt(selSeg!.value)} or {pct(selSeg!.share * 100, 0)} of open value</>
                     : <>The {sel!.by.toLowerCase()} filter “{segLabel(sel!.by, sel!.key)}” has no positions in {scope}, so all positions are shown.</>}
                   <button type="button" className="link" onClick={() => setSel(null)}>Clear filter</button>
                 </div>

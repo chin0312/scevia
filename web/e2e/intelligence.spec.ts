@@ -114,7 +114,7 @@ test('scenario prices: frozen references are checked against the latest without 
 
 test('historical replay: virtual funding, trading-close validation, funding status, repeated positions and compare', async ({ page }) => {
   await fresh(page, '/scenario-lab')
-  await page.getByRole('button', { name: 'Start a historical replay' }).click()
+  await page.getByRole('button', { name: 'Start Historical Replay' }).click()
   await expect(page.getByRole('heading', { level: 1 })).toContainText('Historical replay 1')
   await expect(page.getByText('No virtual funds yet.')).toBeVisible()
   await page.locator('#rp-setup').getByLabel('Start', { exact: true }).fill('2026-03-01')
@@ -230,7 +230,7 @@ test('copy: plain sentences on every page, with the critical disclosures kept on
     ['/overview', ['Sample portfolio (fictional data)', 'Scevia is read-only. It never places trades or holds funds.']],
     ['/analytics', ['Portfolio performance', 'They don’t predict future ones and aren’t investment advice.']],
     ['/risk', ['Scevia does not estimate how likely each outcome is.']],
-    ['/scenario-lab', ['Simulate portfolios with virtual money. Nothing here places a trade or touches your accounts.']],
+    ['/scenario-lab', ['Scenario Lab never places trades or changes your accounts.']],
     ['/scenario-lab/replay?new=1', ['You choose these markets knowing how they turned out.', 'It isn’t your actual performance or a tested strategy.']],
     ['/portfolio/accounts', ['Sample portfolio (fictional data)']],
   ]
@@ -243,4 +243,138 @@ test('copy: plain sentences on every page, with the critical disclosures kept on
     expect(text, `${path} uses statistical notation`).not.toMatch(/\bn ?= ?\d/)
     expect(text, `${path} uses em-dash separators`).not.toMatch(/ — /)
   }
+})
+
+/* Punctuation and spacing in rendered copy. Checked line by line on visible text, so data such as market titles is
+   included but code never is; the sample's names and titles contain none of these patterns. */
+const COPY_RULES: [string, RegExp][] = [
+  ['space before punctuation', /[^\s] [,.;:](?=\s|$)/],
+  ['double space', /\S {2,}\S/],
+  ['empty parentheses', /\(\s*\)/],
+  ['repeated punctuation', /(?<!\.)[,;:]{2,}|, ?,|[^.]\.\.(?!\.)/],
+  ['semicolon in prose', /[A-Za-z’)%]; /],
+  ['separator dot', / · /],
+  ['em-dash separator', / — /],
+  ['n = notation', /\bn ?= ?\d/],
+  ['leading punctuation', /^\s*[,.;:]/],
+  ['missing space after punctuation', /[a-z][,.;][A-Z][a-z]/],
+  ['wrong plural', /(^|[^\d.,])1 (positions|events|trades|days|records|markets|contracts|fills|settlements|dates|rows)\b/],
+]
+const expectCleanCopy = async (loc: import('@playwright/test').Locator, where: string) => {
+  const lines = (await loc.innerText()).split('\n')
+  const bad = lines.flatMap((l) => COPY_RULES.filter(([, re]) => re.test(l)).map(([name]) => `${name}: “${l.trim()}”`))
+  expect(bad, where).toEqual([])
+}
+const devFresh = async (page: Page, path: string, fx = '') => {
+  await page.goto(path)
+  await page.evaluate((v) => { sessionStorage.clear(); sessionStorage.setItem('scevia-dev-workspaces', '1'); if (v) sessionStorage.setItem('scevia-dev-fx', v) }, fx)
+  await page.goto(path)
+}
+const selectWorkspace = async (page: Page, name: RegExp) => {
+  await page.getByRole('button', { name: /^Portfolio:/ }).click()
+  await page.getByRole('menuitemradio', { name }).click()
+  await expect(page.getByRole('button', { name: /^Portfolio:/ })).toHaveAccessibleName(name)
+}
+const setCurrency = async (page: Page, code: string) => {
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.getByLabel('Reporting currency').selectOption(code)
+  return page.getByRole('dialog', { name: 'Settings' })
+}
+
+test('titles: each module has one plain title and no eyebrow that repeats it', async ({ page }) => {
+  for (const [path, title] of [['/overview', 'Portfolio overview'], ['/analytics', 'Portfolio performance'], ['/risk', 'Portfolio risk'], ['/scenario-lab', 'Scenario Lab'], ['/scenario-lab/replay', 'Historical Replay']]) {
+    await fresh(page, path)
+    await expect(page.locator('main h1').first()).toHaveText(title)
+    for (const eyebrow of await page.locator('main .page-head .caps').allInnerTexts()) expect(eyebrow.trim().toLowerCase()).not.toBe(title.toLowerCase())
+  }
+  // A specific replay is titled by its own name.
+  await fresh(page, '/scenario-lab/replay?new=1')
+  await expect(page.locator('main h1').first()).toContainText('Historical replay 1')
+})
+
+test('copy: saved cards, price check, replay errors and notifications read cleanly in every state', async ({ page }) => {
+  // A scratch scenario that needs more virtual funds than it has.
+  await fresh(page, '/scenario-lab')
+  await page.getByLabel('Starting capital on Polymarket').fill('10')
+  await page.getByRole('button', { name: 'Build from scratch' }).click()
+  const dlg = page.getByRole('dialog', { name: 'Add markets' })
+  await dlg.getByLabel('Search markets').fill('Ethereum')
+  await expectCleanCopy(dlg, 'add markets')
+  await dlg.getByRole('button', { name: /Select Ethereum above \$5,000 on Dec 31 YES/ }).click()
+  await dlg.getByRole('button', { name: 'Add 1 position' }).click()
+  await page.getByLabel('Target shares of Ethereum above $5,000 on Dec 31').fill('5000')
+  await page.getByLabel('Assumed price for Ethereum above $5,000 on Dec 31').fill('0.2')
+  await expectCleanCopy(page.locator('main'), 'scratch scenario with a shortfall')
+  // A current-portfolio scenario with its price check.
+  await page.getByRole('option', { name: /All scenarios/ }).click()
+  await page.getByRole('button', { name: 'Modify current portfolio' }).click()
+  await page.keyboard.press('Enter')
+  await page.getByRole('button', { name: 'Check latest' }).click()
+  const check = page.getByRole('dialog', { name: 'Check latest prices' })
+  await expect(check.locator('[aria-busy="true"]')).toHaveCount(0)
+  await expect(check).toContainText('no positions with reference prices to check')
+  await expectCleanCopy(check, 'price check')
+  await page.keyboard.press('Escape')
+  // Saved cards show the value and each status as its own label.
+  await page.getByRole('option', { name: /All scenarios/ }).click()
+  const card = page.getByRole('button', { name: 'Open From scratch' })
+  await expect(card.locator('.scn-v')).toContainText('portfolio value')
+  await expect(card.locator('.scn-flags')).toContainText('Needs funding')
+  await expectCleanCopy(page.locator('main'), 'Scenario Lab entry with saved cards')
+  // Historical Replay with a validation error.
+  await page.goto('/scenario-lab/replay?new=1')
+  await page.getByRole('button', { name: 'Add markets…' }).first().click()
+  const rd = page.getByRole('dialog', { name: 'Add markets' })
+  await rd.getByLabel('Search markets').fill('Fed cuts')
+  await rd.getByRole('group', { name: /Fed cuts rates/ }).first().getByRole('button', { name: /NO$/ }).click()
+  await expectCleanCopy(rd, 'replay picker')
+  await rd.getByRole('button', { name: /^Add 1 position/ }).click()
+  await page.getByRole('group', { name: /^Position 1/ }).getByLabel('Entry date').fill('2026-03-01')
+  await expect(page.getByRole('group', { name: /^Position 1/ }).getByRole('alert')).toBeVisible()
+  await expectCleanCopy(page.locator('main'), 'replay with errors')
+  // Notifications.
+  await page.getByRole('button', { name: /Notifications/ }).click()
+  await expectCleanCopy(page.getByRole('menu').first(), 'notifications')
+})
+
+test('copy: the same pages read cleanly for another portfolio with one account in pUSD', async ({ page }) => {
+  await devFresh(page, '/overview')
+  await selectWorkspace(page, /Development fixture B/)
+  for (const path of ['/overview', '/analytics', '/risk', '/scenario-lab', '/portfolio/accounts', '/portfolio/coverage']) {
+    await page.getByRole('navigation').first().waitFor()
+    await page.goto(path)
+    await page.locator('main h1').first().waitFor()
+    await expectCleanCopy(page.locator('main'), `fixture B ${path}`)
+  }
+  // Nothing in this portfolio is held in USDC, so only its own asset's rate is listed.
+  const settings = await setCurrency(page, 'GBP')
+  await settings.getByText('Rates in use').click()
+  await expect(settings.getByLabel('Exchange rates in use')).toContainText('pUSD to USD')
+  await expect(settings.getByLabel('Exchange rates in use')).not.toContainText('USDC')
+  await expect(settings.getByLabel('Exchange rates in use')).toContainText('USD to GBP')
+})
+
+test('exchange rates: stale, missing and other providers are presented from the active rate service', async ({ page }) => {
+  // Stale fiat rate: one specific warning, and the note next to figures says so.
+  await devFresh(page, '/overview', 'stale')
+  let s = await setCurrency(page, 'EUR')
+  await expect(s.getByRole('status').filter({ hasText: 'rate is out of date' })).toHaveText('The USD to EUR rate is out of date (last observed Oct 1, 2026).')
+  await expectCleanCopy(s, 'settings with a stale rate')
+  await page.getByRole('button', { name: 'Done' }).click()
+  await expect(page.getByLabel('Valuation basis')).toContainText('out of date')
+  // Missing rates: a missing USD to EUR leg falls back to USD; a missing pUSD leg can't be converted at all.
+  await devFresh(page, '/overview', 'missing')
+  await selectWorkspace(page, /Development fixture B/)
+  s = await setCurrency(page, 'EUR')
+  const warnings = s.locator('.set-warn li')
+  await expect(warnings).toHaveText(['No pUSD to USD rate is available, so totals that include pUSD can’t be converted.', 'No USD to EUR rate is available, so values are shown in USD.'])
+  await expectCleanCopy(s, 'settings with missing rates')
+  // Other providers: names come from the references, not from a fixed list.
+  await devFresh(page, '/overview', 'alt')
+  s = await setCurrency(page, 'GBP')
+  await s.getByText('Rates in use').click()
+  const legs = s.getByLabel('Exchange rates in use')
+  await expect(legs).toContainText('USDC to USD1.0000, Example Stablecoin Index')
+  await expect(legs).toContainText('USD to GBP0.7900, Example Fiat Reference')
+  await expect(legs).not.toContainText(/Kraken|ECB|CoinGecko/)
 })

@@ -116,7 +116,7 @@ export function PositionRow({ a, start, after, sim, error, mode, selected, onSel
             : pending ? <span className="t3">{tq.parsed.state === 'partial' ? tq.parsed.message : px.parsed.state === 'partial' ? px.parsed.message : ''}: not included yet.</span>
               : !complete ? <span className="t3">Enter a target{a.price == null ? ' and an assumed price' : ''} to include this position.</span>
                 : traded && feeStatus === 'unavailable' ? <span className="stale">No fee parameters for this market: this trade’s cash and P&amp;L are before fees.</span>
-                  : shortfall ? <span role="status" className="stale">{PLATFORM_NAME[d.platform]} purchases exceed this scenario’s cash there; included as if funded.</span>
+                  : shortfall ? <span role="status" className="stale">Purchases on {PLATFORM_NAME[d.platform]} exceed this scenario’s cash there. They’re included as if funded.</span>
                     : <span className="stale">No reference price: this position’s value at mark is unavailable.</span>}
         </div>
       )}
@@ -199,7 +199,7 @@ export function BuildSummary({ E, onAnalyze, onCover }: { E: Evaluation; onAnaly
         <Line l={<>Est. fees{A.feesUnavailable ? <span className="stale"> + {A.feesUnavailable} unavailable</span> : null}</>} v={A.fees ? `−${fmt(A.fees, 2)}` : '$0'} />
         <Line l={<b>Cash after trades</b>} v={<b>{fmt(A.cash, 2)}</b>} tone={A.cash < -0.005 ? 'loss' : undefined} />
         {plats.length > 1 && plats.map((p) => <Line key={p} sub l={PLATFORM_NAME[p]} v={fmt(S.cash[p], 2)} tone={S.cash[p] < -0.005 ? 'loss' : undefined} />)}
-        {A.shortfall > 0 && <div className="bs-warn" role="status"><Icon name="alert" size={14} /><span><b>Funding shortfall.</b> Needs {fmt(A.shortfall, 2)} more on {plats.filter((p) => S.shortfall[p] > 0).map((p) => PLATFORM_NAME[p]).join(' and ')}. Shown as if funded; cash isn’t moved between venues and nothing is borrowed.
+        {A.shortfall > 0 && <div className="bs-warn" role="status"><Icon name="alert" size={14} /><span><b>Funding shortfall.</b> Needs {fmt(A.shortfall, 2)} more on {plats.filter((p) => S.shortfall[p] > 0).map((p) => PLATFORM_NAME[p]).join(' and ')}. Results are shown as if funded. Cash isn’t moved between platforms and nothing is borrowed.
           {onCover && <span className="row" style={{ flexWrap: 'wrap', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }}>{plats.filter((p) => S.shortfall[p] > 0).map((p) => <Button key={p} size="sm" onClick={() => onCover(p, Math.ceil(S.shortfall[p]))}>Add {fmt(Math.ceil(S.shortfall[p]))} virtual capital on {PLATFORM_NAME[p]}</Button>)}</span>}</span></div>}
         <div className="bs-sep" />
         <Line l={<>Value at reference marks <InfoTip text="Cash + positions × reference price. A trade at your assumed price changes it only by the gap to the mark and fees." /></>} v={A.totalValue == null ? 'Unavailable' : fmt(A.totalValue)} />

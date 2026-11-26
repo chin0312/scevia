@@ -6,7 +6,10 @@ import { PERIODS, type Period, type PlatformFilter } from '../lib/finance'
 import { DEFAULT_SETTINGS, GUARDRAIL_RANGE, SECTION_FIELDS, resetSection, useSettings, type SettingsTab } from '../lib/settings'
 import { Modal, useToast } from './overlays'
 import { Button, Seg, Tabs, cx } from './ui'
-import { CURRENCIES, SOURCE_LABEL, assetLabel, fixtureFx, type ReportingCurrency } from '../lib/fx'
+import { CURRENCIES, assetLabel, rateWarning, sourceName, type ReportingCurrency } from '../lib/fx'
+import { useReporting } from '../lib/reporting'
+import { useActiveWorkspace } from '../lib/workspaceContext'
+import { phrase } from '../lib/text'
 import { fmtDate } from '../lib/finance'
 
 const SCOPE: Record<string, PlatformFilter> = { All: 'all', Polymarket: 'pm', Kalshi: 'ks' }
@@ -23,23 +26,25 @@ function Toggle({ label, on, set }: { label: string; on: boolean; set: (v: boole
   return <button type="button" role="switch" aria-checked={on} aria-label={label} className={cx('switch', on && 'on')} onClick={() => set(!on)}><span /></button>
 }
 
-/** The rates used to show values in the reporting currency. Each conversion has one supported source today, so there
- *  is nothing meaningful to choose: rates are selected automatically and listed here on request. A stale or missing
- *  rate that affects displayed values is shown without opening the list. */
+/** The rates used to show values in the reporting currency, read from the same exchange-rate service as every
+ *  figure. Rates are selected automatically and listed on request. Each rate that can't be used as is gets its own
+ *  short warning, shown without opening the list. Legs follow the assets the selected portfolio actually holds. */
 function RatesInUse({ currency }: { currency: ReportingCurrency }) {
-  const fx = fixtureFx()
-  const legs = [['USDC', 'USD'], ['PUSD', 'USD'], ...(currency === 'USD' ? [] : [['USD', currency]])].map(([b, q]) => fx.reference(b, q))
-  const problem = legs.find((r) => r.rate == null || r.freshness === 'stale')
-  const name = (src: string) => src.split(' + ').map((x) => SOURCE_LABEL[x as keyof typeof SOURCE_LABEL] ?? x).join(' and ')
-  const date = (iso: string | null) => (iso ? fmtDate(iso.slice(0, 10), { month: 'short', day: 'numeric', year: 'numeric' }) : '')
+  const { fx } = useReporting()
+  const accounts = useActiveWorkspace().snapshot.data?.accounts ?? []
+  const assets = [...new Set(accounts.map((a) => a.denomination))].filter((a) => a !== 'USD').sort()
+  const legs = [...assets.map((a) => fx.reference(a, 'USD')), ...(currency === 'USD' ? [] : [fx.reference('USD', currency)])]
+  const date = (iso: string) => fmtDate(iso.slice(0, 10), { month: 'short', day: 'numeric', year: 'numeric' })
+  const warnings = legs.map((r) => rateWarning(r, date)).filter((w): w is string => !!w)
+  if (legs.length === 0) return <small className="t3">No conversion is needed for this portfolio.</small>
   return (<>
-    {problem && <small className="stale" role="status">{problem.rate == null ? `No ${assetLabel(problem.base)} to ${problem.quote} rate. Affected values are shown in USD.` : `The ${assetLabel(problem.base)} to ${problem.quote} rate is out of date.`}</small>}
+    {warnings.length > 0 && <ul className="set-warn" role="status">{warnings.map((w) => <li key={w} className="stale">{w}</li>)}</ul>}
     <details className="adv set-adv">
       <summary>Rates in use</summary>
       <ul className="fx-legs" aria-label="Exchange rates in use">
-        {legs.map((r) => <li key={`${r.base}${r.quote}`}><span>{assetLabel(r.base)} to {r.quote}</span><span>{r.rate == null ? 'Unavailable' : r.rate.toFixed(4)}, {name(r.source)}{r.fallback ? ' (fallback)' : ''}{r.observedAt ? `, ${date(r.observedAt)}` : ''}</span></li>)}
+        {legs.map((r) => <li key={`${r.base}${r.quote}`}><span>{assetLabel(r.base)} to {assetLabel(r.quote)}</span><span>{phrase(r.rate == null ? 'Unavailable' : r.rate.toFixed(4), sourceName(r), r.fallback && 'fallback source', r.observedAt && date(r.observedAt))}</span></li>)}
       </ul>
-      <small className="t3">Sample rates for development. They are fixed and not live.</small>
+      {!fx.live && <small className="t3">{fx.label}. They are fixed, not live.</small>}
     </details>
   </>)
 }
@@ -58,7 +63,7 @@ export function SettingsModal({ tab: initial, onClose }: { tab: SettingsTab; onC
       <Tabs label="Settings sections" options={Object.keys(SECTION_FIELDS) as SettingsTab[]} value={tab} onChange={setTab} />
       <div className="set-body">
         {tab === 'General' && <>
-          <Row label="Reporting currency" help="Choose the currency used to display your portfolio values.">
+          <Row label="Reporting currency" help="Currency for portfolio values.">
             <span className="set-col">
               <select className="select" aria-label="Reporting currency" value={s.reportingCurrency} onChange={(e) => update({ reportingCurrency: e.target.value as ReportingCurrency })}>
                 {CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.name} ({c.code})</option>)}
@@ -66,7 +71,7 @@ export function SettingsModal({ tab: initial, onClose }: { tab: SettingsTab; onC
               <small className="t3">Exchange rates are selected automatically.</small>
               <RatesInUse currency={s.reportingCurrency} />
             </span></Row>
-          <Row label="Default platform" help="The platform filter Overview opens with.">
+          <Row label="Default platform" help="Used when Overview opens.">
             <Seg label="Default platform scope" options={['All', 'Polymarket', 'Kalshi'] as const} value={(key(SCOPE, s.defaultScope) ?? 'All') as 'All'} onChange={(v) => update({ defaultScope: SCOPE[v] })} /></Row>
           <Row label="Automatic refresh" help="How often to check for new data while Scevia is open.">
             <Seg label="Automatic refresh" options={Object.keys(REFRESH) as (keyof typeof REFRESH)[]} value={(key(REFRESH, s.autoRefresh) ?? '15 min') as keyof typeof REFRESH} onChange={(v) => update({ autoRefresh: REFRESH[v] })} /></Row>
@@ -74,14 +79,14 @@ export function SettingsModal({ tab: initial, onClose }: { tab: SettingsTab; onC
             <Seg label="Market prices" options={['$0.64', '64%'] as const} value={s.priceDisplay === 'implied' ? '64%' : '$0.64'} onChange={(v) => update({ priceDisplay: v === '64%' ? 'implied' : 'price' })} /></Row>
         </>}
         {tab === 'Analytics' && <>
-          <Row label="Default period" help="The period Overview and Analytics open with.">
+          <Row label="Default period" help="Used when Overview and Analytics open.">
             <Seg label="Default period" options={PERIODS} value={s.defaultPeriod} onChange={(v: Period) => update({ defaultPeriod: v })} /></Row>
-          <Row label="Default grouping" help="How allocation and attribution are grouped at first.">
+          <Row label="Default grouping" help="Used for allocation and attribution.">
             <Seg label="Default grouping" options={['Category', 'Platform'] as const} value={s.defaultGrouping === 'platform' ? 'Platform' : 'Category'} onChange={(v) => update({ defaultGrouping: v === 'Platform' ? 'platform' : 'category' })} /></Row>
         </>}
         {tab === 'Risk' && <>
           <Row label="Concentration limit" help="Flag any event above this share of your capital committed.">
-            <span className="row"><input className="slider" type="range" aria-label="Single-event guardrail" min={GUARDRAIL_RANGE[0]} max={GUARDRAIL_RANGE[1]} step={1} value={s.guardrail} onChange={(e) => update({ guardrail: Number(e.target.value) })} /><b className="tnum">{s.guardrail}%</b></span></Row>
+            <span className="row"><input className="slider" type="range" aria-label="Concentration limit" min={GUARDRAIL_RANGE[0]} max={GUARDRAIL_RANGE[1]} step={1} value={s.guardrail} onChange={(e) => update({ guardrail: Number(e.target.value) })} /><b className="tnum">{s.guardrail}%</b></span></Row>
         </>}
         {tab === 'Scenario Lab' && <>
           <Row label="Size positions by" help="The unit Scenario Lab shows first. Saved scenarios keep theirs.">

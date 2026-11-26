@@ -14,6 +14,7 @@ import { Drawer, focusTopLayer } from './overlays'
 import { useConnect } from './ConnectSources'
 import { Button, Callout, Chip, PlatformBadge, Seg, SideChip, cx } from './ui'
 import { useFinance } from '../lib/financeContext'
+import { count } from '../lib/text'
 
 export type Detail =
   /** `scope` is the platform scope of the view the panel was opened from; figures start in that scope. */
@@ -59,7 +60,7 @@ function DetailDrawer({ d, depth, onBack, onClose, open }: { d: Detail; depth: n
   )
 }
 
-const positionSub = (p?: Position) => (p ? `${PLATFORM_NAME[p.platform]}, ${p.category}. Resolves ${fmtDate(p.resolves, { month: 'short', day: 'numeric', year: 'numeric' })}, in ${p.days} days` : '')
+const positionSub = (p?: Position) => (p ? `${PLATFORM_NAME[p.platform]}, ${p.category}. Resolves ${fmtDate(p.resolves, { month: 'short', day: 'numeric', year: 'numeric' })}, in ${count(p.days, 'day')}` : '')
 
 /** Explicit hand-off to Scenario Lab. The Lab asks which scenario to use before changing anything. */
 function useSimulate(close: () => void) {
@@ -101,7 +102,7 @@ function PositionBody({ p, scope, open, close }: { p?: Position; scope: Platform
       </tbody>
     </table>
     <Callout>Average cost = Σ(shares × price) ÷ shares. Fees aren’t in the average cost; {p.fees ? `the ${fmt(p.fees, 2)} paid on these fills is subtracted once in net P&L.` : 'no fees were charged on these fills.'} The mark is the last traded price on {PLATFORM_NAME[p.platform]}.</Callout>
-    {sameEvent && sameEvent.positions.length > 1 && <Callout icon="link">This contract is one of {sameEvent.positions.length} positions on <b>{sameEvent.event.name}</b>.</Callout>}
+    {sameEvent && sameEvent.positions.length > 1 && <Callout icon="link">This contract is one of {count(sameEvent.positions.length, 'position')} on <b>{sameEvent.event.name}</b>.</Callout>}
     <div className="drawer-actions">
       <Button icon="shield" onClick={() => open({ kind: 'event', id: p.eventId, scope })}>View event exposure</Button>
       <Button variant="primary" icon="flask" onClick={() => sim.go([p.id], `${p.market} on ${PLATFORM_NAME[p.platform]}`)}>{sim.label}</Button>
@@ -130,8 +131,8 @@ function EventBody({ id, scope, open, close }: { id: string; scope: PlatformFilt
   const committed = scoped.reduce((a, x) => a + x.cost, 0)
   const related = eventRelations(id, rels)
   return (<>
-    <div className="row" style={{ flexWrap: 'wrap' }}><Chip>Resolves {fmtDate(full.resolves, { month: 'short', day: 'numeric', year: 'numeric' })} , in {full.days} days</Chip>
-      {full.positions.length > 1 && <Chip tone="accent">{full.positions.length} contracts, one event</Chip>}
+    <div className="row" style={{ flexWrap: 'wrap' }}><Chip>Resolves {fmtDate(full.resolves, { month: 'short', day: 'numeric', year: 'numeric' })}, in {count(full.days, 'day')}</Chip>
+      {full.positions.length > 1 && <Chip tone="accent">{count(full.positions.length, 'contract')}, one event</Chip>}
       <span className="spacer" />
       {canWiden && <Seg label="Scope" options={[SCOPE_LABEL[scope], SCOPE_LABEL.all]} value={SCOPE_LABEL[view]} onChange={(v) => setView(v === SCOPE_LABEL.all ? 'all' : scope)} />}
     </div>
@@ -145,7 +146,7 @@ function EventBody({ id, scope, open, close }: { id: string; scope: PlatformFilt
       <div className="list-row" key={r.other.id}><span>{r.other.name}{r.note && <small className="t3"> ({r.note})</small>}</span><span className="r row"><Chip tone={REL_TEXT[r.cls].tone}>{REL_TEXT[r.cls].label}</Chip><small className="t3">{PROVENANCE_TEXT[r.provenance]}</small></span></div>
     ))}
     <h5 className="caps">Data <button type="button" className="link" style={{ textTransform: 'none', letterSpacing: 0, marginLeft: 'var(--space-2)' }} onClick={() => { close(); connect('coverage') }}>Data coverage →</button></h5>
-    {(e?.platforms ?? []).map((pl) => { const src = sourceOf(pl), c = coverage(pl); return <div className="cov" key={pl}><PlatformBadge p={pl} /><span>{c.fills} fills, {c.settlements} settlements</span><span className={src.stale ? 'stale' : 't3'}>as of {fmtDate(src.asOf)}{src.stale ? ' (out of date)' : ''}</span></div> })}
+    {(e?.platforms ?? []).map((pl) => { const src = sourceOf(pl), c = coverage(pl); return <div className="cov" key={pl}><PlatformBadge p={pl} /><span>{count(c.fills, 'fill')}, {count(c.settlements, 'settlement')}</span><span className={src.stale ? 'stale' : 't3'}>as of {fmtDate(src.asOf)}{src.stale ? ' (out of date)' : ''}</span></div> })}
     <div className="drawer-actions">
       {!pathname.startsWith('/risk') && <Button icon="shield" onClick={() => { close(); nav(`/risk?event=${id}#payoffs`) }}>Analyze in Risk</Button>}
       {e && <Button variant="primary" icon="flask" title={`Choose a scenario for these ${e.positions.length} position${e.positions.length > 1 ? 's' : ''}`}

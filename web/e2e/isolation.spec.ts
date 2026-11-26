@@ -161,7 +161,7 @@ test('reporting currency: a global setting that converts portfolio money but not
   await expect(dlg).toContainText('Exchange rates are selected automatically.')
   await dlg.getByText('Rates in use').click()
   await expect(dlg.getByLabel('Exchange rates in use')).toContainText('USD to EUR0.9200, ECB')
-  await expect(dlg).toContainText('They are fixed and not live.')
+  await expect(dlg).toContainText('Sample rates. They are fixed, not live.')
   await page.getByRole('button', { name: 'Done' }).click()
   await expect(page.locator('.hero-fig')).toContainText('€')
   // Native amounts keep their own units; only the portfolio total is converted.
@@ -225,7 +225,7 @@ test('legacy migration: an old current-portfolio scenario keeps its configuratio
   expect(await page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v4'))).toBeNull()
 })
 
-test('reference sources: automatic by default; a preferred source applies only where it can, else a marked fallback', async ({ page }) => {
+test('reference sources: automatic, listed for the assets this portfolio holds, with readable provider names', async ({ page }) => {
   await start(page, '/overview')
   await page.getByRole('button', { name: 'Settings' }).click()
   const dlg = page.getByRole('dialog', { name: 'Settings' })
@@ -235,7 +235,7 @@ test('reference sources: automatic by default; a preferred source applies only w
   await dlg.getByText('Rates in use').click()
   const legs = dlg.getByLabel('Exchange rates in use')
   await expect(legs).toContainText('USDC to USD1.0000, Kraken')
-  await expect(legs).toContainText('pUSD to USD1.0000, CoinGecko')
+  await expect(legs).not.toContainText('pUSD') // the Sample portfolio holds no pUSD
   await expect(legs).not.toContainText('fallback')
-  await expect(dlg).toContainText('Sample rates for development')
+  await expect(dlg).toContainText('Sample rates. They are fixed, not live.')
 })

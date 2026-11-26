@@ -13,7 +13,7 @@ const MOD = isMac ? '⌘' : 'Ctrl'
 const GUIDES: { title: string; body: string; to: string; cta: string }[] = [
   { title: 'Overview', body: 'Portfolio value, P&L, allocation and what resolves next. Select a row or segment to inspect it in place.', to: '/overview', cta: 'Open Overview' },
   { title: 'Analytics', body: 'Where results came from over a period: realized vs. unrealized, attribution, entry prices and patterns. Every figure keeps its period and platform scope.', to: '/analytics', cta: 'Open Analytics' },
-  { title: 'Risk', body: 'Exposure by event (the same outcome on two venues counts once), concentration against your guardrail, settlement outcomes and the resolution calendar.', to: '/risk', cta: 'Open Risk' },
+  { title: 'Risk', body: 'Exposure by event (the same outcome on two venues counts once), concentration against your limit, settlement outcomes and the resolution calendar.', to: '/risk', cta: 'Open Risk' },
   { title: 'Scenario Lab', body: 'Build a hypothetical portfolio from your holdings or from scratch in current markets, analyze it, and compare scenarios. Nothing is traded and your actual holdings never change.', to: '/scenario-lab', cta: 'Open Scenario Lab' },
   { title: 'Historical replay', body: 'Inside Scenario Lab: a hypothetical portfolio over a past period, with markets that traded then and prices you assume. It’s hindsight analysis, not your performance or a strategy test.', to: '/scenario-lab/replay', cta: 'Open historical replay' },
   { title: 'Portfolios & data status', body: 'Switch between the Sample portfolio (fictional), the Demo portfolio (real markets, virtual capital) and your own. The status pill beside it shows how current each data stream is.', to: '/portfolio/coverage', cta: 'Open data coverage' },

@@ -302,7 +302,9 @@ Order of work, following the roadmap (Issue #2), each step verified against real
 10. **Unified Product Integration & Internal QA (Phase 10).** Bind the four modules, Scenario Lab and Historical Replay to validated backend read models; merge PR #1.
    - Reporting preference alignment: the backend `reportingCurrency` enum accepts USD, SGD, EUR, GBP and MYR; the frontend offers USD, EUR and GBP. At integration, either narrow the backend's accepted values for new writes or keep them and map an unsupported stored value to USD in the UI (as `readSettings` does). The backend schema isn't changed in PR #1.
    - Exchange-rate sources: keep automatic selection; expose a per-leg source choice only when the backend reports more than one eligible source for that leg.
-   - Bind *Rates in use* to the backend's FX references (provider, observation time, freshness) instead of `fixtureFx`.
+   - Bind *Rates in use* to the backend's FX references (provider, observation time, freshness) instead of `fixtureFx`. The frontend shows `FxReference.sourceName` as given, so new providers (e.g. from Phase 9 source evaluation) need no UI change.
+   - Partial valuation status: fixture amounts are already in a USD basis, so with a missing pUSD or USDC reference the frontend can warn (Settings, ReportingNote) but can't mark the portfolio total partial. The backend read model must flag totals that depend on a missing reference, and the UI must show them as partial or unavailable.
+   - Development checks for this: `scevia-dev-fx` = `stale` | `missing` | `alt` (with the development workspaces) swaps in rate variants (`devFx()` in `data/devWorkspaces.ts`), and `node scripts/scan-copy.mjs <baseURL>` scans rendered copy across pages, dialogs and states for punctuation and spacing defects.
 11. **Secure Release & Free Public Beta (Phase 11).**
    - Secure cloud workspace, export and deletion, then external testing.
    - Production identity, authorization and isolation must exist before any private cloud portfolio is exposed to real users.

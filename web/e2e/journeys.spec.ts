@@ -109,7 +109,7 @@ test('2b · a purchase beyond available cash is explored as a funded hypothetica
   expect((to - hot.shares) * hot.mark).toBeGreaterThan(account('ks').cash)
   await target(page, hot.market).fill(String(to))
   await expect(page.locator('#build-summary')).toContainText(/Needs \$[\d,.]+ more on Kalshi/)
-  await expect(page.getByText('Kalshi purchases exceed this scenario’s cash there; included as if funded.').first()).toBeVisible()
+  await expect(page.getByText('Purchases on Kalshi exceed this scenario’s cash there. They’re included as if funded.').first()).toBeVisible()
   await expect(page.getByRole('alert')).toHaveCount(0) // not an input error
   await expect(summary(page, 'Value at reference marks')).toContainText('$') // the trade is in the results
   await expect(page.getByRole('button', { name: 'Save scenario' })).toBeEnabled()
@@ -211,11 +211,11 @@ test('Risk: table filters never change portfolio-level metrics', async ({ page }
   await page.getByRole('tab', { name: 'Next 30 days' }).click()
   await expect(tile).toHaveText(portfolioWorst)
   await expect(page.locator('#payoffs .po-row.t')).toContainText('Subtotal for')
-  // make "Over guardrail" empty: raise the guardrail above every event
-  await page.getByRole('button', { name: /Edit \d+% guardrail/ }).click()
-  await page.getByLabel('Guardrail percent').fill('40')
-  await page.getByRole('button', { name: 'Save guardrail' }).click()
-  await page.getByRole('tab', { name: 'Over guardrail' }).click()
+  // make "Above limit" empty: raise the limit above every event
+  await page.getByRole('button', { name: /Edit \d+% limit/ }).click()
+  await page.getByLabel('Limit percent').fill('40')
+  await page.getByRole('button', { name: 'Save limit' }).click()
+  await page.getByRole('tab', { name: 'Above limit' }).click()
   await expect(page.locator('#payoffs')).toContainText('This filter only changes the table')
   await expect(page.locator('#payoffs')).toContainText(portfolioWorst)
   await expect(tile).toHaveText(portfolioWorst)
@@ -223,9 +223,9 @@ test('Risk: table filters never change portfolio-level metrics', async ({ page }
 
 test('modal keeps focus inside and returns it to the trigger', async ({ page }) => {
   await fresh(page, '/risk')
-  const trigger = page.getByRole('button', { name: 'Edit 15% guardrail' })
+  const trigger = page.getByRole('button', { name: 'Edit 15% limit' })
   await trigger.click()
-  await expect(page.getByLabel('Guardrail percent')).toBeFocused()
+  await expect(page.getByLabel('Limit percent')).toBeFocused()
   for (let i = 0; i < 6; i++) await page.keyboard.press('Tab')
   expect(await page.evaluate(() => !!document.activeElement?.closest('[role="dialog"]'))).toBe(true)
   await page.keyboard.press('Escape')
@@ -459,7 +459,7 @@ test('stored state: invalid data falls back safely; clearing removes only Scevia
     sessionStorage.setItem('other-app', 'keep me')
   })
   await page.reload()
-  await expect(page.getByRole('heading', { level: 1 })).toHaveText('What do you want to explore?') // unknown active → entry page
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Scenario Lab') // unknown active → entry page
   await expect(page.locator('#saved')).toContainText('Restored') // older scenario migrated, not discarded
   await page.getByRole('option', { name: /Restored/ }).click()
   // Its original starting portfolio was never recorded: a new one is set explicitly, and marked as new.
@@ -490,7 +490,7 @@ test('duplicate then reset returns to the duplicated adjustments, not an empty s
 
 test('Scenario Lab entry: neutral, two clear starting paths, no empty charts, nothing created until chosen', async ({ page }) => {
   await fresh(page, '/scenario-lab')
-  await expect(page.getByRole('heading', { level: 1 })).toHaveText('What do you want to explore?')
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Scenario Lab')
   await expect(page.getByRole('listbox', { name: 'Scenarios' }).getByRole('option')).toHaveCount(1)
   await expect(page.locator('#saved')).toContainText('No scenarios yet')
   await expect(page.locator('main svg[role="img"], main .stack-bars, #a-summary')).toHaveCount(0)
@@ -976,7 +976,7 @@ test('settings: workspace preferences take effect; a section reset keeps the oth
   await dlg.getByRole('tab', { name: 'Notifications' }).click()
   await dlg.getByRole('radiogroup', { name: 'Resolution alerts' }).getByRole('radio', { name: 'Off' }).click()
   await dlg.getByRole('tab', { name: 'Risk' }).click()
-  await dlg.getByLabel('Single-event guardrail').fill('30')
+  await dlg.getByLabel('Concentration limit').fill('30')
   await dlg.getByRole('tab', { name: 'Notifications' }).click()
   await dlg.getByRole('button', { name: 'Restore Notifications defaults' }).click()
   await expect(dlg.getByRole('radiogroup', { name: 'Resolution alerts' }).getByRole('radio', { name: '30 days' })).toHaveAttribute('aria-checked', 'true')
@@ -988,13 +988,13 @@ test('settings: workspace preferences take effect; a section reset keeps the oth
   await expect(page.getByRole('menu', { name: 'Notifications' })).not.toContainText('scheduled to resolve')
   await page.keyboard.press('Escape')
   await page.goto('/risk')
-  await expect(page.locator('main')).toContainText('30% guardrail') // and kept Risk
+  await expect(page.locator('main')).toContainText('30% limit') // and kept Risk
   await page.getByRole('button', { name: 'Settings' }).click()
   await dlg.getByRole('button', { name: 'Reset all…' }).click()
   await expect(dlg).toContainText('Your scenarios and records stay as they are.')
   await dlg.getByRole('button', { name: 'Reset all preferences' }).click()
   await dlg.getByRole('button', { name: 'Done' }).click()
-  await expect(page.locator('main')).toContainText('15% guardrail')
+  await expect(page.locator('main')).toContainText('15% limit')
 })
 
 test('notifications: stable identities, individual and aggregate read state that survives a reload, filters, empty state', async ({ page }) => {

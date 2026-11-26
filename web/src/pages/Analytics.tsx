@@ -12,6 +12,7 @@ import { fmt, kfmt, pct, sfmt } from '../lib/format'
 import type { ClosedTrade } from '../data/types'
 import { useFinance } from '../lib/financeContext'
 import { ReportingNote, WorkspaceLabel } from '../components/Workspace'
+import { count } from '../lib/text'
 
 const RAIL: RailSection[] = [
   { id: 'summary', label: 'Summary', icon: 'home', children: [{ id: 'highlights', label: 'Highlights' }] },
@@ -114,7 +115,7 @@ export default function Analytics() {
     ['Realized P&L (closed trades)', (s) => sfmt(s.realized), (a, b) => ({ text: sfmt(a.realized - b.realized), good: a.realized >= b.realized })],
     ['Fees paid', (s) => fmt(s.fees, 2), (a, b) => ({ text: sfmt(a.fees - b.fees, 2), good: a.fees <= b.fees })],
     ['Closed trades', (s) => String(s.trades.length), null],
-    ['Win rate (resolved)', (s) => (s.winRate == null ? 'No data' : `${pct(s.winRate * 100, 0)} of ${s.resolved}`), (a, b) => (a.winRate == null || b.winRate == null ? null : { text: `${((a.winRate - b.winRate) * 100).toFixed(0)} pts`, good: a.winRate >= b.winRate })],
+    ['Win rate (resolved)', (s) => (s.winRate == null ? 'No data' : `${pct(s.winRate * 100, 0)} (${count(s.resolved, 'resolved trade')})`), (a, b) => (a.winRate == null || b.winRate == null ? null : { text: `${((a.winRate - b.winRate) * 100).toFixed(0)} pts`, good: a.winRate >= b.winRate })],
     ['Average win / loss', (s) => `${fmtOpt(s.avgWin, (v) => fmt(v))} / ${fmtOpt(s.avgLoss, (v) => fmt(v))}`, null],
     ['Profit factor', (s) => fmtOpt(s.profitFactor, (v) => v.toFixed(2)), null],
     ['Largest drawdown (weekly)', (s) => (s.drawdown ? sfmt(-s.drawdown.amount) : 'none'), (a, b) => ({ text: sfmt((b.drawdown?.amount ?? 0) - (a.drawdown?.amount ?? 0)), good: (a.drawdown?.amount ?? 0) <= (b.drawdown?.amount ?? 0) })],
@@ -140,7 +141,7 @@ export default function Analytics() {
         <div className="period-row"><PeriodControl value={period} onChange={setPeriod} />
           <div className="asof"><span>History from <b>{fmtDate(HISTORY_START, { month: 'short', day: 'numeric', year: 'numeric' })}</b>, prices as of {fmtDate(TODAY)}</span><ReportingNote denominations={ACCOUNTS.map((a) => a.denomination)} /></div></div>
         <p className="summary">
-          Over this period you made <b className={stats.netPnl >= 0 ? 'gain' : 'loss'}>{sfmt(stats.netPnl, 2)}</b> net{compare && prior ? <>, <b>{sfmt(stats.netPnl - prior.netPnl)}</b> vs. the prior period</> : ''}: <b>{sfmt(stats.realized)}</b> realized on {stats.trades.length} trades closed in the period, and <b>{sfmt(stats.unrealizedChange)}</b> change in unrealized P&amp;L{stats.openFillFees ? <> (after <b>{fmt(stats.openFillFees, 2)}</b> fees on new purchases)</> : ''}.
+          Over this period you made <b className={stats.netPnl >= 0 ? 'gain' : 'loss'}>{sfmt(stats.netPnl, 2)}</b> net{compare && prior ? <>, <b>{sfmt(stats.netPnl - prior.netPnl)}</b> vs. the prior period</> : ''}: <b>{sfmt(stats.realized)}</b> realized on {count(stats.trades.length, 'trade')} closed in the period, and <b>{sfmt(stats.unrealizedChange)}</b> change in unrealized P&amp;L{stats.openFillFees ? <> (after <b>{fmt(stats.openFillFees, 2)}</b> fees on new purchases)</> : ''}.
           {top && top.net > 0 && <> <a href="#attribution">{top.label}</a> made {gains > 0 ? pct((top.net / gains) * 100, 0) : '—'} of realized gains.</>}
           {worst && worst.net < 0 && <> The weakest group was <a href="#attribution">{worst.label}</a> ({sfmt(worst.net)}).</>}
           {worstMonth && worstMonth.realized < 0 && <> Worst month: {monthLabel(worstMonth.month)} ({sfmt(worstMonth.realized)}).</>}
@@ -151,11 +152,11 @@ export default function Analytics() {
           <div className="card-b hl">
             <div className="hl-group"><h5 className="caps">Return</h5>
               <div className={cx('hl-tile', stats.netPnl >= 0 ? 'good' : 'bad')}><div className="l">Net P&amp;L</div><div className={cx('v', stats.netPnl >= 0 ? 'gain' : 'loss')}>{sfmt(stats.netPnl)}</div><div className="f">{compare && prior ? `${stats.netPnl >= prior.netPnl ? '▲' : '▼'} ${sfmt(stats.netPnl - prior.netPnl)} vs prior` : 'after fees, deposits excluded'}</div></div>
-              <div className={cx('hl-tile', stats.realized >= 0 ? 'good' : 'bad')}><div className="l">Realized (closed trades)</div><div className={cx('v', stats.realized >= 0 ? 'gain' : 'loss')}>{sfmt(stats.realized)}</div><div className="f">{stats.trades.length} trades, {fmt(stats.fees)} fees</div></div>
+              <div className={cx('hl-tile', stats.realized >= 0 ? 'good' : 'bad')}><div className="l">Realized (closed trades)</div><div className={cx('v', stats.realized >= 0 ? 'gain' : 'loss')}>{sfmt(stats.realized)}</div><div className="f">{count(stats.trades.length, 'trade')}, {fmt(stats.fees)} fees</div></div>
             </div>
             <div className="hl-group"><h5 className="caps">Risk</h5>
               <div className={cx('hl-tile', stats.drawdown ? 'bad' : 'neutral')}><div className="l">Largest drawdown</div><div className={cx('v', stats.drawdown && 'loss')}>{stats.drawdown ? sfmt(-stats.drawdown.amount) : 'None'}</div><div className="f">{stats.drawdown ? `${fmtDate(stats.drawdown.from)} – ${fmtDate(stats.drawdown.to)}, ${stats.drawdown.recoveredOn ? `recovered ${fmtDate(stats.drawdown.recoveredOn)}` : 'not yet recovered'}` : 'No fall below an earlier peak'}</div></div>
-              <div className="hl-tile neutral"><div className="l">Win rate</div><div className="v">{stats.winRate == null ? 'No data' : pct(stats.winRate * 100, 0)}</div><div className="f">{stats.resolved} resolved trades{stats.resolved < 30 ? '. Limited sample size' : `, profit factor ${fmtOpt(stats.profitFactor, (v) => v.toFixed(2))}`}</div></div>
+              <div className="hl-tile neutral"><div className="l">Win rate</div><div className="v">{stats.winRate == null ? 'No data' : pct(stats.winRate * 100, 0)}</div><div className="f">{count(stats.resolved, 'resolved trade')}{stats.resolved < 30 ? '. Limited sample size' : `, profit factor ${fmtOpt(stats.profitFactor, (v) => v.toFixed(2))}`}</div></div>
             </div>
           </div>
         </Card>
@@ -177,7 +178,7 @@ export default function Analytics() {
             <div className="card-b">
               {attr.length === 0 && <div className="empty"><p>No trades closed in this period.</p></div>}
               {attr.map((a) => (
-                <button type="button" className="attr attr-btn hoverable" key={a.key} aria-label={`${a.label}: ${sfmt(a.net)} across ${a.n} trades. View trades`}
+                <button type="button" className="attr attr-btn hoverable" key={a.key} aria-label={`${a.label}: ${sfmt(a.net)} across ${count(a.n, 'trade')}. View trades`}
                   onClick={() => openTrades(`${a.label} closed trades`, stats.trades.filter((t) => (attrBy === 'Category' ? t.category : t.platform) === a.key))}>
                   <span>{a.label}</span>
                   <div className="ng">{a.net < 0 && <i style={{ width: `${(-a.net / attrMax) * 100}%` }} />}</div>
@@ -198,7 +199,7 @@ export default function Analytics() {
             {ins.longshots ? (<>
               <h4>Resolved contracts bought under $0.25: <span className={ins.longshots.net >= 0 ? 'gain' : 'loss'}>{sfmt(ins.longshots.net)}</span></h4>
               <p>You won {ins.longshots.wins} of {ins.longshots.n} ({pct((ins.longshots.wins / ins.longshots.n) * 100, 0)}). Their entry prices implied about {pct(ins.longshots.implied * 100, 0)}.{ins.longshots.worstCategory && ` The weakest category here was ${ins.longshots.worstCategory}.`}</p>
-              <div className="meta"><span>{ins.longshots.n} trades{ins.longshots.n < 30 ? ', limited sample size' : ''}</span><button type="button" className="link" onClick={() => openTrades('Longshot trades (entry < $0.25)', ins.longshots!.trades)}>See trades →</button></div>
+              <div className="meta"><span>{count(ins.longshots.n, 'trade')}{ins.longshots.n < 30 ? ', limited sample size' : ''}</span><button type="button" className="link" onClick={() => openTrades('Longshot trades (entry < $0.25)', ins.longshots!.trades)}>See trades →</button></div>
             </>) : <p className="unavailable">Fewer than 5 resolved longshot trades in this period, so there’s nothing reliable to say.</p>}
           </div>
           <div className="card insight"><Chip tone="info">Early exits</Chip>
@@ -212,7 +213,7 @@ export default function Analytics() {
             {ins.strongest ? (<>
               <h4>{ins.strongest.c} contributed the most: <span className="gain">{sfmt(ins.strongest.net)}</span></h4>
               <p>{ins.strongest.n} closed trades. {pct(ins.strongest.winRate * 100, 0)} of the {ins.strongest.resolved} that resolved went your way. The single best trade is {pct(Math.min(1, ins.strongest.topShare) * 100, 0)} of the category’s result{ins.strongest.topShare > 0.5 ? ', so one outcome drives most of it' : ''}.</p>
-              <div className="meta"><span>{ins.strongest.n} trades{ins.strongest.n < 30 ? ', limited sample size' : ''}</span><button type="button" className="link" onClick={() => openTrades(`${ins.strongest!.c} trades`, ins.strongest!.trades)}>Open category →</button></div>
+              <div className="meta"><span>{count(ins.strongest.n, 'trade')}{ins.strongest.n < 30 ? ', limited sample size' : ''}</span><button type="button" className="link" onClick={() => openTrades(`${ins.strongest!.c} trades`, ins.strongest!.trades)}>Open category →</button></div>
             </>) : <p className="unavailable">No category has 5+ closed trades with a positive result in this period.</p>}
           </div>
         </section>
@@ -234,7 +235,7 @@ export default function Analytics() {
               ))}
               <div style={{ marginTop: 'var(--space-3)' }}>
                 {hotBucket != null && buckets[hotBucket].n
-                  ? <Callout>In this bucket you won {pct((buckets[hotBucket].winRate ?? 0) * 100, 0)} of {buckets[hotBucket].n} resolved trades; the average entry price implied {pct((buckets[hotBucket].implied ?? 0) * 100, 0)}.</Callout>
+                  ? <Callout>In this bucket you won {pct((buckets[hotBucket].winRate ?? 0) * 100, 0)} of {count(buckets[hotBucket].n, 'resolved trade')}, while the average entry price implied {pct((buckets[hotBucket].implied ?? 0) * 100, 0)}.</Callout>
                   : <Callout tone="warn">Buckets with fewer than 30 trades can differ from the implied rate by chance. Treat gaps as something to watch, not a verdict.</Callout>}
               </div>
             </div>

@@ -20,6 +20,8 @@ import { feeLabel } from '../lib/fees'
 import { fmt, fmtNative, kfmt, pct, qty, sfmt } from '../lib/format'
 import { useReporting } from '../lib/reporting'
 import { assetLabel } from '../lib/fx'
+import { MarketDataLabel } from '../components/Workspace'
+import { count, joinList, sentences } from '../lib/text'
 import { BASIS_LABEL } from '../lib/history'
 import type { CatalogEvent, CatalogMarket, LinkResolution } from '../lib/markets'
 import {
@@ -101,9 +103,9 @@ export default function ReplayPage() {
     <div className="shell">
       <SectionRail title="Historical Replay" sections={[{ id: 'rp-start', label: 'Start', icon: 'clock' }]} />
       <main className="lab-main">
-        <section className="page-head anchor" id="rp-start"><div><div className="caps"><span className="accent">Historical Replay</span></div><h1>Replay a portfolio over a past period</h1></div></section>
+        <section className="page-head anchor" id="rp-start"><div><h1>Historical Replay</h1></div></section>
         <Card><div className="card-b" style={{ display: 'grid', gap: 'var(--space-3)' }}>
-          <p className="t2">Pick a past period, set starting capital and choose markets that traded then. Positions settle at their actual results. You don’t need an account or real money.</p>
+          <p className="t2">Choose a past period, set starting capital in virtual funds and add markets that traded then. Positions settle at each market’s recorded outcome. No connected account is needed.</p>
           <div className="row" style={{ gap: 'var(--space-2)' }}><Button variant="primary" icon="clock" onClick={create}>Start a historical replay</Button><Link className="link" to="/scenario-lab">Back to Scenario Lab</Link></div>
         </div></Card>
       </main>
@@ -152,7 +154,7 @@ export default function ReplayPage() {
         {view === 'Build' && <BuildReplay r={active} issues={issues!} result={result} onChange={update} onAdd={() => setAdding(true)} onAnalyze={() => { setView('Analyze'); window.scrollTo(0, 0) }} valid={valid} />}
         {view === 'Analyze' && (result ? <AnalyzeReplay res={result} onChange={update} currency={currency} latest={capture()} /> : <Callout tone="warn" icon="alert">This replay can’t be analyzed yet: {active.positions.length === 0 ? 'add at least one position.' : `${issueCount} input${issueCount === 1 ? '' : 's'} in Build need${issueCount === 1 ? 's' : ''} attention.`} <button type="button" className="link" onClick={() => setView('Build')}>Go to Build</button></Callout>)}
         {view === 'Compare' && <CompareReplays replays={replays} today={today} activeKey={active.key} />}
-        <div className="footer-note"><span>A replay shows what these trades would have done. It isn’t your actual performance or a tested strategy.</span><span>Sample market data</span></div>
+        <div className="footer-note"><span>A replay shows what these trades would have done. It isn’t your actual performance or a tested strategy.</span><span><MarketDataLabel /></span></div>
       </main>
 
       {adding && <AddReplayMarkets r={active} onClose={() => setAdding(false)} onAdd={(ps, buckets) => { update((r) => ({ ...r, buckets: [...r.buckets, ...buckets.filter((b) => !r.buckets.some((x) => x.id === b.id))], positions: [...r.positions, ...ps].slice(0, MAX_REPLAY_POSITIONS) })); setAdding(false); toast(`${ps.length} position${ps.length === 1 ? '' : 's'} added`) }} />}
@@ -306,7 +308,7 @@ function AddReplayMarkets({ r, onClose, onAdd }: { r: Replay; onClose: () => voi
   }
   const o = current?.outcome
   return (
-    <Modal title="Add markets" sub={`Markets that traded between ${long(r.start)} and ${long(r.end)}.${MARKET_CATALOG.live ? '' : ' Sample market data.'}`} onClose={onClose} width={640}
+    <Modal title="Add markets" sub={sentences(`Markets that traded between ${long(r.start)} and ${long(r.end)}`, !MARKET_CATALOG.live && MARKET_CATALOG.label)} onClose={onClose} width={640}
       footer={<><span className="t3" style={{ marginRight: 'auto' }}>{picks.length ? `${picks.length} selected` : 'Choose an outcome for each position'}</span><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" disabled={!picks.length} onClick={add}>Add {picks.length || ''} position{picks.length === 1 ? '' : 's'}</Button></>}>
       <div className="row" style={{ gap: 'var(--space-2)', marginBottom: 'var(--space-3)', flexWrap: 'wrap' }}>
         <Seg label="Find by" options={['Search', 'Link or id'] as const} value={mode} onChange={(v) => setMode(v)} />
@@ -397,7 +399,7 @@ function AnalyzeReplay({ res, onChange, currency, latest }: { res: ReplayResult;
         ))}
         <div className="rp-kpi"><small>Largest drawdown</small><b>{res.drawdown ? kfmt(-res.drawdown.amount) : 'Unavailable'}</b><div className="rp-foot">{res.drawdown ? `${fmtDate(res.drawdown.from)} → ${fmtDate(res.drawdown.to)}` : 'Needs a value for every date'}</div></div>
         <div className="rp-kpi"><small>Total in {currency}</small><b>{res.combined ? fmt(res.combined.endValue, 2) : 'Unavailable'}</b>
-          <div className="rp-foot">{res.combined ? <>Started with {fmt(res.combined.capital, 2)}. Gain {sfmt(res.combined.netGain, 2)}{res.combined.ret != null ? ` (${res.combined.ret >= 0 ? '+' : ''}${pct(res.combined.ret * 100)})` : ''}.{res.combined.basis !== 'reference' ? ' Uses your own rates.' : ''}</> : res.combinedMissing === 'rate' ? `No ${nonUsd.map(assetLabel).join(' or ')} rate. See the results above.` : 'Needs every result above'}</div></div>
+          <div className="rp-foot">{res.combined ? <>Started with {fmt(res.combined.capital, 2)}. Gain {sfmt(res.combined.netGain, 2)}{res.combined.ret != null ? ` (${res.combined.ret >= 0 ? '+' : ''}${pct(res.combined.ret * 100)})` : ''}.{res.combined.basis !== 'reference' ? ' Uses your own rates.' : ''}</> : res.combinedMissing === 'rate' ? `No ${joinList(nonUsd.map(assetLabel), 'or')} rate. See the results above.` : 'Needs every result above'}</div></div>
       </div>
       {nonUsd.length > 0 && <FrozenRatesLine r={r} latest={latest} needed={nonUsd} onChange={onChange} />}
       {nonUsd.length > 0 && <RatesEditor r={r} onChange={onChange} needed={nonUsd} />}
@@ -413,7 +415,7 @@ function AnalyzeReplay({ res, onChange, currency, latest }: { res: ReplayResult;
             tooltip={(i) => <><div className="t3">{long(seg[i].date)}</div><b>{kfmt(vals[i])}</b><div className="t3">{seg[i].carried ? `${seg[i].carried} price${seg[i].carried === 1 ? '' : 's'} carried forward` : 'Observed prices'}{seg[i].stale ? `, ${seg[i].stale} out of date` : ''}</div></>} />
         </>) : (
           <div className="unavailable" role="status">
-            Value over time is unavailable: {res.series.filter((p) => p.value != null).length} of {res.series.length} dates can be valued. {res.series.some((p) => !p.cashComplete) ? 'A fee is unknown, so cash after it is unknown. ' : ''}Open holdings need a recorded price on or before each date, and the sample market data only has today’s reference prices, not price history. Nothing is filled in.
+            Value over time is unavailable: {res.series.filter((p) => p.value != null).length} of {count(res.series.length, 'date')} can be valued. {res.series.some((p) => !p.cashComplete) ? 'A fee is unknown, so cash after it is unknown. ' : ''}Open holdings need a recorded price on or before each date, and the sample market data only has today’s reference prices, not price history. Nothing is filled in.
           </div>
         )}
         {res.quality.qualified && seg.length >= 2 && <small className="t3">Some dates use older or partial prices, so return and drawdown are approximate.</small>}

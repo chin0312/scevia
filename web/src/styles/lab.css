@@ -266,7 +266,7 @@
 .range-tbl { margin-top: var(--space-3); }
 
 /* ── Utilities: menus, notification centre, help, account ── */
-.chip-short { display: none; }
+.chip-short { display: none; max-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .menu-note { font-size: var(--font-size-xs); }
 .menu-i small { white-space: nowrap; }
 a.menu-i { text-decoration: none; }
@@ -317,10 +317,11 @@ a.menu-i { text-decoration: none; }
 
 @media (max-width: 1100px) {
   .rail .rail-card { display: none; }
+  .chip-date { display: none; }
 }
 @media (max-width: 640px) {
   .chip-long { display: none; }
-  .chip-short { display: inline; }
+  .chip-short { display: inline-block; vertical-align: bottom; }
   /* Menus span the screen under the top bar instead of running off its edge. */
   .utils .menu-wrap { position: static; }
   .help-term { grid-template-columns: minmax(0, 1fr); gap: var(--space-1); }
@@ -329,3 +330,4 @@ a.menu-i { text-decoration: none; }
 .notif-item .menu-i small { white-space: normal; }
 .rec-table td.rec-st { white-space: normal; min-width: 150px; }
 .rec-table td.rec-st .row { flex-wrap: wrap; row-gap: var(--space-1); }
+.scn-flags { display: flex; flex-wrap: wrap; gap: var(--space-1); }

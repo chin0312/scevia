@@ -59,6 +59,9 @@ export interface FxReference {
   rate: number | null
   kind: RateKind
   source: string
+  /** The provider's display name, from the service (e.g. a source registry). Absent when the service has none, in
+   *  which case the source id is shown. Presentation never maps source ids to names itself. */
+  sourceName?: string
   methodology: string
   observedAt: string | null
   retrievedAt: string | null
@@ -104,7 +107,7 @@ export function fixtureFx(today = FIXTURE_DATE, prefs: FxPreferences = AUTO_FX, 
     return SOURCE_SUPPORTS[prefs.stablecoinSource].includes(asset) ? { source: prefs.stablecoinSource, fallback: false } : { source: natural, fallback: true }
   }
   const ref = (base: string, quote: string, rate: number | null, kind: RateKind, observedAt: string | null, freshness?: RateFreshness, source = 'ecb_euro_reference', fallback = false): FxReference => ({
-    base, quote, rate, kind, source, methodology: kind === 'stablecoin' ? 'stablecoin_market_reference' : 'fiat_reference', fixture: true, fallback,
+    base, quote, rate, kind, source, sourceName: source.split(' + ').map((x) => SOURCE_LABEL[x as keyof typeof SOURCE_LABEL] ?? x).join(' and '), methodology: kind === 'stablecoin' ? 'stablecoin_market_reference' : 'fiat_reference', fixture: true, fallback,
     observedAt, retrievedAt: observedAt, revision: FIXTURE_REV,
     freshness: freshness ?? (rate == null ? 'unavailable' : observedAt && (Date.parse(today) - Date.parse(observedAt)) / 86400000 > STALE_DAYS ? 'stale' : 'last_known'),
   })
@@ -115,14 +118,14 @@ export function fixtureFx(today = FIXTURE_DATE, prefs: FxPreferences = AUTO_FX, 
   }
   const fromUsd = (c: string): FxReference => (c === 'USD' ? ref('USD', 'USD', 1, 'fiat', null, 'identity') : table[c] ? ref('USD', c, table[c].rate, 'fiat', table[c].observedAt) : ref('USD', c, null, 'fiat', null, 'unsupported'))
   return {
-    label: 'Development fixture rates', live: false,
+    label: 'Sample rates', live: false,
     reference(base, quote) {
       if (base === quote) return ref(base, quote, 1, 'fiat', null, 'identity')
       if (quote === 'USD') return toUsd(base)
       if (base === 'USD') return fromUsd(quote)
       const a = toUsd(base), b = fromUsd(quote)
       const rate = a.rate != null && b.rate != null ? a.rate * b.rate : null
-      return { ...b, base, rate, kind: a.kind, source: `${a.source} + ${b.source}`, fallback: !!(a.fallback || b.fallback), freshness: rate == null ? 'unavailable' : a.freshness === 'stale' || b.freshness === 'stale' ? 'stale' : b.freshness, methodology: `${a.methodology} × ${b.methodology}` }
+      return { ...b, base, rate, kind: a.kind, source: `${a.source} + ${b.source}`, sourceName: `${a.sourceName ?? a.source} and ${b.sourceName ?? b.source}`, fallback: !!(a.fallback || b.fallback), freshness: rate == null ? 'unavailable' : a.freshness === 'stale' || b.freshness === 'stale' ? 'stale' : b.freshness, methodology: `${a.methodology} × ${b.methodology}` }
     },
   }
 }
@@ -146,3 +149,19 @@ export function convert(amount: number | null, ref: FxReference): number | null 
    display conversion. */
 export type MoneyKind = 'native' | 'reporting' | 'display'
 export interface Money { amount: number | null; kind: MoneyKind; unit: string }
+
+/** Display name of a reference's provider: the service's name, else its source id. */
+export const sourceName = (r: Pick<FxReference, 'source' | 'sourceName'>) => r.sourceName ?? r.source
+
+/** A short, specific warning for one conversion leg (an asset to USD, or USD to the reporting currency) that can't be
+ *  used as is, or null when it's fine. A missing stablecoin or
+ *  other asset leg leaves no reliable converted value; a missing USD to reporting-currency leg leaves the USD value. */
+export function rateWarning(r: FxReference, fmtDay: (iso: string) => string): string | null {
+  const pair = `${assetLabel(r.base)} to ${assetLabel(r.quote)}`
+  if (r.rate == null) {
+    if (r.base === 'USD') return `No ${pair} rate is available, so values are shown in USD.`
+    return `No ${pair} rate is available, so totals that include ${assetLabel(r.base)} can’t be converted.`
+  }
+  if (r.freshness === 'stale') return `The ${pair} rate is out of date${r.observedAt ? ` (last observed ${fmtDay(r.observedAt)})` : ''}.`
+  return null
+}

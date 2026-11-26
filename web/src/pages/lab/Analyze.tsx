@@ -62,7 +62,7 @@ export function AnalyzeView({ E, onEdit }: { E: Evaluation; onEdit: (id: string)
             { label: 'Est. fees', value: -bridge.fees, kind: 'step', note: bridge.feesUnavailable ? '+ unavailable' : undefined, muted: !bridge.fees },
             { label: 'Scenario', value: bridge.after, kind: 'total' },
           ]} />
-          <p className="t3 chart-note">Buying at a price above the mark lowers value at mark by the difference; selling below it does too. Added capital raises value and is never counted as a gain.{bridge.feesUnavailable ? ` ${bridge.feesUnavailable} trade fee${bridge.feesUnavailable > 1 ? 's are' : ' is'} unavailable and not included.` : ''}</p>
+          <p className="t3 chart-note">Buying above the reference price or selling below it lowers value by the difference. Added capital raises value and is never counted as a gain.{bridge.feesUnavailable ? ` ${bridge.feesUnavailable} trade fee${bridge.feesUnavailable > 1 ? 's are' : ' is'} unavailable and not included.` : ''}</p>
         </>)}</div>
       </Card>
       <Card id="a-range">
