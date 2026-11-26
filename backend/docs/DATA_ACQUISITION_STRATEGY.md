@@ -66,3 +66,5 @@ Ordinary history defaults to retrospective reconstruction. Knowledge mode uses c
 ## Phase 8 handoff
 
 Historical Replay within Scenario Lab can reuse independent ownership, user-defined virtual working capital, current discovery, bounded market backfill, shared historical FX, verified native identity, trading-window and eligible payout evidence, canonical ledger and performance methods, consolidated reporting and frozen scenario persistence. It requires no trading account or personal history. Remaining gates include demonstrated archive coverage and trading windows for real markets, retention rights, and supported finalized settlement evidence. Current-generation Polymarket PositionManager, disputed or nonstandard payouts, and other unverified resolution cases remain unresolved.
+
+The [Phase 9 validation report](PHASE9_VALIDATION.md) records actual exact-token reference and public Polygon probes, annual ECB coverage, trial terms, and provider inquiry drafts. Use one approved market-data source first. The keyless FX and RPC probes need no account or paid key. They do not confer rights to venue markets or public redistribution.

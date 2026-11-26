@@ -1,14 +1,21 @@
 import { strict as assert } from 'node:assert'
+import { z } from 'zod'
+import { polygonPusd } from '../src/providers/polymarket/collateral.js'
+import { reportAmounts, storeReferences } from '../src/fx/reference.js'
 import { Decimal } from 'decimal.js'
 import { PGlite } from '@electric-sql/pglite'
 import { PGLiteSocketServer } from '@electric-sql/pglite-socket'
 import { createDatabase } from '../src/db/client.js'
 import { runMigrations } from '../src/db/migrate.js'
 import { fxReferences, users } from '../src/db/schema.js'
-import { refreshEcb } from '../src/fx/ecb.js'
+import { refreshEcb, refreshEcbAnnual } from '../src/fx/ecb.js'
 import { buildApp } from '../src/http/app.js'
 
-if (process.argv.length !== 3 || process.argv[2] !== '--confirm-ecb-reuse') {
+const flags = process.argv.slice(2)
+const annual = flags.includes('--annual')
+const stablecoins = flags.includes('--confirm-defillama-evaluation')
+if (!flags.includes('--confirm-ecb-reuse') || new Set(flags).size !== flags.length
+    || flags.some((flag) => !['--confirm-ecb-reuse', '--annual', '--confirm-defillama-evaluation'].includes(flag))) {
   throw new Error('Pass --confirm-ecb-reuse after reviewing ECB attribution and modification conditions')
 }
 
@@ -41,7 +48,8 @@ try {
   const signal = AbortSignal.timeout(20_000)
   await refreshEcb(database, signal, transport)
   const daily = await database.select().from(fxReferences)
-  await refreshEcb(database, signal, transport, true)
+  if (annual) await refreshEcbAnnual(database, signal, transport)
+  else await refreshEcb(database, signal, transport, true)
   const history = await database.select().from(fxReferences)
   assert(daily.length > 0)
   assert(history.length > daily.length)
@@ -104,13 +112,76 @@ try {
   const frozen = await request('GET', path + '/' + saved.id)
   assert.deepEqual(frozen.result.summary, preview.result.summary)
 
+  let stablecoinEvaluation
+  if (stablecoins) {
+    const contracts = { PUSD: polygonPusd, USDC: '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359' } as const
+    const keys = Object.entries(contracts).map(([asset, contract]) => [asset, 'polygon:' + contract] as const)
+    const sample = z.object({ decimals: z.literal(6), price: z.number().positive(),
+      timestamp: z.number().int().positive(), confidence: z.number().min(0).max(1) })
+    const envelope = z.object({ coins: z.record(z.string(), sample) })
+    const samples: object[] = []
+    const olderCutoff = 1764547200
+    const recentCutoff = 1793059200
+    for (const cutoff of [null, olderCutoff, recentCutoff]) {
+      const target = cutoff === null ? 'current' : 'historical/' + cutoff
+      const response = await transport('https://coins.llama.fi/prices/' + target + '/' + keys.map(([, key]) => key).join(','),
+        { signal: AbortSignal.timeout(10_000), redirect: 'error' })
+      assert.equal(response.status, 200)
+      const reader = response.body!.getReader()
+      let bytes = 0
+      const chunks: Uint8Array[] = []
+      try {
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          bytes += value.byteLength
+          assert(bytes < 8192, 'Unexpected DefiLlama payload size')
+          chunks.push(value)
+        }
+      } finally { await reader.cancel().catch(() => undefined) }
+      const { coins } = envelope.parse(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+      const retrievedAt = new Date().toISOString()
+      for (const [asset, key] of keys) {
+        const observation = coins[key]
+        samples.push({ target, asset, available: !!observation, ...observation })
+        if (!observation || observation.confidence < 0.95 || (cutoff !== null && observation.timestamp > cutoff)) continue
+        await storeReferences(database, [{ base: asset, quote: 'USD',
+          rate: new D(observation.price).toDecimalPlaces(18).toFixed(), source: 'defillama_polygon_' + asset.toLowerCase() + '_usd',
+          methodology: 'stablecoin_market_reference', observedAt: new Date(observation.timestamp * 1000).toISOString(), retrievedAt,
+          ...(asset === 'PUSD' ? { tokenIdentity: { chain: 'polygon-pos', contract: polygonPusd,
+            quoteBasis: 'vendor_aggregated_fiat_usd' } } : {}) }])
+      }
+    }
+    const rows = await database.select().from(fxReferences)
+    const valueAt = new Date().toISOString()
+    const assets = ['PUSD', 'USDC'] as const
+    const references = [await read('PUSD', 'USD'), await read('USDC', 'USD')]
+    const expected = references.reduce((total, quote) => {
+      assert(quote.rate, 'Missing eligible current exact-token reference')
+      return total.plus(new D(quote.rate).mul(100))
+    }, new D(0))
+    const calculation = reportAmounts(rows, assets.map((asset) => ({ asset, value: '100' })), 'USD', valueAt)
+    assert.equal(calculation.completeValue, expected.toFixed())
+    const historical = (asset: string, cutoff: number, mode = 'retrospective') =>
+      read(asset, 'USD', new Date(cutoff * 1000).toISOString(), mode)
+    const oldPusd = await historical('PUSD', olderCutoff)
+    assert.equal(oldPusd.rate, null)
+    const archivedUsdc = await historical('USDC', olderCutoff)
+    const archivedPusd = await historical('PUSD', recentCutoff)
+    const knowledgePusd = await historical('PUSD', recentCutoff, 'knowledge')
+    assert(archivedUsdc.rate && archivedPusd.rate)
+    assert.equal(knowledgePusd.rate, null)
+    stablecoinEvaluation = { samples, quantityPerAsset: '100', combinedUsd: calculation.completeValue,
+      archivedUsdc: archivedUsdc.rate, archivedPusd: archivedPusd.rate, olderPusd: oldPusd.rate }
+  }
+
   process.stdout.write(JSON.stringify({ source: 'European Central Bank', derivedValues: true, requests,
     archive: { rows: history.length, days: days.length, first, last }, direct: direct.rate, inverse: inverse.rate, cross: cross.rate,
     retrospective: retrospective.rate, knowledge: knowledge.rate,
     weekend: { cutoff: sunday, observationDate: recentFriday, rate: weekend.rate }, virtualCashReplay: {
       currency: 'GBP', nativeOpening: '100 USD', starting: preview.result.summary.starting, ending: preview.result.summary.ending,
       points: preview.result.history.length, evaluationMs, frozenReadback: true,
-    },
+    }, stablecoinEvaluation,
   }, null, 2) + '\n')
 } finally {
   await app?.close()

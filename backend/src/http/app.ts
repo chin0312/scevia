@@ -4,7 +4,7 @@ import { refreshUsdc } from '../fx/kraken.js'
 import { registerMarketEvidence } from '../tracking/discovery.js'
 import { registerHistoricalReplay } from '../replay/routes.js'
 import { registerOwnerPreferences } from './simulations.js'
-import { refreshEcb } from '../fx/ecb.js'
+import { nextEcbRefresh, refreshEcb } from '../fx/ecb.js'
 import { startPolymarketStream } from '../tracking/polymarket-stream.js'
 import { setTimeout as delay } from 'node:timers/promises'
 import { initializeTrackedAccounts, registerTrackingRoutes } from '../tracking/routes.js'
@@ -598,9 +598,12 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     const stop = new AbortController()
     let task: Promise<void> | undefined
     const collect = async () => {
+      let ecbDueAt = 0
       while (!stop.signal.aborted) {
         const updates = await Promise.allSettled([
-          ...(options.config.ecbReferenceAuthorized ? [refreshEcb(options.database, stop.signal)] : []),
+          ...(options.config.ecbReferenceAuthorized && Date.now() >= ecbDueAt ? [refreshEcb(options.database, stop.signal).then(() => {
+            ecbDueAt = nextEcbRefresh(new Date())
+          })] : []),
           ...(pusdKey ? [refreshPusd(options.database, pusdKey, stop.signal)] : []),
           ...(options.config.krakenFxAuthorized ? [refreshUsdc(options.database, stop.signal)] : []),
         ])
