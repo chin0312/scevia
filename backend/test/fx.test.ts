@@ -1,7 +1,9 @@
 import { consolidatePerformance } from '../src/fx/consolidated.js'
 import { reportAmounts, selectRate } from '../src/fx/reference.js'
 import { polygonPusd } from '../src/providers/polymarket/collateral.js'
-import { describe, expect, it } from 'vitest'
+import { nextEcbRefresh, refreshEcb, refreshEcbAnnual } from '../src/fx/ecb.js'
+import type { Database } from '../src/db/client.js'
+import { describe, expect, it, vi } from 'vitest'
 import { analyzePerformance } from '../src/analytics/performance.js'
 import type { Evidence } from '../src/accounting/model.js'
 import { reportingPerformance } from '../src/fx/performance.js'
@@ -46,6 +48,18 @@ describe('reporting performance', () => {
     })
     expect(selectRate([{ ...archived, publishedAt: new Date('2026-01-02T15:00:00Z') }], 'EUR', 'USD', cutoff).rate).toBe('1.25')
     expect(selectRate([archived], 'EUR', 'USD', '2026-01-01T00:00:00.000Z', { mode: 'retrospective' }).rate).toBeNull()
+  })
+
+  it('uses the previous ECB business-day reference over a weekend without backdating retrieval', () => {
+    const weekend = '2026-11-22T00:00:00.000Z'
+    const friday = { revision: 'friday', base: 'EUR', quote: 'GBP', rate: '0.83735', source: 'ecb_euro_reference',
+      methodology: 'fiat_reference', observedAt: new Date('2026-11-20T00:00:00.000Z'),
+      retrievedAt: new Date('2026-11-26T03:00:00.000Z') }
+    const monday = { ...friday, revision: 'monday', rate: '0.84', observedAt: new Date('2026-11-23T00:00:00.000Z') }
+    expect(selectRate([monday, friday], 'EUR', 'GBP', weekend, { mode: 'retrospective' })).toMatchObject({
+      rate: '0.83735', legs: [{ revision: 'friday', retrievedAt: '2026-11-26T03:00:00.000Z' }],
+    })
+    expect(selectRate([monday, friday], 'EUR', 'GBP', weekend, { mode: 'knowledge' }).rate).toBeNull()
   })
 
   it('prefers an eligible daily pUSD reference over a newer stale current observation', () => {
@@ -122,4 +136,41 @@ describe('reporting performance', () => {
     expect(consolidatePerformance(incomplete, rates, ['USD', 'USDC'], 'USD', opened, through, 'retrospective').twr).toBeNull()
   })
 
+})
+
+describe('ECB acquisition', () => {
+  it('stores bounded annual exact-series rates and rejects a mismatched series', async () => {
+    const day = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10)
+    const header = 'KEY,FREQ,CURRENCY,CURRENCY_DENOM,EXR_TYPE,EXR_SUFFIX,TIME_PERIOD,OBS_VALUE'
+    const observation = 'EXR.D.GBP.EUR.SP00.A,D,GBP,EUR,SP00,A,' + day + ',0.83'
+    const values = vi.fn(() => ({ onConflictDoNothing: vi.fn() }))
+    const db = { insert: vi.fn(() => ({ values })) } as unknown as Pick<Database, 'insert'>
+    const transport = vi.fn(async () => new Response(header + '\r\n' + observation))
+    await refreshEcbAnnual(db, new AbortController().signal, transport)
+    expect(transport).toHaveBeenCalledWith(expect.stringContaining('D.USD+GBP.EUR.SP00.A?startPeriod='), expect.anything())
+    expect(values).toHaveBeenCalledWith([expect.objectContaining({ base: 'EUR', quote: 'GBP', rate: '0.83',
+      observedAt: new Date(day), source: 'ecb_euro_reference' })])
+    await expect(refreshEcbAnnual(db, new AbortController().signal,
+      async () => new Response(header + '\n' + observation.replace(',GBP,', ',USD,')))).rejects.toThrow('ecb_annual_observation')
+    expect(values).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects an empty or invalid ECB response and reports the date of a stored valid one', async () => {
+    const values = vi.fn(() => ({ onConflictDoNothing: vi.fn() }))
+    const db = { insert: vi.fn(() => ({ values })) } as unknown as Pick<Database, 'insert'>
+    const signal = new AbortController().signal
+    await expect(refreshEcb(db, signal, async () => new Response('<Cube/>'))).rejects.toThrow('ecb_reference_empty')
+    const feed = (rate: string) => async () => new Response('<Cube time="2025-11-20"><Cube currency="USD" rate="' + rate + '"/></Cube>')
+    await expect(refreshEcb(db, signal, feed('0'))).rejects.toThrow()
+    expect(values).not.toHaveBeenCalled()
+    await expect(refreshEcb(db, signal, feed('1.1'))).resolves.toBe('2025-11-20')
+  })
+
+  it('schedules the next post-publication weekday check', () => {
+    expect(nextEcbRefresh(new Date('2026-11-20T15:30:00Z'))).toBe(Date.parse('2026-11-20T16:00:00Z'))
+    expect(nextEcbRefresh(new Date('2026-11-20T16:30:00Z'), '2026-11-20')).toBe(Date.parse('2026-11-23T16:00:00Z'))
+    expect(nextEcbRefresh(new Date('2026-11-20T16:30:00Z'), '2026-11-19')).toBe(Date.parse('2026-11-20T17:30:00Z'))
+    expect(nextEcbRefresh(new Date('2026-11-20T18:30:00Z'), '2026-11-19')).toBe(Date.parse('2026-11-23T16:00:00Z'))
+    expect(nextEcbRefresh(new Date('2026-11-21T16:30:00Z'), '2026-11-20')).toBe(Date.parse('2026-11-23T16:00:00Z'))
+  })
 })
