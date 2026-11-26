@@ -12,7 +12,7 @@ import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
 import swagger from '@fastify/swagger'
 import swaggerUi from '@fastify/swagger-ui'
-import { and, desc, eq, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, gt, sql } from 'drizzle-orm'
 import { Decimal } from 'decimal.js'
 import type { ServerConfig } from '../config.js'
 import type { Database } from '../db/client.js'
@@ -541,10 +541,13 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 
   // Kalshi remains unavailable in production and in the default development server.
   const kalshiMarketData = options.config.nodeEnv === 'test' ? options.kalshiMarketData : kalshiLive?.marketData
+  const trackingRuntime = { running: false, accountIds: [] as string[] }
+  let reconcileTracking: ReturnType<typeof registerAccountingRoutes>
   const tracking = options.config.tracking
   if (tracking && options.config.nodeEnv === 'development' && ['127.0.0.1', '::1'].includes(options.config.host)) {
     const accountIds = await initializeTrackedAccounts(options.database, options.config.devPrincipalId,
       tracking.accountIds, liveAllowed, kalshiLive?.accountId)
+    trackingRuntime.accountIds = accountIds
     const worker = new TrackingWorker(options.database, { ...tracking, accountIds, ingestion,
       kalshi: options.config.kalshi?.environment === 'production' ? kalshiMarketData : undefined,
       polymarket: liveAllowed ? marketData : undefined })
@@ -556,13 +559,26 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         await delay(interval, undefined, { signal: stopping.signal }).catch(() => undefined)
       }
     }
+    let cursor: string | undefined
+    const reconcile = async () => {
+      const rows = await options.database.select({ id: portfolios.id }).from(portfolios)
+        .where(and(eq(portfolios.ownerId, options.config.devPrincipalId), cursor ? gt(portfolios.id, cursor) : undefined))
+        .orderBy(asc(portfolios.id)).limit(10)
+      for (const row of rows) {
+        if (stopping.signal.aborted) break
+        cursor = row.id
+        await reconcileTracking(row.id)
+      }
+      if (rows.length < 10) cursor = undefined
+    }
     let running: Promise<unknown> | undefined
-    app.addHook('onListen', async () => { running = Promise.all([
-      loop((signal) => worker.market(signal)),
+    app.addHook('onListen', async () => { trackingRuntime.running = true; running = Promise.all([
+      loop((signal) => Promise.all(Array.from({ length: 3 }, () => worker.market(signal)))),
+      loop(reconcile, 30_000),
       loop((signal) => worker.account(signal)),
       loop(() => worker.pruneObservations(tracking.retentionDays), 60_000),
     ]) })
-    app.addHook('onClose', async () => { stopping.abort(); await running })
+    app.addHook('onClose', async () => { trackingRuntime.running = false; stopping.abort(); await running })
   }
   app.get<{ Querystring: { marketTicker?: string; eventTicker?: string; cursor?: string } }>('/v1/market-catalog/kalshi', {
     schema: { tags: ['public market data'], querystring: { type: 'object', additionalProperties: false, properties: {
@@ -634,9 +650,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       request.principalId = options.config.devPrincipalId
     })
 
-    registerTrackingRoutes(privateApi, options.database)
+    registerTrackingRoutes(privateApi, options.database, (portfolioId) => reconcileTracking(portfolioId), () => trackingRuntime)
     registerDemoRoutes(privateApi, options.database, options.config.demoDataset)
-    registerAccountingRoutes(privateApi, options.database, liveAllowed || options.marketData || kalshiMarketData ? async (url, type, assetId) => {
+    reconcileTracking = registerAccountingRoutes(privateApi, options.database, liveAllowed || options.marketData || kalshiMarketData ? async (url, type, assetId) => {
       try {
         if (type === 'kalshi_outcome') {
           if (!kalshiMarketData) throw new ScenarioError('kalshi_live_disabled')

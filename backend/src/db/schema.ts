@@ -634,6 +634,12 @@ export const marketTracking = scevia.table('market_tracking', {
   lastSuccessAt: timestamp('last_success_at', { withTimezone: true }),
   failures: integer('failures').default(0).notNull(),
   lifecycle: text('lifecycle'),
+  closedAt: timestamp('closed_at', { withTimezone: true }),
+  lifecycleAt: timestamp('lifecycle_at', { withTimezone: true }),
+  metadataAt: timestamp('metadata_at', { withTimezone: true }),
+  quoteAt: timestamp('quote_at', { withTimezone: true }),
+  quoteStatus: text('quote_status'),
+  resolution: jsonb('resolution').$type<{ knownAt: string; winningInstrument: string; unitPayout: '1' }>(),
 }, (table) => [index('market_tracking_due_idx').on(table.nextAttemptAt)])
 
 export const marketWatches = scevia.table('market_watches', {
@@ -642,6 +648,14 @@ export const marketWatches = scevia.table('market_watches', {
 }, (table) => [
   uniqueIndex('market_watches_portfolio_market_unique').on(table.portfolioId, table.marketId),
   index('market_watches_market_idx').on(table.marketId),
+])
+
+export const automaticMarketWatches = scevia.table('automatic_market_watches', {
+  portfolioId: uuid('portfolio_id').notNull().references(() => portfolios.id, { onDelete: 'cascade' }),
+  marketId: uuid('market_id').notNull().references(() => marketTracking.marketId, { onDelete: 'cascade' }),
+}, (table) => [
+  uniqueIndex('automatic_market_watches_portfolio_market_unique').on(table.portfolioId, table.marketId),
+  index('automatic_market_watches_market_idx').on(table.marketId),
 ])
 
 export const sharedMarketObservations = scevia.table('shared_market_observations', {

@@ -7,6 +7,10 @@ const zero = () => new Money(0)
 const financialValues = ({ canonicalInstrumentId: _association, ...values }: FinancialObservation) => values
 
 export function replayAccounting(evidence: Evidence[], asOf: string, providerEvidencePresent = false) {
+  return prepareAccounting(evidence, asOf, providerEvidencePresent)(asOf, [])!
+}
+
+export function prepareAccounting(evidence: Evidence[], cutoff: string, providerEvidencePresent = false) {
   const groups = new Map<string, Evidence[]>()
   const discrepancies: Array<{ reason: string; sources: EvidenceReference[]; scope: Pick<FinancialObservation, 'venue' | 'account' | 'asset' | 'instrument' | 'type' | 'feeAsset' | 'completeSet'> }> = []
   const sources = (items: Evidence[]): EvidenceReference[] => items.map((item) => 'batchId' in item
@@ -15,7 +19,7 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
   const scope = ({ venue, account, asset, instrument, type, feeAsset, completeSet }: FinancialObservation) => ({ venue, account, asset, instrument, type, feeAsset, ...(completeSet ? { completeSet } : {}) })
   for (const item of evidence) {
     const event = item.observation
-    if (event.timestamp > asOf) continue
+    if (event.timestamp > cutoff) continue
     if (item.unresolvedReason || !event.id) { discrepancies.push({ reason: item.unresolvedReason ?? 'economic_id_missing', sources: sources([item]), scope: scope(event) }); continue }
     const key = JSON.stringify([event.venue, event.account, event.id])
     const group = groups.get(key) ?? []
@@ -31,7 +35,7 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
     }
     const authority = group.some((item) => item.authority === 'user_accepted') ? 'user_accepted'
       : group.some((item) => 'providerAccountId' in item) ? 'provider_evidence' : 'user_declared'
-    return [{ ...observation, economicId: id, authority, managedHistory: observation.type === 'history_complete' && group.every((item) => item.acquisition === 'demo'), sources: sources(group) }]
+    return [{ ...observation, economicId: id, authority, managedHistory: observation.type === 'history_complete' && group.every((item) => item.acquisition === 'demo'), sources: sources(group), marketReference: group[0]!.marketReference }]
   }).sort((a, b) => a.timestamp.localeCompare(b.timestamp)
     || Number(b.type === 'opening_inventory' || b.type === 'opening_cash')
       - Number(a.type === 'opening_inventory' || a.type === 'opening_cash')
@@ -41,7 +45,7 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
   const positions = new Map<string, {
     venue: string; account: string; asset: string; instrument: string
     quantity: Decimal; basis: Decimal | null; observedInventory: boolean; declaredOpening: boolean; entitlements: Map<string, { quantity: Decimal; rate: Decimal }>; pendingQuantity: Decimal; pending: Decimal
-    resolvedAt?: string; settledAt?: string; mark: Decimal | null; markAt: string | null; markSources: EvidenceReference[]
+    marketTerminalAt?: string; resolvedAt?: string; settledAt?: string; mark: Decimal | null; markAt: string | null; markSources: EvidenceReference[]; marketReference?: Evidence['marketReference']
   }>()
   const cash = new Map<string, {
     venue: string; account: string; asset: string; delta: Decimal; opening: Decimal | null; openingAt: string | null
@@ -127,6 +131,7 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
         holding.mark = null
         holding.markAt = null
         holding.markSources = []
+        delete holding.marketReference
         if (holding.quantity.isZero()) continue
         if (event.simulatedResolution.effect === 'unverified_resolution') {
           reject('simulated_resolution_payout_unverified')
@@ -246,7 +251,17 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
       const fee = new Money(event.fee ?? 0)
       const sameAsset = !event.feeAsset || event.feeAsset === event.asset
       if (event.type === 'mark') {
+        if (event.terminalMarketReference) {
+          holding.marketTerminalAt = event.timestamp
+          holding.mark = null
+          holding.markAt = null
+          holding.markSources = event.sources
+          holding.marketReference = event.marketReference
+          continue
+        }
+        if (holding.marketTerminalAt) continue
         holding.markSources = event.sources
+        holding.marketReference = event.marketReference
         if (markGroups.get(markKey(event))!.size > 1) {
           holding.mark = null
           holding.markAt = event.timestamp
@@ -297,6 +312,7 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
             holding.mark = null
             holding.markAt = null
             holding.markSources = []
+            delete holding.marketReference
           }
           holding.entitlements.set(event.id!, { quantity, rate: price })
           entitlementDelta = gross
@@ -345,79 +361,96 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
     positionIssues.has(JSON.stringify([entry.venue, entry.account, entry.asset, entry.instrument]))
       || positionIssues.has(JSON.stringify([entry.venue, entry.account, entry.asset, null]))
       || positionIssues.has(JSON.stringify([entry.venue, entry.account, 'UNKNOWN', null]))
-  const staleMark = (markAt: string | null) => markAt === null || Date.parse(asOf) - Date.parse(markAt) > 86_400_000
-  const partial = discrepancies.length > 0 || providerEvidencePresent
-    || [...cash.values()].some((entry) => entry.opening === null || entry.inventoryOpeningAt === null || entry.incomplete || entry.pnlIncomplete)
-    || [...positions.values()].some((entry) => !entry.quantity.isZero() && (entry.basis === null || entry.mark === null || staleMark(entry.markAt)))
-  const inventoryValues = new Map<string, Decimal | null>()
-  const referenceValues = new Map<string, Decimal | null>()
-  for (const holding of positions.values()) {
-    const key = JSON.stringify([holding.venue, holding.account, holding.asset])
-    const reference = referenceValues.has(key) ? referenceValues.get(key)! : zero()
-    if (reference !== null) referenceValues.set(key, holding.quantity.isZero()
-      ? reference.plus(holding.pending)
-      : holding.mark === null ? null : reference.plus(holding.pending).plus(holding.mark.mul(holding.quantity)))
-    const previous = inventoryValues.has(key) ? inventoryValues.get(key)! : zero()
-    if (previous === null) continue
-    if (holding.quantity.isZero()) inventoryValues.set(key, previous.plus(holding.pending))
-    else if (holding.mark === null || staleMark(holding.markAt)) inventoryValues.set(key, null)
-    else inventoryValues.set(key, previous.plus(holding.pending).plus(holding.mark.mul(holding.quantity)))
-  }
-  const accountBalances = [...cash.entries()].map(([key, entry]) => {
-    const balance = affected(entry) || entry.opening === null || entry.incomplete ? null : entry.opening.plus(entry.delta)
-    const inventory = inventoryValues.has(key) ? inventoryValues.get(key)! : zero()
-    const reference = referenceValues.has(key) ? referenceValues.get(key)! : zero()
-    const declaredCoverage = entry.coverageFrom === null || entry.coverageThrough === null ? 'unverified'
-      : asOf > entry.coverageThrough ? 'outside_declared_interval'
-        : entry.openingAt !== entry.coverageFrom || entry.inventoryOpeningAt !== entry.coverageFrom ? 'opening_state_incompatible'
-          : affected(entry) ? 'declared_with_unresolved_evidence' : entry.managedHistory ? 'simulated_ledger_complete' : 'user_declared_complete'
-    return { venue: entry.venue, account: entry.account, asset: entry.asset,
-      opening: entry.opening?.toFixed() ?? null, knownDelta: entry.delta.toFixed(), knownDeclaredContributions: entry.contributions.toFixed(),
-      netContributions: entry.unclassifiedCashFlow || affected(entry) ? null : entry.contributions.toFixed(),
-      knownFees: entry.fees.toFixed(), balance: balance?.toFixed() ?? null,
-      balanceAvailability: affected(entry) ? 'unresolved_evidence' : entry.opening === null ? 'opening_cash_unknown'
-        : entry.incomplete ? 'cash_fees_unknown' : 'reconstructed_from_declaration',
-      knownRealized: entry.realized.toFixed(), realized: affected(entry) || entry.pnlIncomplete || entry.inventoryOpeningAt === null ? null : entry.realized.toFixed(),
-      historyCoverage: declaredCoverage,
-      openingCashAt: entry.openingAt,
-      historyFrom: entry.coverageFrom,
-      historyThrough: entry.coverageThrough,
-      openingState: entry.inventoryOpeningAt === null ? 'inventory_unknown' : 'declared_opening_inventory',
-      fullAccountValue: null,
-      feeAvailability: affected(entry) || entry.incomplete ? 'known_component' : 'selected_events_only',
-      realizedAvailability: affected(entry) || entry.pnlIncomplete || entry.inventoryOpeningAt === null ? 'known_component' : 'selected_events_only',
-      openingInventoryAt: entry.inventoryOpeningAt,
-      referencePortfolioValue: balance === null || reference === null || entry.inventoryOpeningAt === null
-        ? null : balance.plus(reference).toFixed(),
-      portfolioValue: balance === null || inventory === null || entry.inventoryOpeningAt === null
-        ? null : balance.plus(inventory).toFixed(),
+  return (asOf: string, references: Evidence[]) => {
+    const projected = new Map(positions)
+    for (const item of references) {
+      const row = item.observation
+      if (row.type !== 'mark' || row.price === null || row.timestamp > asOf) return null
+      const key = JSON.stringify([row.venue, row.account, row.asset, row.instrument])
+      const entry = projected.get(key)
+      if (!entry || entry.resolvedAt || entry.settledAt || entry.marketTerminalAt || (entry.markAt && row.timestamp < entry.markAt)) continue
+      if (entry.markAt === row.timestamp) return null
+      projected.set(key, { ...entry, mark: new Money(row.price), markAt: row.timestamp,
+        markSources: sources([item]), marketReference: item.marketReference })
     }
-  })
-  return { asOf, method: 'weighted_average', status: partial ? 'partial' : ledger.length === 0 ? 'unavailable' : 'reconstructed',
-    replayStatus: 'executed', providerEvidencePresent, events, ledger, discrepancies,
-    holdings: [...positions.values()].filter((entry) => entry.observedInventory || !entry.pendingQuantity.isZero()).map((entry) => ({
-      venue: entry.venue, account: entry.account, asset: entry.asset, instrument: entry.instrument, markAt: entry.markAt, markSources: entry.markSources, quantity: entry.quantity.toFixed(), basis: entry.basis?.toFixed() ?? null,
-      quantityStatus: entry.declaredOpening || cash.get(JSON.stringify([entry.venue, entry.account, entry.asset]))?.inventoryOpeningAt
-        ? positionAffected(entry) ? 'partial' : 'reconstructed_from_declaration' : 'known_event_component',
-      basisAvailability: entry.basis === null ? 'unavailable' : positionAffected(entry) ? 'known_component'
-        : entry.declaredOpening || cash.get(JSON.stringify([entry.venue, entry.account, entry.asset]))?.inventoryOpeningAt
-          ? 'selected_events_only' : 'known_component',
-      valueAvailability: entry.quantity.isZero() ? 'zero_selected_inventory'
-        : entry.mark === null || staleMark(entry.markAt) ? 'unavailable' : 'estimated_known_quantity',
-      settlementAvailability: positionAffected(entry) ? 'known_component' : 'selected_entitlements_only',
-      entitlements: [...entry.entitlements.entries()].map(([id, value]) => ({
-        id, quantity: value.quantity.toFixed(), rate: value.rate.toFixed(), amount: value.quantity.mul(value.rate).toFixed(),
+    return project(asOf, projected)
+  }
+
+  function project(asOf: string, positionsAtCutoff: typeof positions) {
+    const staleMark = (markAt: string | null) => markAt === null || Date.parse(asOf) - Date.parse(markAt) > 86_400_000
+    const partial = discrepancies.length > 0 || providerEvidencePresent
+      || [...cash.values()].some((entry) => entry.opening === null || entry.inventoryOpeningAt === null || entry.incomplete || entry.pnlIncomplete)
+      || [...positionsAtCutoff.values()].some((entry) => !entry.quantity.isZero() && (entry.basis === null || entry.mark === null || staleMark(entry.markAt)))
+    const inventoryValues = new Map<string, Decimal | null>()
+    const referenceValues = new Map<string, Decimal | null>()
+    for (const holding of positionsAtCutoff.values()) {
+      const key = JSON.stringify([holding.venue, holding.account, holding.asset])
+      const reference = referenceValues.has(key) ? referenceValues.get(key)! : zero()
+      if (reference !== null) referenceValues.set(key, holding.quantity.isZero()
+        ? reference.plus(holding.pending)
+        : holding.mark === null ? null : reference.plus(holding.pending).plus(holding.mark.mul(holding.quantity)))
+      const previous = inventoryValues.has(key) ? inventoryValues.get(key)! : zero()
+      if (previous === null) continue
+      if (holding.quantity.isZero()) inventoryValues.set(key, previous.plus(holding.pending))
+      else if (holding.mark === null || staleMark(holding.markAt)) inventoryValues.set(key, null)
+      else inventoryValues.set(key, previous.plus(holding.pending).plus(holding.mark.mul(holding.quantity)))
+    }
+    const accountBalances = [...cash.entries()].map(([key, entry]) => {
+      const balance = affected(entry) || entry.opening === null || entry.incomplete ? null : entry.opening.plus(entry.delta)
+      const inventory = inventoryValues.has(key) ? inventoryValues.get(key)! : zero()
+      const reference = referenceValues.has(key) ? referenceValues.get(key)! : zero()
+      const declaredCoverage = entry.coverageFrom === null || entry.coverageThrough === null ? 'unverified'
+        : asOf > entry.coverageThrough ? 'outside_declared_interval'
+          : entry.openingAt !== entry.coverageFrom || entry.inventoryOpeningAt !== entry.coverageFrom ? 'opening_state_incompatible'
+            : affected(entry) ? 'declared_with_unresolved_evidence' : entry.managedHistory ? 'simulated_ledger_complete' : 'user_declared_complete'
+      return { venue: entry.venue, account: entry.account, asset: entry.asset,
+        opening: entry.opening?.toFixed() ?? null, knownDelta: entry.delta.toFixed(), knownDeclaredContributions: entry.contributions.toFixed(),
+        netContributions: entry.unclassifiedCashFlow || affected(entry) ? null : entry.contributions.toFixed(),
+        knownFees: entry.fees.toFixed(), balance: balance?.toFixed() ?? null,
+        balanceAvailability: affected(entry) ? 'unresolved_evidence' : entry.opening === null ? 'opening_cash_unknown'
+          : entry.incomplete ? 'cash_fees_unknown' : 'reconstructed_from_declaration',
+        knownRealized: entry.realized.toFixed(), realized: affected(entry) || entry.pnlIncomplete || entry.inventoryOpeningAt === null ? null : entry.realized.toFixed(),
+        historyCoverage: declaredCoverage,
+        openingCashAt: entry.openingAt,
+        historyFrom: entry.coverageFrom,
+        historyThrough: entry.coverageThrough,
+        openingState: entry.inventoryOpeningAt === null ? 'inventory_unknown' : 'declared_opening_inventory',
+        fullAccountValue: null,
+        feeAvailability: affected(entry) || entry.incomplete ? 'known_component' : 'selected_events_only',
+        realizedAvailability: affected(entry) || entry.pnlIncomplete || entry.inventoryOpeningAt === null ? 'known_component' : 'selected_events_only',
+        openingInventoryAt: entry.inventoryOpeningAt,
+        referencePortfolioValue: balance === null || reference === null || entry.inventoryOpeningAt === null
+          ? null : balance.plus(reference).toFixed(),
+        portfolioValue: balance === null || inventory === null || entry.inventoryOpeningAt === null
+          ? null : balance.plus(inventory).toFixed(),
+      }
+    })
+    return { asOf, method: 'weighted_average', status: partial ? 'partial' : ledger.length === 0 ? 'unavailable' : 'reconstructed',
+      replayStatus: 'executed', providerEvidencePresent, events, ledger, discrepancies,
+      holdings: [...positionsAtCutoff.values()].filter((entry) => entry.observedInventory || !entry.pendingQuantity.isZero()).map((entry) => ({
+        venue: entry.venue, account: entry.account, asset: entry.asset, instrument: entry.instrument, markAt: entry.markAt, markSources: entry.markSources, marketReference: entry.marketReference ?? null, quantity: entry.quantity.toFixed(), basis: entry.basis?.toFixed() ?? null,
+        quantityStatus: entry.declaredOpening || cash.get(JSON.stringify([entry.venue, entry.account, entry.asset]))?.inventoryOpeningAt
+          ? positionAffected(entry) ? 'partial' : 'reconstructed_from_declaration' : 'known_event_component',
+        basisAvailability: entry.basis === null ? 'unavailable' : positionAffected(entry) ? 'known_component'
+          : entry.declaredOpening || cash.get(JSON.stringify([entry.venue, entry.account, entry.asset]))?.inventoryOpeningAt
+            ? 'selected_events_only' : 'known_component',
+        valueAvailability: entry.quantity.isZero() ? 'zero_selected_inventory'
+          : entry.mark === null || staleMark(entry.markAt) ? 'unavailable' : 'estimated_known_quantity',
+        settlementAvailability: positionAffected(entry) ? 'known_component' : 'selected_entitlements_only',
+        entitlements: [...entry.entitlements.entries()].map(([id, value]) => ({
+          id, quantity: value.quantity.toFixed(), rate: value.rate.toFixed(), amount: value.quantity.mul(value.rate).toFixed(),
+        })),
+        pendingQuantity: entry.pendingQuantity.toFixed(), pending: entry.pending.toFixed(), mark: entry.mark?.toFixed() ?? null,
+        averageCost: entry.basis === null || entry.quantity.isZero() ? null : entry.basis.div(entry.quantity).toFixed(),
+        markStatus: entry.mark === null ? 'unavailable' : staleMark(entry.markAt) ? 'stale' : 'estimated',
+        valuationQualification: entry.mark === null ? entry.quantity.isZero() ? entry.settledAt ? 'settled_no_open_quantity' : 'no_open_quantity' : 'unavailable'
+          : staleMark(entry.markAt) ? 'last_known_reference' : 'fresh_reference',
+        referenceMarketValue: entry.quantity.isZero() ? '0' : entry.mark?.mul(entry.quantity).toFixed() ?? null,
+        marketValue: entry.quantity.isZero() ? '0' : entry.mark === null || staleMark(entry.markAt) ? null : entry.quantity.mul(entry.mark).toFixed(),
+        unrealized: positionAffected(entry) || (!entry.declaredOpening && !cash.get(JSON.stringify([entry.venue, entry.account, entry.asset]))?.inventoryOpeningAt) || entry.mark === null || staleMark(entry.markAt) || entry.basis === null
+          ? null : entry.quantity.mul(entry.mark).minus(entry.basis).toFixed(),
       })),
-      pendingQuantity: entry.pendingQuantity.toFixed(), pending: entry.pending.toFixed(), mark: entry.mark?.toFixed() ?? null,
-      averageCost: entry.basis === null || entry.quantity.isZero() ? null : entry.basis.div(entry.quantity).toFixed(),
-      markStatus: entry.mark === null ? 'unavailable' : staleMark(entry.markAt) ? 'stale' : 'estimated',
-      valuationQualification: entry.mark === null ? entry.quantity.isZero() ? entry.settledAt ? 'settled_no_open_quantity' : 'no_open_quantity' : 'unavailable'
-        : staleMark(entry.markAt) ? 'last_known_reference' : 'fresh_reference',
-      referenceMarketValue: entry.quantity.isZero() ? '0' : entry.mark?.mul(entry.quantity).toFixed() ?? null,
-      marketValue: entry.quantity.isZero() ? '0' : entry.mark === null || staleMark(entry.markAt) ? null : entry.quantity.mul(entry.mark).toFixed(),
-      unrealized: positionAffected(entry) || (!entry.declaredOpening && !cash.get(JSON.stringify([entry.venue, entry.account, entry.asset]))?.inventoryOpeningAt) || entry.mark === null || staleMark(entry.markAt) || entry.basis === null
-        ? null : entry.quantity.mul(entry.mark).minus(entry.basis).toFixed(),
-    })),
-    cash: accountBalances,
+      cash: accountBalances,
+    }
   }
 }

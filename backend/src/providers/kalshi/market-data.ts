@@ -87,7 +87,7 @@ export class KalshiMarketDataService {
       resolution: item.resolution ? { ...item.resolution, winningInstrument: this.identityPrefix + item.resolution.winningInstrument } : null,
       outcomes: item.outcomes.map((outcome) => ({ ...outcome, id: this.identityPrefix + outcome.id })) }
   }
-  async lookup(id: string, signal: AbortSignal) {
+  async lookup(id: string, signal: AbortSignal, includeFeeSchedule = true) {
     const checked = ticker.parse(id)
     let response: unknown
     try { response = await this.client.read('market', new URLSearchParams(), signal, checked) }
@@ -98,7 +98,7 @@ export class KalshiMarketDataService {
     const value = z.object({ market: z.unknown() }).parse(response)
     const result = this.choice(value.market, new Date().toISOString())
     if (result.marketTicker !== this.identityPrefix + checked) throw new ProviderAdapterError('kalshi_market_identity_mismatch', false)
-    return this.loadFees && result.lifecycle === 'open' && result.establishedPayoutUnit === '1'
+    return includeFeeSchedule && this.loadFees && result.lifecycle === 'open' && result.establishedPayoutUnit === '1'
       ? { ...result, feeSchedule: await this.feeSchedule(result.eventTicker.slice(this.identityPrefix.length), signal) } : result
   }
   async list(event: string | undefined, cursor: string | undefined, signal: AbortSignal) {

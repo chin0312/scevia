@@ -1,18 +1,21 @@
-import { and, asc, desc, eq, inArray, isNull } from 'drizzle-orm'
+import { trackableMarket } from './demand.js'
+import { and, asc, desc, eq, inArray, isNull, or } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { Database } from '../db/client.js'
-import { accountTracking, instruments, markets, marketTracking, marketWatches, portfolios, providerAccounts, sharedMarketObservations } from '../db/schema.js'
+import { accountTracking, automaticMarketWatches, instruments, markets, marketTracking, marketWatches, portfolios, providerAccounts, sharedMarketObservations } from '../db/schema.js'
 
 const portfolioParam = z.object({ portfolioId: z.uuid() })
 const watchBody = z.object({ markets: z.array(z.uuid()).max(20) }).strict()
 
-export function registerTrackingRoutes(app: FastifyInstance, db: Database) {
+export function registerTrackingRoutes(app: FastifyInstance, db: Database, reconcile: (portfolioId: string) => Promise<void>,
+  operational: () => { running: boolean; accountIds: string[] }) {
   const path = '/portfolios/:portfolioId/tracking'
   const owner = (id: string, principal: string) => and(eq(portfolios.id, id), eq(portfolios.ownerId, principal))
   const marketStatus = { marketId: markets.id, provider: markets.providerCode, nativeMarket: markets.externalId,
     lifecycle: marketTracking.lifecycle, checkedAt: marketTracking.lastAttemptAt, refreshedAt: marketTracking.lastSuccessAt,
-    nextAttemptAt: marketTracking.nextAttemptAt, failures: marketTracking.failures }
+    nextAttemptAt: marketTracking.nextAttemptAt, failures: marketTracking.failures, metadataAt: marketTracking.metadataAt,
+    quoteAt: marketTracking.quoteAt, quoteStatus: marketTracking.quoteStatus, resolution: marketTracking.resolution }
   app.get(path, async (request, reply) => {
     const params = portfolioParam.safeParse(request.params)
     if (!params.success) return reply.code(422).send({ error: { code: 'invalid_tracking_scope' } })
@@ -23,6 +26,10 @@ export function registerTrackingRoutes(app: FastifyInstance, db: Database) {
       .innerJoin(marketTracking, eq(marketTracking.marketId, marketWatches.marketId))
       .innerJoin(markets, eq(markets.id, marketWatches.marketId))
       .where(eq(marketWatches.portfolioId, portfolioId)).orderBy(asc(markets.id))
+    const holdingsMarkets = await db.select(marketStatus).from(automaticMarketWatches)
+      .innerJoin(marketTracking, eq(marketTracking.marketId, automaticMarketWatches.marketId))
+      .innerJoin(markets, eq(markets.id, automaticMarketWatches.marketId))
+      .where(eq(automaticMarketWatches.portfolioId, portfolioId)).orderBy(asc(markets.id))
     const accounts = await db.select({ accountId: providerAccounts.id, kind: providerAccounts.kind, disabledAt: providerAccounts.disabledAt,
       scope: accountTracking.scope, checkedAt: accountTracking.lastAttemptAt, refreshedAt: accountTracking.lastSuccessAt,
       nextAttemptAt: accountTracking.nextAttemptAt, failures: accountTracking.failures })
@@ -35,9 +42,22 @@ export function registerTrackingRoutes(app: FastifyInstance, db: Database) {
       retrievedAt: sharedMarketObservations.retrievedAt, revision: sharedMarketObservations.revision,
     }).from(sharedMarketObservations)
       .innerJoin(instruments, eq(instruments.id, sharedMarketObservations.instrumentId))
-      .innerJoin(marketWatches, and(eq(marketWatches.portfolioId, portfolioId), eq(marketWatches.marketId, instruments.marketId)))
+        .where(or(inArray(instruments.marketId, marketsStatus.map((row) => row.marketId)),
+        inArray(instruments.marketId, holdingsMarkets.map((row) => row.marketId))))
       .orderBy(instruments.id, sharedMarketObservations.asset, desc(sharedMarketObservations.effectiveAt)).limit(100)
-    return { portfolioId, markets: marketsStatus, observations, accounts, valuation: { mechanism: 'read_through_accounting' } }
+    const runtime = operational()
+    return { portfolioId, workerRunning: runtime.running, markets: marketsStatus, holdingsMarkets, observations,
+      accounts: accounts.map((row) => ({ ...row, active: runtime.running && row.scope !== null
+        && row.disabledAt === null && runtime.accountIds.includes(row.accountId) })), valuation: { mechanism: 'read_through_accounting' } }
+  })
+  app.post(path + '/reconcile', async (request, reply) => {
+    const params = portfolioParam.safeParse(request.params)
+    if (!params.success) return reply.code(422).send({ error: { code: 'invalid_tracking_scope' } })
+    const { portfolioId } = params.data
+    const [row] = await db.select({ id: portfolios.id }).from(portfolios).where(owner(portfolioId, request.principalId!))
+    if (!row) return reply.code(404).send({ error: { code: 'not_found' } })
+    await reconcile(portfolioId)
+    return { portfolioId, status: 'reconciled' }
   })
   app.put(path + '/markets', async (request, reply) => {
     const params = portfolioParam.safeParse(request.params)
@@ -50,10 +70,7 @@ export function registerTrackingRoutes(app: FastifyInstance, db: Database) {
         .where(owner(portfolioId, request.principalId!)).for('update')
       if (!portfolio) return 'not_found'
       const catalog = ids.length ? await tx.select().from(markets).where(inArray(markets.id, ids)) : []
-      if (catalog.length !== ids.length || catalog.some((market) => !(
-        (market.providerCode === 'kalshi' && /^[A-Z0-9][A-Z0-9_.-]{0,127}$/.test(market.externalId) && market.settlementAssetCode === 'USD')
-        || (market.providerCode === 'polymarket' && /^0x[0-9a-f]{64}$/i.test(market.externalId)
-          && ['USDC', 'PUSD'].includes(market.settlementAssetCode ?? ''))))) return 'market_not_supported'
+      if (catalog.length !== ids.length || catalog.some((market) => !trackableMarket(market))) return 'market_not_supported'
       await tx.delete(marketWatches).where(eq(marketWatches.portfolioId, portfolioId))
       for (const marketId of [...ids].sort()) {
         await tx.insert(marketTracking).values({ marketId }).onConflictDoNothing()

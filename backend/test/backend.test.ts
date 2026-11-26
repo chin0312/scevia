@@ -1,3 +1,4 @@
+import { sharedTrackingEvidence } from '../src/tracking/evidence.js'
 import { TrackingWorker } from '../src/tracking/worker.js'
 import { initializeTrackedAccounts } from '../src/tracking/routes.js'
 import { kalshiMarketChoice } from '../src/providers/kalshi/market-data.js'
@@ -154,6 +155,13 @@ describe('migrations and canonical persistence', () => {
     await setup(app, roots[0]!)
     await setup(other, roots[1]!)
     expect((await app.inject({ method: 'GET', url: roots[1] + '/tracking', headers })).statusCode).toBe(404)
+    for (const [index, server] of [app, other].entries()) {
+      const tracking = roots[index] + '/tracking'
+      expect((await server.inject({ method: 'POST', url: tracking + '/reconcile', headers })).statusCode).toBe(200)
+      expect((await server.inject({ method: 'PUT', url: tracking + '/markets', headers, payload: { markets: [] } })).statusCode).toBe(200)
+      expect((await server.inject({ method: 'GET', url: tracking, headers })).json()).toMatchObject({ markets: [],
+        holdingsMarkets: [{ marketId: market!.id }] })
+    }
     let quoteAt = '2026-01-03T00:00:00.000Z'
     let price = '0.6'
     const lookup = vi.fn(async () => {
@@ -194,6 +202,56 @@ describe('migrations and canonical persistence', () => {
     await due()
     await restarted.market(signal)
     expect((await database.select().from(marketTracking))[0]?.failures).toBe(0)
+    const url = roots[0] + '/tracking/valuation'
+    const firstValue = await app.inject({ method: 'GET', url, headers })
+    expect(firstValue.statusCode, firstValue.body).toBe(200)
+    const firstRevision = firstValue.json()
+    const conditional = await app.inject({ method: 'GET', url, headers: { ...headers, 'if-none-match': firstValue.headers.etag! } })
+    expect(conditional.statusCode).toBe(304)
+    quoteAt = new Date().toISOString()
+    price = '0.7'
+    await due()
+    await restarted.market(signal)
+    const updated = (await app.inject({ method: 'GET', url, headers })).json()
+    expect(updated.financialRevision).toBe(firstRevision.financialRevision)
+    expect(updated.marketRevision).not.toBe(firstRevision.marketRevision)
+    expect(updated.cash).toContainEqual(expect.objectContaining({ portfolioValue: '103', balance: '96' }))
+    const replayed = (await app.inject({ method: 'GET', url: roots[0] + '/accounting?view=detail', headers })).json()
+    expect(updated.cash).toEqual(replayed.cash)
+    expect(updated.holdings).toEqual(replayed.holdings)
+    const open = (await app.inject({ method: 'GET', url: roots[0] + '/accounting/records', headers })).json()
+    const trade = open.items.find((row: { original: { id: string } }) => row.original.id === 'buy')
+    const changes = { changes: [{ key: trade.key, action: 'exclude' }] }
+    const proposal = await app.inject({ method: 'POST', url: roots[0] + '/accounting/adjustments/preview', headers, payload: changes })
+    expect(proposal.statusCode, proposal.body).toBe(200)
+    expect((await app.inject({ method: 'POST', url: roots[0] + '/accounting/adjustments/confirm', headers,
+      payload: { ...changes, revision: proposal.json().revision } })).statusCode).toBe(200)
+    const corrected = (await app.inject({ method: 'GET', url, headers })).json()
+    expect(corrected.financialRevision).not.toBe(updated.financialRevision)
+    expect(corrected.cash).toContainEqual(expect.objectContaining({ balance: '100' }))
+    expect((await app.inject({ method: 'POST', url: roots[0] + '/tracking/reconcile', headers })).statusCode).toBe(200)
+    expect((await app.inject({ method: 'GET', url: roots[0] + '/tracking', headers })).json().holdingsMarkets).toEqual([])
+    const storedAt = '2026-01-01T00:00:00Z'
+    await pool.query(`insert into scevia.shared_market_observations
+      (instrument_id, asset, method, price, retrieved_at, effective_at, source, revision)
+      select $1, 'USD', 'book_midpoint', 0.5, tick, tick, 'fixture', 'fixture:' || tick::text
+      from generate_series($2::timestamptz, '2026-04-01T00:00:00Z'::timestamptz, interval '5 minutes') tick`, [leg!.id, storedAt])
+    const batch = { batchId: 'fixture', row: 1, observation: { venue: 'kalshi', account: 'fixture', id: 'buy', asset: 'USD',
+      type: 'buy' as const, instrument: leg!.id, canonicalInstrumentId: leg!.id, timestamp: storedAt.replace('Z', '.000Z'),
+      sequence: null, quantity: '1', amount: null, fee: '0', feeAsset: 'USD', price: '0.4' } }
+    for (const [days, from] of [[30, '2026-03-02'], [90, '2026-01-01'], [180, '2025-10-03']] as const) {
+      const started = performance.now()
+      const history = await sharedTrackingEvidence(database, [batch], '2026-04-01T00:00:00.000Z', from + 'T00:00:00.000Z')
+      if (process.env.TRACKING_BENCHMARK === 'YES') process.stdout.write(JSON.stringify({
+        fixtureObservations: 25921, days, projected: history.evidence.length, queryMs: Math.round(performance.now() - started),
+      }) + '\n')
+      expect(history.truncated).toBe(false)
+      expect(history.evidence.length).toBeLessThan(100)
+      expect(history.evidence).toContainEqual(expect.objectContaining({ observation: expect.objectContaining({
+        timestamp: (from < '2026-01-01' ? '2026-01-01T23:55:00.000Z' : from + 'T00:00:00.000Z'),
+      }) }))
+    }
+
   })
 
   it('schedules only locally approved, enabled account sources and resumes an expired job lease', async () => {
@@ -214,6 +272,57 @@ describe('migrations and canonical persistence', () => {
     await database.update(providerAccounts).set({ disabledAt: new Date() }).where(eq(providerAccounts.id, first!.id))
     await database.update(accountTracking).set({ nextAttemptAt: new Date(0) })
     expect(await worker.account(signal)).toBe(false)
+  })
+
+  it('settles an owned captured demo from shared verified lifecycle evidence', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'scevia-tracked-demo-'))
+    try {
+      const path = join(directory, 'fixture-capture.json')
+      const capturedAt = '2026-01-03T00:00:00.000Z'
+      const tradeAt = '2026-01-02T00:00:00.000Z'
+      const closedAt = '2026-01-04T00:00:00.000Z'
+      const resolvedAt = '2026-01-05T00:00:00.000Z'
+      const market = { provider: 'kalshi', asset: 'USD', nativeMarket: 'FIXTURE-TRACK', nativeEvent: 'FIXTURE-EVENT',
+        title: 'Fixture tracked market', eventTitle: 'Fixture event', category: null, lifecycle: 'open', resolvesAt: null,
+        retrievedAt: capturedAt, source: 'authorized_capture',
+        outcomes: [{ instrument: 'FIXTURE-TRACK:yes', name: 'YES' }, { instrument: 'FIXTURE-TRACK:no', name: 'NO' }] }
+      await writeFile(path, JSON.stringify({ evidenceKind: 'authorized_capture', capturedAt, markets: [market],
+        capital: [{ provider: 'kalshi', asset: 'USD', amount: '100', openedAt: '2026-01-01T00:00:00.000Z' }],
+        quotes: [{ provider: 'kalshi', nativeMarket: market.nativeMarket, instrument: 'FIXTURE-TRACK:yes', price: '0.4',
+          method: 'historical_close', source: 'authorized_capture', observedAt: tradeAt, retrievedAt: capturedAt }],
+        trades: [{ id: 'buy', quoteIndex: 0, quantity: '10', direction: 'buy', assumedFee: '0' }],
+      }))
+      const app = await buildApp({ database, config: { ...testConfig(), demoDataset: { path, cacheMs: 1000, allowFixture: true } } })
+      openApps.push(app)
+      const headers = { authorization: `Bearer ${TOKEN}` }
+      const created = await app.inject({ method: 'POST', url: '/v1/demo', headers, payload: {} })
+      expect(created.statusCode, created.body).toBe(200)
+      const root = '/v1/portfolios/' + created.json().portfolioId
+      expect((await app.inject({ method: 'POST', url: root + '/tracking/reconcile', headers })).statusCode).toBe(200)
+      expect((await app.inject({ method: 'GET', url: root + '/tracking', headers })).json().holdingsMarkets)
+        .toContainEqual(expect.objectContaining({ nativeMarket: market.nativeMarket }))
+      const lookup = vi.fn().mockResolvedValueOnce({ marketTicker: market.nativeMarket, eventTicker: market.nativeEvent,
+        establishedPayoutUnit: '1', lifecycle: 'closed', retrievedAt: closedAt, resolution: null })
+        .mockResolvedValueOnce({ marketTicker: market.nativeMarket, eventTicker: market.nativeEvent,
+          establishedPayoutUnit: '1', lifecycle: 'resolved', retrievedAt: resolvedAt, resolution: null })
+        .mockResolvedValueOnce({ marketTicker: market.nativeMarket, eventTicker: market.nativeEvent,
+          establishedPayoutUnit: '1', lifecycle: 'resolved', retrievedAt: resolvedAt,
+          resolution: { knownAt: resolvedAt, winningInstrument: 'FIXTURE-TRACK:yes', unitPayout: '1' } })
+      const worker = new TrackingWorker(database, { kalshi: { lookup }, accountIds: [], marketIntervalMs: 300_000, accountIntervalMs: 300_000,
+        ingestion: { syncProviderAccount: vi.fn() } })
+      const poll = async () => {
+        await database.update(marketTracking).set({ nextAttemptAt: new Date(0) })
+        expect(await worker.market(new AbortController().signal)).toBe(true)
+      }
+      const state = async (asOf: string) => (await app.inject({ method: 'GET', url: root + '/accounting?view=detail&asOf=' + asOf, headers })).json()
+      await poll()
+      expect((await state(closedAt)).cash[0].balance).toBe('96')
+      await poll()
+      expect((await state(resolvedAt)).cash[0]).toMatchObject({ balance: null, historyCoverage: 'declared_with_unresolved_evidence' })
+      await poll()
+      expect((await state(resolvedAt)).cash[0]).toMatchObject({ balance: '106', realized: '6', historyCoverage: 'simulated_ledger_complete' })
+      expect((await state(closedAt)).cash[0].balance).toBe('96')
+    } finally { await rm(directory, { recursive: true, force: true }) }
   })
 
   it('replays a versioned demo capture and isolates user corrections, scenarios and resets', async () => {
@@ -577,6 +686,15 @@ describe('migrations and canonical persistence', () => {
         return Object.fromEntries(data.map((row) => [row.id.split(':').at(-1), Number(row.quantity)]))
       }
       expect(await currentLegs()).toEqual({ yes: 0, no: 2.5 })
+      const held = (await database.select().from(positionSnapshots).where(eq(positionSnapshots.providerAccountId, account!.id)))
+        .find((row) => Number(row.quantity) === 2.5)!
+      const mark = new Date(Date.now() + 1000)
+      await database.insert(sharedMarketObservations).values({ instrumentId: held.instrumentId, asset: 'USD', method: 'book_midpoint',
+        price: '0.8', effectiveAt: mark, retrievedAt: mark, source: 'kalshi_book', revision: 'shared-reported' })
+      const repriced = await app.inject({ method: 'GET',
+        url: '/v1/portfolios/' + PORTFOLIO_ID + '/analytics/exposure?asset=USD&venue=kalshi&asOf=' + encodeURIComponent(mark.toISOString()), headers })
+      expect(repriced.json().reportedExposure).toMatchObject({ knownPositionSubtotal: '2', portfolioNav: null })
+
       const prior = revision
       revision = new Date(Date.parse(revision) + 1000).toISOString()
       quantity = '3'

@@ -1,8 +1,9 @@
+import { lifecycleRank } from './demand.js'
 import { Decimal } from 'decimal.js'
 import { randomUUID } from 'node:crypto'
 import { and, asc, eq, exists, inArray, isNull, lt, lte, or } from 'drizzle-orm'
 import type { Database } from '../db/client.js'
-import { accountTracking, instruments, markets, marketTracking, marketWatches, providerAccounts, sharedMarketObservations } from '../db/schema.js'
+import { accountTracking, automaticMarketWatches, events, instruments, markets, marketTracking, marketWatches, providerAccounts, sharedMarketObservations } from '../db/schema.js'
 import { digest } from '../accounting/decisions.js'
 import type { IngestionService } from '../ingestion/sync.js'
 import type { KalshiMarketDataService } from '../providers/kalshi/market-data.js'
@@ -31,10 +32,12 @@ export class TrackingWorker {
     if (signal.aborted || !providers.length) return false
     const token = randomUUID()
     const job = await this.db.transaction(async (tx) => {
-      const [candidate] = await tx.select({ job: marketTracking, provider: markets.providerCode, native: markets.externalId, asset: markets.settlementAssetCode })
+      const [candidate] = await tx.select({ job: marketTracking, provider: markets.providerCode, native: markets.externalId, event: events.externalId, asset: markets.settlementAssetCode })
         .from(marketTracking).innerJoin(markets, eq(markets.id, marketTracking.marketId))
+        .innerJoin(events, eq(events.id, markets.eventId))
         .where(and(available(now, marketTracking), inArray(markets.providerCode, providers),
-          exists(tx.select({ id: marketWatches.portfolioId }).from(marketWatches).where(eq(marketWatches.marketId, marketTracking.marketId)))))
+          or(exists(tx.select({ id: marketWatches.portfolioId }).from(marketWatches).where(eq(marketWatches.marketId, marketTracking.marketId))),
+            exists(tx.select({ id: automaticMarketWatches.portfolioId }).from(automaticMarketWatches).where(eq(automaticMarketWatches.marketId, marketTracking.marketId))))))
         .orderBy(asc(marketTracking.nextAttemptAt), asc(marketTracking.marketId)).limit(1).for('update', { skipLocked: true })
       if (!candidate) return null
       await tx.update(marketTracking).set({ leaseToken: token, leaseUntil: leaseEnd(now), lastAttemptAt: now })
@@ -46,11 +49,15 @@ export class TrackingWorker {
     const key = and(eq(marketTracking.marketId, job.job.marketId), eq(marketTracking.leaseToken, token))
     try {
       let lifecycle: string
+      let metadataAt = new Date()
+      let resolution: typeof marketTracking.$inferSelect.resolution = null
       let quotes: Array<{ id: string; price: string; retrievedAt: Date; asset: string }>
       if (job.provider === 'kalshi' && this.input.kalshi) {
-        const market = await this.input.kalshi.lookup(job.native, taskSignal)
-        if (market.marketTicker !== job.native || market.establishedPayoutUnit !== '1') throw new Error('tracking_market_scope')
+        const market = await this.input.kalshi.lookup(job.native, taskSignal, false)
+        if (market.marketTicker !== job.native || market.eventTicker !== job.event || market.establishedPayoutUnit !== '1') throw new Error('tracking_market_scope')
         lifecycle = market.lifecycle
+        metadataAt = new Date(market.retrievedAt)
+        resolution = market.resolution
         quotes = lifecycle === 'open' ? market.outcomes.flatMap((leg) => leg.quote?.provenance.includes('midpoint')
           ? [{ id: leg.id, price: leg.quote.value, retrievedAt: new Date(leg.quote.retrievedAt), asset: 'USD' }] : []) : []
       } else if (this.input.polymarket) {
@@ -58,15 +65,22 @@ export class TrackingWorker {
       } else throw new Error('tracking_provider_unavailable')
       taskSignal.throwIfAborted()
       await this.db.transaction(async (tx) => {
-        const interval = lifecycle === 'open' ? this.input.marketIntervalMs : 3_600_000
-        const [claimed] = await tx.update(marketTracking).set({ lifecycle, failures: 0, lastSuccessAt: new Date(),
-          leaseUntil: null, leaseToken: null, nextAttemptAt: nextTime(new Date(), interval, 0) }).where(key).returning()
+        const [claimed] = await tx.select().from(marketTracking).where(key).for('update')
         if (!claimed) return
+        const monotonic = (!claimed.metadataAt || metadataAt >= claimed.metadataAt)
+          && lifecycleRank(lifecycle) >= lifecycleRank(claimed.lifecycle)
+        if (resolution && claimed.resolution && digest(resolution) !== digest(claimed.resolution)) throw new Error('tracking_resolution_conflict')
+        const effectiveLifecycle = monotonic ? lifecycle : claimed.lifecycle
         const native = await tx.select().from(instruments).where(eq(instruments.marketId, claimed.marketId)).limit(100)
-        for (const quote of quotes) {
+        if (resolution && !native.some((row) => row.externalId === resolution!.winningInstrument)) throw new Error('tracking_resolution_identity')
+        let newest = claimed.quoteAt
+        const eligible = new Set<string>()
+        for (const quote of effectiveLifecycle === 'open' ? quotes : []) {
           const leg = native.find((item) => item.externalId === quote.id
             && (item.settlementAssetCode ?? job.asset) === quote.asset)
           if (!leg) continue
+          eligible.add(leg.id)
+          if (!newest || quote.retrievedAt > newest) newest = quote.retrievedAt
           const source = job.provider === 'kalshi' ? 'kalshi_book' : 'polymarket_clob'
           const revision = digest([leg.id, quote.asset, source, quote.retrievedAt.toISOString()])
           const [existing] = await tx.select({ price: sharedMarketObservations.price }).from(sharedMarketObservations)
@@ -76,6 +90,13 @@ export class TrackingWorker {
             price: quote.price, observedAt: null, retrievedAt: quote.retrievedAt, effectiveAt: quote.retrievedAt, source,
             revision }).onConflictDoNothing()
         }
+        const interval = effectiveLifecycle === 'open' ? this.input.marketIntervalMs : 3_600_000
+        await tx.update(marketTracking).set({ lifecycle: effectiveLifecycle, failures: 0, lastSuccessAt: new Date(),
+          ...(monotonic ? { metadataAt, closedAt: claimed.closedAt ?? (lifecycle === 'closed' ? metadataAt : null), lifecycleAt: claimed.lifecycle !== lifecycle
+            ? metadataAt : claimed.lifecycleAt, resolution: claimed.resolution ?? resolution } : {}),
+          quoteAt: newest, quoteStatus: effectiveLifecycle !== 'open' ? 'inactive'
+            : eligible.size === 0 ? 'missing' : eligible.size < native.length ? 'partial' : 'observed',
+          leaseUntil: null, leaseToken: null, nextAttemptAt: nextTime(new Date(), interval, 0) }).where(key)
       })
     } catch {
       await this.db.update(marketTracking).set({ failures: job.job.failures + 1, leaseToken: null, leaseUntil: null,
