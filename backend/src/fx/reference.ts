@@ -10,6 +10,22 @@ export const reportingCurrency = z.enum(['USD', 'SGD', 'EUR', 'GBP', 'MYR'])
 export const fiatReferenceSource = z.enum(['ecb_euro_reference'])
 export const stablecoinReferenceSource = z.enum(['kraken_usdc_usd_ohlc', 'coingecko_polygon_pusd_usd', 'coingecko_polygon_pusd_usd_daily'])
 export const fxReferenceSource = z.union([fiatReferenceSource, stablecoinReferenceSource])
+export const defillamaContracts = { USDC: '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359', PUSD: polygonPusd } as const
+export const defillamaSource = { USDC: 'defillama_polygon_usdc_usd', PUSD: 'defillama_polygon_pusd_usd' } as const
+
+type TokenReference = { source: string; base: string; quote: string; methodology: string;
+  tokenIdentity?: { chain: string; contract: string; quoteBasis: string } | null | undefined }
+function validTokenReference(row: TokenReference) {
+  const coinGecko = row.source.startsWith('coingecko_polygon_pusd_usd')
+  const defillama = row.source.startsWith('defillama_polygon_')
+  if (!defillama && !coinGecko && !row.tokenIdentity) return true
+  const asset = row.base === 'PUSD' || row.base === 'USDC' && defillama ? row.base : null
+  if (!asset || row.quote !== 'USD' || row.methodology !== 'stablecoin_market_reference'
+    || defillama && row.source !== defillamaSource[asset]) return false
+  return row.tokenIdentity?.chain === 'polygon-pos' && row.tokenIdentity.contract === defillamaContracts[asset]
+    && row.tokenIdentity.quoteBasis === 'vendor_aggregated_fiat_usd'
+}
+
 export const referenceFamily = (source: string) => source === 'coingecko_polygon_pusd_usd_daily' ? 'coingecko_polygon_pusd_usd' : source
 export const fxEvidenceMode = z.enum(['knowledge', 'retrospective'])
 export type FxMode = z.infer<typeof fxEvidenceMode>
@@ -17,15 +33,14 @@ export const referenceInput = z.object({
   base: z.enum(['USD', 'SGD', 'EUR', 'GBP', 'MYR', 'USDC', 'PUSD']), quote: reportingCurrency,
   rate: z.string().regex(/^\d{1,12}(?:\.\d{1,18})?$/).refine((rate) => new Decimal(rate).gt(0)),
   source: z.string().min(1).max(120), methodology: z.enum(['fiat_reference', 'stablecoin_market_reference']),
-  tokenIdentity: z.object({ chain: z.literal('polygon-pos'), contract: z.literal(polygonPusd),
+  tokenIdentity: z.object({ chain: z.literal('polygon-pos'), contract: z.enum([polygonPusd, defillamaContracts.USDC]),
     quoteBasis: z.literal('vendor_aggregated_fiat_usd') }).strict().optional(),
   publishedAt: z.iso.datetime({ offset: true }).optional(),
   observedAt: z.iso.datetime({ offset: true }), retrievedAt: z.iso.datetime({ offset: true }),
 }).strict().refine((row) => row.base !== row.quote && Date.parse(row.observedAt) <= Date.parse(row.retrievedAt)
   && (!row.publishedAt || Date.parse(row.publishedAt) >= Date.parse(row.observedAt)
     && Date.parse(row.publishedAt) <= Date.parse(row.retrievedAt))
-  && (!row.tokenIdentity || row.base === 'PUSD' && row.quote === 'USD')
-  && (!row.source.startsWith('coingecko_polygon_pusd_usd') || !!row.tokenIdentity)
+  && validTokenReference(row)
   && (row.methodology === 'stablecoin_market_reference') === ['USDC', 'PUSD'].includes(row.base))
 
 const D = Decimal.clone({ precision: 60, rounding: Decimal.ROUND_HALF_EVEN })
@@ -45,6 +60,7 @@ function preferredReference(fiat: boolean, options: FxOptions) {
 const maxAge = (row: Row) => {
   if (row.methodology === 'fiat_reference') return 5 * 86_400_000
   if (row.source === 'coingecko_polygon_pusd_usd') return 6 * 3_600_000
+  if (row.source.startsWith('defillama_polygon_')) return 25 * 3_600_000
   return 86_400_000
 }
 
@@ -115,9 +131,7 @@ export function selectRate(rows: FxRows, base: string, quote: string, asOf: stri
         && (row.source !== 'ecb_euro_reference' || Math.floor(row.observedAt.getTime() / 86_400_000) < Math.floor(cutoff / 86_400_000))))
       && row.observedAt.getTime() <= cutoff && row.observedAt <= row.retrievedAt
       && (!row.publishedAt || row.publishedAt >= row.observedAt && row.publishedAt <= row.retrievedAt)
-      && (!row.source.startsWith('coingecko_polygon_pusd_usd') || row.base === 'PUSD' && row.quote === 'USD'
-        && row.tokenIdentity?.chain === 'polygon-pos' && row.tokenIdentity.contract === polygonPusd
-        && row.tokenIdentity.quoteBasis === 'vendor_aggregated_fiat_usd'))
+      && validTokenReference(row))
       .sort((a, b) => b.observedAt.getTime() - a.observedAt.getTime() || a.source.localeCompare(b.source)
         || a.retrievedAt.getTime() - b.retrievedAt.getTime() || a.revision.localeCompare(b.revision))
     const staleRows = matching.filter((row) => cutoff - row.observedAt.getTime() > maxAge(row))

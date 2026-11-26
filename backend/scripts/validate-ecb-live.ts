@@ -1,7 +1,6 @@
 import { strict as assert } from 'node:assert'
-import { z } from 'zod'
-import { polygonPusd } from '../src/providers/polymarket/collateral.js'
-import { reportAmounts, storeReferences } from '../src/fx/reference.js'
+import { archiveDefillama, refreshDefillama, sampleDefillama } from '../src/fx/defillama.js'
+import { reportAmounts } from '../src/fx/reference.js'
 import { Decimal } from 'decimal.js'
 import { PGlite } from '@electric-sql/pglite'
 import { PGLiteSocketServer } from '@electric-sql/pglite-socket'
@@ -14,8 +13,10 @@ import { buildApp } from '../src/http/app.js'
 const flags = process.argv.slice(2)
 const annual = flags.includes('--annual')
 const stablecoins = flags.includes('--confirm-defillama-evaluation')
+const stablecoinArchive = flags.includes('--defillama-coverage')
 if (!flags.includes('--confirm-ecb-reuse') || new Set(flags).size !== flags.length
-    || flags.some((flag) => !['--confirm-ecb-reuse', '--annual', '--confirm-defillama-evaluation'].includes(flag))) {
+    || stablecoinArchive && !stablecoins
+    || flags.some((flag) => !['--confirm-ecb-reuse', '--annual', '--confirm-defillama-evaluation', '--defillama-coverage'].includes(flag))) {
   throw new Error('Pass --confirm-ecb-reuse after reviewing ECB attribution and modification conditions')
 }
 
@@ -114,44 +115,13 @@ try {
 
   let stablecoinEvaluation
   if (stablecoins) {
-    const contracts = { PUSD: polygonPusd, USDC: '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359' } as const
-    const keys = Object.entries(contracts).map(([asset, contract]) => [asset, 'polygon:' + contract] as const)
-    const sample = z.object({ decimals: z.literal(6), price: z.number().positive(),
-      timestamp: z.number().int().positive(), confidence: z.number().min(0).max(1) })
-    const envelope = z.object({ coins: z.record(z.string(), sample) })
-    const samples: object[] = []
     const olderCutoff = 1764547200
     const recentCutoff = 1793059200
-    for (const cutoff of [null, olderCutoff, recentCutoff]) {
-      const target = cutoff === null ? 'current' : 'historical/' + cutoff
-      const response = await transport('https://coins.llama.fi/prices/' + target + '/' + keys.map(([, key]) => key).join(','),
-        { signal: AbortSignal.timeout(10_000), redirect: 'error' })
-      assert.equal(response.status, 200)
-      const reader = response.body!.getReader()
-      let bytes = 0
-      const chunks: Uint8Array[] = []
-      try {
-        for (;;) {
-          const { done, value } = await reader.read()
-          if (done) break
-          bytes += value.byteLength
-          assert(bytes < 8192, 'Unexpected DefiLlama payload size')
-          chunks.push(value)
-        }
-      } finally { await reader.cancel().catch(() => undefined) }
-      const { coins } = envelope.parse(JSON.parse(Buffer.concat(chunks).toString('utf8')))
-      const retrievedAt = new Date().toISOString()
-      for (const [asset, key] of keys) {
-        const observation = coins[key]
-        samples.push({ target, asset, available: !!observation, ...observation })
-        if (!observation || observation.confidence < 0.95 || (cutoff !== null && observation.timestamp > cutoff)) continue
-        await storeReferences(database, [{ base: asset, quote: 'USD',
-          rate: new D(observation.price).toDecimalPlaces(18).toFixed(), source: 'defillama_polygon_' + asset.toLowerCase() + '_usd',
-          methodology: 'stablecoin_market_reference', observedAt: new Date(observation.timestamp * 1000).toISOString(), retrievedAt,
-          ...(asset === 'PUSD' ? { tokenIdentity: { chain: 'polygon-pos', contract: polygonPusd,
-            quoteBasis: 'vendor_aggregated_fiat_usd' } } : {}) }])
-      }
-    }
+    const samples = [
+      await refreshDefillama(database, signal, transport),
+      await sampleDefillama(database, signal, olderCutoff, transport),
+      await sampleDefillama(database, signal, recentCutoff, transport),
+    ]
     const rows = await database.select().from(fxReferences)
     const valueAt = new Date().toISOString()
     const assets = ['PUSD', 'USDC'] as const
@@ -171,7 +141,11 @@ try {
     const knowledgePusd = await historical('PUSD', recentCutoff, 'knowledge')
     assert(archivedUsdc.rate && archivedPusd.rate)
     assert.equal(knowledgePusd.rate, null)
-    stablecoinEvaluation = { samples, quantityPerAsset: '100', combinedUsd: calculation.completeValue,
+    const archive = []
+    if (stablecoinArchive) {
+      for (const days of [30, 90, 365]) archive.push(await archiveDefillama(database, AbortSignal.timeout(20_000), days, transport))
+    }
+    stablecoinEvaluation = { samples, archive, quantityPerAsset: '100', combinedUsd: calculation.completeValue,
       archivedUsdc: archivedUsdc.rate, archivedPusd: archivedPusd.rate, olderPusd: oldPusd.rate }
   }
 

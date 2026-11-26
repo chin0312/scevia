@@ -17,7 +17,9 @@ export async function refreshEcb(db: Pick<Database, 'insert'>, signal: AbortSign
       rows.push(ecbRow(date, match[1]!, match[2]!, retrievedAt))
     }
   }
+  if (!rows.length) throw new Error('ecb_reference_empty')
   await storeReferences(db, rows)
+  return rows.map((row) => row.observedAt.slice(0, 10)).sort().at(-1)!
 }
 
 function ecbRow(date: string, quote: string, rate: string, retrievedAt: string) {
@@ -64,7 +66,12 @@ export async function refreshEcbAnnual(db: Pick<Database, 'insert'>, signal: Abo
 
 // ECB publishes around 16:00 Central European time on working days. The
 // UTC cutoff leaves a margin across both European daylight-saving regimes.
-export function nextEcbRefresh(now: Date) {
+export function nextEcbRefresh(now: Date, latestDate?: string) {
+  const hour = now.getUTCHours()
+  if (latestDate && latestDate < now.toISOString().slice(0, 10)
+    && now.getUTCDay() >= 1 && now.getUTCDay() <= 5 && hour >= 16 && hour < 18) {
+    return now.getTime() + 3_600_000
+  }
   const next = new Date(now)
   next.setUTCHours(16, 0, 0, 0)
   if (next <= now) next.setUTCDate(next.getUTCDate() + 1)

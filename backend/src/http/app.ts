@@ -601,8 +601,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       let ecbDueAt = 0
       while (!stop.signal.aborted) {
         const updates = await Promise.allSettled([
-          ...(options.config.ecbReferenceAuthorized && Date.now() >= ecbDueAt ? [refreshEcb(options.database, stop.signal).then(() => {
-            ecbDueAt = nextEcbRefresh(new Date())
+          ...(options.config.ecbReferenceAuthorized && Date.now() >= ecbDueAt ? [refreshEcb(options.database, stop.signal).then((latestDate) => {
+            ecbDueAt = nextEcbRefresh(new Date(), latestDate)
           })] : []),
           ...(pusdKey ? [refreshPusd(options.database, pusdKey, stop.signal)] : []),
           ...(options.config.krakenFxAuthorized ? [refreshUsdc(options.database, stop.signal)] : []),

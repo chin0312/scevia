@@ -1,7 +1,7 @@
 import { consolidatePerformance } from '../src/fx/consolidated.js'
 import { reportAmounts, selectRate } from '../src/fx/reference.js'
 import { polygonPusd } from '../src/providers/polymarket/collateral.js'
-import { nextEcbRefresh, refreshEcbAnnual } from '../src/fx/ecb.js'
+import { nextEcbRefresh, refreshEcb, refreshEcbAnnual } from '../src/fx/ecb.js'
 import type { Database } from '../src/db/client.js'
 import { describe, expect, it, vi } from 'vitest'
 import { analyzePerformance } from '../src/analytics/performance.js'
@@ -155,8 +155,22 @@ describe('ECB acquisition', () => {
     expect(values).toHaveBeenCalledTimes(1)
   })
 
+  it('rejects an empty or invalid ECB response and reports the date of a stored valid one', async () => {
+    const values = vi.fn(() => ({ onConflictDoNothing: vi.fn() }))
+    const db = { insert: vi.fn(() => ({ values })) } as unknown as Pick<Database, 'insert'>
+    const signal = new AbortController().signal
+    await expect(refreshEcb(db, signal, async () => new Response('<Cube/>'))).rejects.toThrow('ecb_reference_empty')
+    const feed = (rate: string) => async () => new Response('<Cube time="2025-11-20"><Cube currency="USD" rate="' + rate + '"/></Cube>')
+    await expect(refreshEcb(db, signal, feed('0'))).rejects.toThrow()
+    expect(values).not.toHaveBeenCalled()
+    await expect(refreshEcb(db, signal, feed('1.1'))).resolves.toBe('2025-11-20')
+  })
+
   it('schedules the next post-publication weekday check', () => {
     expect(nextEcbRefresh(new Date('2026-11-20T15:30:00Z'))).toBe(Date.parse('2026-11-20T16:00:00Z'))
-    expect(nextEcbRefresh(new Date('2026-11-20T16:30:00Z'))).toBe(Date.parse('2026-11-23T16:00:00Z'))
+    expect(nextEcbRefresh(new Date('2026-11-20T16:30:00Z'), '2026-11-20')).toBe(Date.parse('2026-11-23T16:00:00Z'))
+    expect(nextEcbRefresh(new Date('2026-11-20T16:30:00Z'), '2026-11-19')).toBe(Date.parse('2026-11-20T17:30:00Z'))
+    expect(nextEcbRefresh(new Date('2026-11-20T18:30:00Z'), '2026-11-19')).toBe(Date.parse('2026-11-23T16:00:00Z'))
+    expect(nextEcbRefresh(new Date('2026-11-21T16:30:00Z'), '2026-11-20')).toBe(Date.parse('2026-11-23T16:00:00Z'))
   })
 })
