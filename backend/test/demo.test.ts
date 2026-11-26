@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { demoMarketAt, parseDemoDataset } from '../src/demo/dataset.js'
 import { captureDemo } from '../src/demo/capture.js'
 import { KalshiClient } from '../src/providers/kalshi/client.js'
 import { KalshiMarketDataService } from '../src/providers/kalshi/market-data.js'
@@ -25,6 +26,44 @@ describe('demo capture and derived financial evidence', () => {
     await expect(captureDemo({ ...plan, trades: [{ ...plan.trades[0], observedAt: '2026-01-02T01:01:00Z' }] }, { kalshi }))
       .rejects.toThrow('demo_trade_observation_unavailable')
     await expect(captureDemo(plan, {})).rejects.toThrow('kalshi_demo_capture_not_authorized')
+  })
+
+  it('imports prior historical observations and reviewed Polymarket resolution with exact native scope', async () => {
+    const observedAt = '2026-01-02T01:00:00.000Z'
+    const executionAt = '2026-01-02T02:00:00.000Z'
+    const knownAt = '2026-02-01T00:00:00.000Z'
+    const retrievedAt = '2026-03-01T00:00:00.000Z'
+    const conditionId = 'condition'
+    const resolution = { knownAt, winningInstrument: 'token-yes', unitPayout: '1',
+      evidence: { source: 'reviewed_provider_evidence', reference: 'approval:fixture-proof', verifiedAt: retrievedAt } }
+    const selection = { provider: 'polymarket', conditionId, link: 'https://polymarket.com/event/fixture', asset: 'PUSD',
+      tradingOpensAt: '2026-01-01T00:00:00.000Z', tradingClosesAt: '2026-01-04T00:00:00.000Z', resolution }
+    const trade = { id: 'entry', marketIndex: 0, side: 'YES', executionAt, priorObservationMaxAgeSeconds: 3600,
+      quantity: '5', direction: 'buy', assumedFee: '0' }
+    const plan = { markets: [selection], trades: [trade],
+      capital: [{ provider: 'polymarket', asset: 'PUSD', openedAt: '2026-01-01T00:00:00.000Z', amount: '100' }],
+      capturedHistory: [{ provider: 'polymarket', nativeMarket: conditionId, instrument: 'token-yes', price: '0.42',
+        method: 'historical_close', source: 'authorized_capture', observedAt, retrievedAt }] }
+    const polymarket = {
+      resolve: async () => ({ retrievedAt, item: { eventId: 'event', title: 'Fixture title',
+        markets: [{ conditionId, title: 'Fixture market', lifecycle: 'resolved', endDate: knownAt,
+          outcomes: [{ assetId: 'token-yes', name: 'YES' }, { assetId: 'token-no', name: 'NO' }] }] } }),
+      priceHistory: async () => { throw new Error('unexpected_remote_history_request') },
+    }
+    const result = await captureDemo(plan, { polymarket }, () => retrievedAt)
+    expect(result.manifest.markets[0]).toMatchObject({ asset: 'PUSD', resolution })
+    expect(result.manifest.trades[0]).toMatchObject({ executionAt, quoteIndex: 0 })
+    expect(result.manifest.quotes[0]).toMatchObject({ observedAt, price: '0.42' })
+    await expect(captureDemo({ ...plan, trades: [{ ...trade, priorObservationMaxAgeSeconds: 3599 }] }, { polymarket }, () => retrievedAt))
+      .rejects.toThrow('unexpected_remote_history_request')
+    expect(() => parseDemoDataset({ ...result.manifest, trades: [{ ...result.manifest.trades[0], executionAt: selection.tradingClosesAt }] }))
+      .toThrow('invalid_demo_execution_reference')
+    expect(() => parseDemoDataset({ ...result.manifest, markets: [{ ...result.manifest.markets[0], resolution: { ...resolution, evidence: undefined } }] }))
+      .toThrow('invalid_demo_market_scope')
+    const initial = { ...result.manifest.markets[0]!, resolution: undefined, lifecycle: 'open' as const, retrievedAt: observedAt }
+    const capture = { ...result, dataset: result.manifest, priorMarkets: [initial] }
+    expect(demoMarketAt(capture, 'polymarket', 'simulation:' + result.revision + ':' + conditionId, selection.tradingClosesAt))
+      .toMatchObject({ lifecycle: 'closed', tradingAvailability: 'closed' })
   })
 
   it('settles the remainder after a partial exit and preserves unknown losing-side fees', () => {

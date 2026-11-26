@@ -31,7 +31,7 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
     }
     const authority = group.some((item) => item.authority === 'user_accepted') ? 'user_accepted'
       : group.some((item) => 'providerAccountId' in item) ? 'provider_evidence' : 'user_declared'
-    return [{ ...observation, economicId: id, authority, sources: sources(group) }]
+    return [{ ...observation, economicId: id, authority, managedHistory: observation.type === 'history_complete' && group.every((item) => item.acquisition === 'demo'), sources: sources(group) }]
   }).sort((a, b) => a.timestamp.localeCompare(b.timestamp)
     || Number(b.type === 'opening_inventory' || b.type === 'opening_cash')
       - Number(a.type === 'opening_inventory' || a.type === 'opening_cash')
@@ -45,7 +45,7 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
   }>()
   const cash = new Map<string, {
     venue: string; account: string; asset: string; delta: Decimal; opening: Decimal | null; openingAt: string | null
-    contributions: Decimal; unclassifiedCashFlow: boolean; realized: Decimal; fees: Decimal; posted: boolean; inventoryOpeningAt: string | null; coverageFrom: string | null; coverageThrough: string | null; incomplete: boolean; pnlIncomplete: boolean
+    contributions: Decimal; unclassifiedCashFlow: boolean; realized: Decimal; fees: Decimal; posted: boolean; inventoryOpeningAt: string | null; coverageFrom: string | null; coverageThrough: string | null; managedHistory: boolean; incomplete: boolean; pnlIncomplete: boolean
   }>()
   type FeeEffect = { kind: 'execution' | 'standalone' | 'funding'; amount: string | null }
   const ledger: Array<{
@@ -56,7 +56,7 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
     let state = cash.get(key)
     if (!state) {
       state = { venue: event.venue, account: event.account, asset, delta: zero(), opening: null, openingAt: null,
-        contributions: zero(), unclassifiedCashFlow: false, realized: zero(), fees: zero(), posted: false, inventoryOpeningAt: null, coverageFrom: null, coverageThrough: null, incomplete: false, pnlIncomplete: false }
+        contributions: zero(), unclassifiedCashFlow: false, realized: zero(), fees: zero(), posted: false, inventoryOpeningAt: null, coverageFrom: null, coverageThrough: null, managedHistory: false, incomplete: false, pnlIncomplete: false }
       cash.set(key, state)
     }
     return state
@@ -155,6 +155,7 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
       if (!event.coveredThrough || money.coverageFrom !== null) { reject('history_declaration_conflict'); continue }
       money.coverageFrom = event.timestamp
       money.coverageThrough = event.coveredThrough
+      money.managedHistory = event.managedHistory
       continue
     }
     if (event.type === 'opening_inventory') {
@@ -369,7 +370,7 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
     const declaredCoverage = entry.coverageFrom === null || entry.coverageThrough === null ? 'unverified'
       : asOf > entry.coverageThrough ? 'outside_declared_interval'
         : entry.openingAt !== entry.coverageFrom || entry.inventoryOpeningAt !== entry.coverageFrom ? 'opening_state_incompatible'
-          : affected(entry) ? 'declared_with_unresolved_evidence' : 'user_declared_complete'
+          : affected(entry) ? 'declared_with_unresolved_evidence' : entry.managedHistory ? 'simulated_ledger_complete' : 'user_declared_complete'
     return { venue: entry.venue, account: entry.account, asset: entry.asset,
       opening: entry.opening?.toFixed() ?? null, knownDelta: entry.delta.toFixed(), knownDeclaredContributions: entry.contributions.toFixed(),
       netContributions: entry.unclassifiedCashFlow || affected(entry) ? null : entry.contributions.toFixed(),

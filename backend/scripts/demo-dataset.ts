@@ -60,7 +60,7 @@ async function processDataset(action: 'validate' | 'refresh' | 'capture', path: 
             source: 'kalshi_book' as const, observedAt: null, retrievedAt: quote.retrievedAt }] : [])
         if (!['open', 'closed', 'resolved'].includes(item.lifecycle) || item.establishedPayoutUnit !== '1') continue
         const { feeSchedule: _priorFees, ...previous } = market
-        markets[index] = { ...previous, title: item.title, resolvesAt: item.expectedResolutionAt, lifecycle: item.lifecycle as typeof market.lifecycle,
+        markets[index] = { ...previous, title: item.title, tradingOpensAt: item.tradingOpensAt, tradingClosesAt: item.tradingClosesAt, resolvesAt: item.expectedResolutionAt, lifecycle: item.lifecycle as typeof market.lifecycle,
           retrievedAt: item.retrievedAt, source: 'kalshi_trade_api',
           ...(item.resolution ? { resolution: item.resolution } : {}), ...(item.feeSchedule ? { feeSchedule: item.feeSchedule } : {}) }
         quotes.push(...observed)

@@ -194,6 +194,13 @@ describe('migrations and canonical persistence', () => {
       expect(cashByAsset(first.cash, 'USD')).toMatchObject({ balance: '98', portfolioValue: '105', knownRealized: '3' })
       expect(cashByAsset(first.cash, 'PUSD')).toMatchObject({ balance: '47.5', portfolioValue: '52.5' })
       expect(cashByAsset((await get('/accounting?view=detail&asOf=' + tradeAt)).json().cash, 'USD')).toMatchObject({ portfolioValue: '99', knownRealized: '0' })
+      const performance = async (asOf: string, gain: string, twr: string) => {
+        const query = new URLSearchParams({ from: start, asOf, asset: 'USD', accounts: cashByAsset(first.cash, 'USD').account })
+        const response = await get('/analytics/performance?' + query)
+        expect(response.statusCode, response.body).toBe(200)
+        expect(response.json()).toMatchObject({ bridge: { netInvestmentGain: { value: gain } }, returns: { twr: { value: twr } } })
+      }
+      await performance(capturedAt, '5', '0.05')
       const records = (await get('/accounting/records')).json()
       const fill = records.items.find((row: { original: { id: string } }) => row.original.id === 'simulation:trade:open')
       expect(fill.acquisition).toBe('demo')
@@ -249,29 +256,52 @@ describe('migrations and canonical persistence', () => {
       expect(refresh.json().catalogRevision).toBe(revision)
       const updated = (await get('/accounting?view=detail&asOf=' + refreshedAt)).json()
       expect(cashByAsset(updated.cash, 'USD')).toMatchObject({ balance: '97.2', portfolioValue: '106.8' })
+      await performance(refreshedAt, '6.8', '0.068')
       expect(updated.holdings).toContainEqual(expect.objectContaining({ quantity: '12', basis: '5.8' }))
       const oldOwner = await other.inject({ method: 'GET', url: '/v1/portfolios/' + otherId + '/accounting?view=detail&asOf=' + capturedAt, headers })
       expect(cashByAsset(oldOwner.json().cash, 'USD').portfolioValue).toBe('105')
-      const lifecycleRefresh = async (lifecycle: 'closed' | 'resolved', time: string, currentRevision: string) => {
-        const resolution = lifecycle === 'resolved' ? {
-          knownAt: '2026-11-26T04:30:00Z', winningInstrument: 'SAMPLE-OPEN:yes', unitPayout: '1',
+      const lifecycleRefresh = async (lifecycle: 'open' | 'closed' | 'resolved', time: string, currentRevision: string,
+        winningInstrument: string | null = 'SAMPLE-OPEN:yes', conflict = false) => {
+        const resolution = lifecycle === 'resolved' && winningInstrument ? {
+          knownAt: '2026-11-26T04:30:00Z', winningInstrument, unitPayout: '1',
         } : undefined
         await writeFile(path, JSON.stringify({ ...dataset, capturedAt: time, markets: dataset.markets.map((row, index) =>
-          index === 0 ? { ...row, lifecycle, retrievedAt: time, ...(resolution ? { resolution } : {}) } : row) }))
+          index === 0 ? { ...row, lifecycle, retrievedAt: time, resolvesAt: '2026-11-26T04:30:00Z',
+            tradingClosesAt: '2026-11-26T04:00:00Z', ...(resolution ? { resolution } : {}) } : row) }))
         const server = await buildApp({ database, config: { ...testConfig(), demoDataset: { path, cacheMs: 10_000, allowFixture: true } } })
         openApps.push(server)
         const apply = (revision: string) => server.inject({ method: 'POST', url: '/v1/demo/refresh', headers, payload: { portfolioId, revision } })
         const result = await apply(currentRevision)
+        if (conflict) {
+          expect(result.statusCode, result.body).toBe(409)
+          expect(result.json()).toMatchObject({ error: { code: 'demo_resolution_conflict' } })
+          return currentRevision
+        }
         expect(result.statusCode, result.body).toBe(200)
+        expect(result.json().markets[0].latestRetrievedAt).toBe(new Date(time).toISOString())
         expect(result.json().markets[0].lifecycle).toBe(lifecycle)
         expect((await apply(result.json().revision)).json().revision).toBe(result.json().revision)
         return result.json().revision
       }
-      const afterClose = await lifecycleRefresh('closed', '2026-11-26T04:00:00Z', refresh.json().revision)
+      const metadataOnly = await lifecycleRefresh('open', '2026-11-26T03:15:00Z', refresh.json().revision)
+      const observedAgain = await lifecycleRefresh('open', '2026-11-26T03:25:00Z', metadataOnly)
+      const [stored] = await database.select({ demo: portfolios.demo }).from(portfolios).where(eq(portfolios.id, portfolioId))
+      expect(stored?.demo?.priorMarkets).toHaveLength(1)
+      expect(stored?.demo?.dataset.markets[0]).toMatchObject({ retrievedAt: '2026-11-26T03:15:00.000Z',
+        tradingClosesAt: '2026-11-26T04:00:00.000Z' })
+      const afterClose = await lifecycleRefresh('closed', '2026-11-26T04:00:00Z', observedAgain)
       const cashAt = async (asOf: string) => cashByAsset((await get('/accounting?view=detail&asOf=' + asOf)).json().cash, 'USD')
       expect((await cashAt('2026-11-26T04:20:00Z')).balance).toBe('97.2')
-      await lifecycleRefresh('resolved', '2026-11-26T05:00:00Z', afterClose)
-      expect(await cashAt('2026-11-26T05:00:00Z')).toMatchObject({ balance: '109.2', knownRealized: '9.2', historyCoverage: 'outside_declared_interval' })
+      const unverifiedAt = '2026-11-26T04:45:00Z'
+      const unverified = await lifecycleRefresh('resolved', unverifiedAt, afterClose, null)
+      expect(await cashAt(unverifiedAt)).toMatchObject({ historyCoverage: 'declared_with_unresolved_evidence', balance: null })
+      const unverifiedQuery = new URLSearchParams({ from: start, asOf: unverifiedAt, asset: 'USD', accounts: cashByAsset(first.cash, 'USD').account })
+      expect((await get('/analytics/performance?' + unverifiedQuery)).json()).toMatchObject({ returns: { twr: { value: null } } })
+      const afterResolution = await lifecycleRefresh('resolved', '2026-11-26T05:00:00Z', unverified)
+      await lifecycleRefresh('resolved', '2026-11-26T05:10:00Z', afterResolution, 'SAMPLE-OPEN:no', true)
+      expect(await cashAt('2026-11-26T05:00:00Z')).toMatchObject({ balance: '109.2', knownRealized: '9.2', historyCoverage: 'simulated_ledger_complete' })
+      expect(await cashAt('2026-11-26T05:05:00Z')).toMatchObject({ historyCoverage: 'outside_declared_interval' })
+      await performance('2026-11-26T05:00:00Z', '9.2', '0.092')
       const correct = async (action: string, quantity?: string) => {
         const changes = { changes: [{ key: fill.key, action, ...(quantity ? { correction: { quantity } } : {}) }] }
         const update = await post('/accounting/adjustments/preview', changes)
@@ -280,10 +310,12 @@ describe('migrations and canonical persistence', () => {
       }
       await correct('correct', '20')
       expect(await cashAt('2026-11-26T05:00:00Z')).toMatchObject({ balance: '114', knownRealized: '14' })
+      await performance('2026-11-26T05:00:00Z', '14', '0.14')
       await correct('correct', '10')
       expect(await cashAt('2026-11-26T05:00:00Z')).toMatchObject({ balance: '108', knownRealized: '8' })
       await correct('exclude')
       expect((await cashAt('2026-11-26T05:00:00Z')).balance).toBe('103')
+      await performance('2026-11-26T05:00:00Z', '3', '0.03')
       await correct('restore')
       expect((await cashAt('2026-11-26T05:00:00Z')).balance).toBe('108')
       expect((await get('/scenarios/denomination-scenarios/' + saved.json().id)).json().result.indicativeUsd.value).toBe('156.525')

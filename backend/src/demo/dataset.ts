@@ -13,12 +13,12 @@ const provider = z.enum(['kalshi', 'polymarket'])
 const scope = z.object({ provider, asset })
 const market = scope.extend({
   nativeMarket: id, nativeEvent: id, publicLink: z.url().max(2048).optional(), title: z.string().min(1).max(500), eventTitle: z.string().min(1).max(500), category: z.string().max(100).nullable(),
-  lifecycle: z.enum(['open', 'closed', 'resolved']), resolvesAt: instant.nullable(), retrievedAt: instant,
+  lifecycle: z.enum(['open', 'closed', 'resolved']), tradingOpensAt: instant.nullable().optional(), tradingClosesAt: instant.nullable().optional(), resolvesAt: instant.nullable(), retrievedAt: instant,
   source: z.enum(['kalshi_trade_api', 'polymarket_gamma', 'authorized_capture']),
   outcomes: z.array(z.object({ instrument: id, name: z.enum(['YES', 'NO']) }).strict()).length(2),
   feeSchedule: z.object({ version: z.literal('kalshi-centicent-quadratic-v1'), rate: nonnegative, makerRate: nonnegative,
     retrievedAt: instant, source: z.enum(['kalshi_series', 'kalshi_event_override']), denomination: z.literal('USD') }).strict().optional(),
-  resolution: z.object({ knownAt: instant, winningInstrument: id, unitPayout: z.literal('1'), simulatedPayoutAt: instant.optional() }).strict().optional(),
+  resolution: z.object({ knownAt: instant, winningInstrument: id, unitPayout: z.literal('1'), simulatedPayoutAt: instant.optional(), evidence: z.object({ source: z.literal('reviewed_provider_evidence'), reference: z.string().min(1).max(500), verifiedAt: instant }).strict().optional() }).strict().optional(),
 }).strict()
 const quote = z.object({
   provider, nativeMarket: id, instrument: id, price: nonnegative.refine((value) => new Decimal(value).lte(1)),
@@ -31,13 +31,21 @@ export const demoDatasetSchema = z.object({
   markets: z.array(market).min(1).max(50), quotes: z.array(quote).min(1).max(2000),
   capital: z.array(scope.extend({ openedAt: instant, amount: positive }).strict()).min(1).max(3),
   trades: z.array(z.object({ id, quoteIndex: z.number().int().min(0).max(1999), quantity: positive,
-    direction: z.enum(['buy', 'sell']), assumedFee: nonnegative.nullable() }).strict()).min(1).max(100),
+    direction: z.enum(['buy', 'sell']), executionAt: instant.optional(), assumedFee: nonnegative.nullable() }).strict()).min(1).max(100),
 }).strict()
 export type DemoDataset = z.infer<typeof demoDatasetSchema>
 export const accountKey = ({ provider: venue, asset: denomination }: { provider: string; asset: string }) => venue + ':' + denomination
 export const marketKey = ({ provider: venue, nativeMarket }: { provider: string; nativeMarket: string }) => venue + ':' + nativeMarket
 export const availableAt = (quote: DemoDataset['quotes'][number]) => quote.method === 'historical_close' && quote.observedAt
   ? quote.observedAt : quote.retrievedAt
+
+export const executionAt = (trade: DemoDataset['trades'][number], quote: DemoDataset['quotes'][number]) =>
+  trade.executionAt ?? availableAt(quote)
+
+export function demoMarketFingerprint({ retrievedAt: _retrievedAt, feeSchedule, ...row }: DemoDataset['markets'][number]) {
+  const { retrievedAt: _feeRetrievedAt, ...fee } = feeSchedule ?? {}
+  return digest([row, fee])
+}
 
 export function parseDemoDataset(value: unknown, allowFixture = false) {
   const manifest = demoDatasetSchema.parse(value)
@@ -53,7 +61,10 @@ export function parseDemoDataset(value: unknown, allowFixture = false) {
       || (row.provider === 'polymarket' && row.asset === 'USD') || row.nativeMarket.startsWith('demo:')
       || new Set(row.outcomes.map((leg) => leg.instrument)).size !== 2 || new Set(row.outcomes.map((leg) => leg.name)).size !== 2
       || (row.feeSchedule && (row.provider !== 'kalshi' || row.feeSchedule.retrievedAt > manifest.capturedAt))
+      || (row.tradingOpensAt && row.tradingClosesAt && row.tradingOpensAt >= row.tradingClosesAt)
       || (row.resolution && (row.lifecycle !== 'resolved' || row.resolution.knownAt > row.retrievedAt
+        || (row.provider === 'polymarket' && manifest.evidenceKind === 'authorized_capture' && !row.resolution.evidence)
+        || (row.resolution.evidence && (row.resolution.evidence.verifiedAt < row.resolution.knownAt || row.resolution.evidence.verifiedAt > row.retrievedAt))
         || (row.resolution.simulatedPayoutAt !== undefined && row.resolution.simulatedPayoutAt < row.resolution.knownAt)
         || !row.outcomes.some((leg) => leg.instrument === row.resolution!.winningInstrument)))) throw new Error('invalid_demo_market_scope')
   }
@@ -67,8 +78,12 @@ export function parseDemoDataset(value: unknown, allowFixture = false) {
   for (const row of manifest.trades) {
     const price = manifest.quotes[row.quoteIndex]
     const source = price && markets.get(marketKey(price))
-    if (!price || !source || price.method === 'last_trade' || !new Decimal(price.price).gt(0) || availableAt(price) < capital.get(accountKey(source))!.openedAt
-      || (source.resolution && availableAt(price) >= source.resolution.knownAt)) throw new Error('invalid_demo_execution_reference')
+    if (!price || !source || price.method === 'last_trade' || !new Decimal(price.price).gt(0)) throw new Error('invalid_demo_execution_reference')
+    const time = executionAt(row, price)
+    if (time < availableAt(price) || time > manifest.capturedAt || time < capital.get(accountKey(source))!.openedAt
+      || (source.tradingOpensAt && time < source.tradingOpensAt) || (source.tradingClosesAt && time >= source.tradingClosesAt)
+      || (source.lifecycle !== 'open' && time >= source.retrievedAt)
+      || (source.resolution && time >= source.resolution.knownAt)) throw new Error('invalid_demo_execution_reference')
   }
   return { manifest, revision: digest(manifest) }
 }
@@ -97,5 +112,9 @@ export function demoMarketAt(capture: { revision: string; catalogRevision?: stri
   const prior = active.retrievedAt <= cutoff ? active : (capture.priorMarkets ?? [])
     .filter((row) => matches(row) && row.retrievedAt <= cutoff).sort((left, right) => right.retrievedAt.localeCompare(left.retrievedAt))[0]
   const resolutionKnown = active.resolution && active.resolution.knownAt <= cutoff
-  return { identity: active, asOf: prior, lifecycle: resolutionKnown ? 'resolved' : prior?.lifecycle ?? 'unknown' }
+  const lifecycle = resolutionKnown ? 'resolved' : prior?.lifecycle === 'open' && prior.tradingClosesAt && cutoff >= prior.tradingClosesAt
+    ? 'closed' : prior?.lifecycle ?? 'unknown'
+  return { identity: active, asOf: prior, lifecycle,
+    tradingAvailability: lifecycle === 'closed' || lifecycle === 'resolved' ? 'closed'
+      : prior?.lifecycle === 'open' && prior.tradingOpensAt && cutoff >= prior.tradingOpensAt ? 'open' : 'unverified' }
 }

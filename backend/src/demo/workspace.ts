@@ -8,7 +8,7 @@ import { upsertMarket } from '../ingestion/persistence.js'
 import type { FinancialObservation } from '../accounting/model.js'
 import { digest } from '../accounting/decisions.js'
 import { replayAccounting } from '../accounting/ledger.js'
-import { accountKey, availableAt, marketKey, readDemoDataset } from './dataset.js'
+import { accountKey, availableAt, demoMarketFingerprint, executionAt, marketKey, readDemoDataset } from './dataset.js'
 
 export function registerDemoRoutes(app: FastifyInstance, db: Database, settings?: { path: string; cacheMs: number; allowFixture: boolean }) {
   let cache: { value: Promise<Awaited<ReturnType<typeof readDemoDataset>>>; expires: number } | undefined
@@ -21,7 +21,15 @@ export function registerDemoRoutes(app: FastifyInstance, db: Database, settings?
   const payload = (row: { id: string; demo: NonNullable<typeof portfolios.$inferSelect.demo> }) => ({
     status: 'available', portfolioId: row.id, mode: row.demo.dataset.evidenceKind === 'fixture' ? 'fixture' : 'demo',
     revision: row.demo.revision, catalogRevision: row.demo.catalogRevision ?? row.demo.revision, capturedAt: row.demo.dataset.capturedAt,
-    marketEvidence: 'captured', transactions: 'hypothetical', markets: row.demo.dataset.markets,
+    marketEvidence: 'captured', transactions: 'hypothetical', markets: row.demo.dataset.markets.map((market) => ({
+      ...market, latestRetrievedAt: row.demo.marketRetrievedAt?.[marketKey(market)] ?? market.retrievedAt,
+    })),
+    trades: row.demo.dataset.trades.map((trade) => {
+      const quote = row.demo.dataset.quotes[trade.quoteIndex]!
+      const time = executionAt(trade, quote)
+      return { id: trade.id, quoteIndex: trade.quoteIndex, executionAt: time,
+        priceAssumption: time === availableAt(quote) ? 'at_reference_time' : 'prior_observation' }
+    }),
     quotes: row.demo.dataset.quotes.map((quote) => ({ ...quote, effectiveAt: availableAt(quote),
       freshness: Date.now() - Date.parse(quote.retrievedAt) > 86_400_000 ? 'stale_capture' : 'recent_capture' })),
   })
@@ -55,11 +63,23 @@ export function registerDemoRoutes(app: FastifyInstance, db: Database, settings?
       const matches = (original: typeof demo.dataset.markets[number], incoming: typeof demo.dataset.markets[number]) =>
         incoming.asset === original.asset && incoming.nativeEvent === original.nativeEvent
         && original.outcomes.every((leg) => incoming.outcomes.some((item) => item.instrument === leg.instrument && item.name === leg.name))
+      const marketRetrievedAt = { ...demo.marketRetrievedAt }
+      for (const original of demo.dataset.markets) {
+        const incoming = capturedMarkets.get(marketKey(original))
+        if (incoming && matches(original, incoming) && original.resolution && incoming.resolution
+          && (original.resolution.winningInstrument !== incoming.resolution.winningInstrument
+            || original.resolution.knownAt !== incoming.resolution.knownAt
+            || original.resolution.simulatedPayoutAt !== incoming.resolution.simulatedPayoutAt)) {
+          return { status: 'resolution_conflict' as const }
+        }
+      }
       const updatedMarkets = demo.dataset.markets.map((original) => {
         const incoming = capturedMarkets.get(marketKey(original))
-        if (!incoming || !matches(original, incoming) || incoming.retrievedAt <= original.retrievedAt
+        if (!incoming || !matches(original, incoming) || incoming.retrievedAt <= (marketRetrievedAt[marketKey(original)] ?? original.retrievedAt)
           || rank[incoming.lifecycle] < rank[original.lifecycle]) return original
-        return { ...incoming, ...(original.resolution ? { resolution: original.resolution } : {}) }
+        marketRetrievedAt[marketKey(original)] = incoming.retrievedAt
+        const merged = { ...incoming, ...(original.resolution ? { resolution: original.resolution } : {}) }
+        return demoMarketFingerprint(merged) === demoMarketFingerprint(original) ? original : merged
       })
       const marketRevisions = new Map(updatedMarkets.map((row) => [marketKey(row), row]))
       const previousQuoteTimes = new Map<string, string>()
@@ -75,7 +95,7 @@ export function registerDemoRoutes(app: FastifyInstance, db: Database, settings?
           && quote.method === 'book_midpoint'
           && quote.retrievedAt > (previousQuoteTimes.get(JSON.stringify([marketKey(quote), quote.instrument])) ?? '')
       })
-      if (!latest.length && updatedMarkets.every((row, index) => row === demo.dataset.markets[index])) {
+      if (!latest.length && digest(marketRetrievedAt) === digest(demo.marketRetrievedAt ?? {})) {
         return { status: 'ok' as const, row: { id: portfolioId, demo } }
       }
       if (latest.length + demo.dataset.quotes.length > 2000) return { status: 'limit' as const }
@@ -83,11 +103,10 @@ export function registerDemoRoutes(app: FastifyInstance, db: Database, settings?
       const catalogRevision = demo.catalogRevision ?? revision
       const capturedAt = capture.manifest.capturedAt > demo.dataset.capturedAt ? capture.manifest.capturedAt : demo.dataset.capturedAt
       const nextDataset = { ...demo.dataset, capturedAt, markets: updatedMarkets, quotes: [...demo.dataset.quotes, ...latest] }
-      const history = demo.dataset.markets.filter((row, index) => row !== updatedMarkets[index]
-        && (row.lifecycle !== updatedMarkets[index]!.lifecycle || row.title !== updatedMarkets[index]!.title))
+      const history = demo.dataset.markets.filter((row, index) => row !== updatedMarkets[index])
       const priorMarkets = [...(demo.priorMarkets ?? []), ...history]
       if (priorMarkets.length > 500) return { status: 'limit' as const }
-      const nextDemo = { catalogRevision, dataset: nextDataset, priorMarkets, revision: digest([nextDataset, priorMarkets]) }
+      const nextDemo = { catalogRevision, dataset: nextDataset, priorMarkets, marketRetrievedAt, revision: digest([nextDataset, priorMarkets, marketRetrievedAt]) }
       const observations = new Map<string, FinancialObservation[]>()
       const accounts = await tx.select().from(providerAccounts).where(eq(providerAccounts.portfolioId, portfolioId))
       for (const [index, quote] of latest.entries()) {
@@ -114,6 +133,7 @@ export function registerDemoRoutes(app: FastifyInstance, db: Database, settings?
     })
     if (result.status === 'not_found') return reply.code(404).send({ error: { code: 'not_found' } })
     if (result.status === 'stale') return reply.code(409).send({ error: { code: 'demo_workspace_changed' } })
+    if (result.status === 'resolution_conflict') return reply.code(409).send({ error: { code: 'demo_resolution_conflict' } })
     if (result.status === 'limit') return reply.code(422).send({ error: { code: 'demo_quote_limit' } })
     return payload(result.row)
   })
@@ -187,7 +207,7 @@ export function registerDemoRoutes(app: FastifyInstance, db: Database, settings?
           const quote = manifest.quotes[trade.quoteIndex]!
           const entry = catalog.get(marketKey(quote))!
           const instrument = entry.instruments.get(quote.instrument)!
-          record(entry.market, { id: 'simulation:trade:' + trade.id, type: trade.direction, sequence: sequence + 1, timestamp: availableAt(quote),
+          record(entry.market, { id: 'simulation:trade:' + trade.id, type: trade.direction, sequence: sequence + 1, timestamp: executionAt(trade, quote),
             instrument, canonicalInstrumentId: instrument, quantity: trade.quantity, price: quote.price, fee: trade.assumedFee })
         }
         const replay = (list: FinancialObservation[], asOf: string) => replayAccounting(

@@ -31,7 +31,9 @@ export async function demoResolutionEvidence(
         quantity: null, amount: null, fee: null, feeAsset: null }
       if (!market.resolution) {
         evidence.push({ batchId: portfolioId, row: -(evidence.length + 1), acquisition: 'demo',
-          observation: { ...common, id, type: 'mark', timestamp: market.retrievedAt, sequence: 1, price: null,
+          observation: { ...common, id, type: 'mark', timestamp: (capture.priorMarkets ?? []).filter((prior) => prior.provider === market.provider
+            && prior.nativeMarket === market.nativeMarket && prior.lifecycle === 'resolved')
+            .reduce((earliest, prior) => prior.retrievedAt < earliest ? prior.retrievedAt : earliest, market.retrievedAt), sequence: 1, price: null,
             simulatedResolution: { effect: 'unverified_resolution', timing: 'at_resolution_evidence' } } })
         continue
       }

@@ -130,7 +130,7 @@ function valuation(replay: ValuationReplay, accounts: string[], asset: string, o
     valuationQuality: !complete ? 'unavailable' as const
       : markTimes.some((time) => time !== replay.asOf)
         ? 'carry_forward_reference_estimate' as const : 'reconstructed_selected_value' as const,
-    returnEligible: complete && balances.every((bucket) => bucket.historyCoverage === 'user_declared_complete'
+    returnEligible: complete && balances.every((bucket) => ['user_declared_complete', 'simulated_ledger_complete'].includes(bucket.historyCoverage)
       && bucket.historyFrom !== null && bucket.historyFrom <= openingCutoff && bucket.netContributions !== null),
   }
 }

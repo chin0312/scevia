@@ -9,7 +9,7 @@ import { KalshiClient } from './client.js'
 const ticker = z.string().regex(/^[A-Z0-9][A-Z0-9_.-]{0,127}$/)
 const envelope = z.object({ markets: z.array(z.unknown()).max(100), cursor: z.string().max(4000).optional() })
 const quotes = z.object({ result: z.string().optional(), settlement_value_dollars: decimalTextSchema.nullable().optional(),
-  settlement_ts: z.iso.datetime({ offset: true }).nullable().optional(),  notional_value_dollars: decimalTextSchema.optional(), expected_expiration_time: z.iso.datetime({ offset: true }).nullable().optional(), last_price_dollars: decimalTextSchema.optional(), close_time: z.iso.datetime({ offset: true }).optional() })
+  settlement_ts: z.iso.datetime({ offset: true }).nullable().optional(),  notional_value_dollars: decimalTextSchema.optional(), expected_expiration_time: z.iso.datetime({ offset: true }).nullable().optional(), last_price_dollars: decimalTextSchema.optional(), open_time: z.iso.datetime({ offset: true }).optional(), close_time: z.iso.datetime({ offset: true }).optional() })
 
 export function parseKalshiLink(input: string) {
   let url: URL
@@ -38,7 +38,7 @@ export function kalshiMarketChoice(raw: unknown, retrievedAt: string) {
     ? { knownAt: new Date(quote.settlement_ts).toISOString(), winningInstrument: record.externalMarketId + ':' + quote.result, unitPayout: '1' as const } : null
   const usable = standard && yes !== undefined && new Decimal(yes).gte(0) && new Decimal(yes).lte(1)
   return { provider: 'kalshi' as const, marketTicker: record.externalMarketId, eventTicker: record.externalEventId,
-    title: record.marketTitle, lifecycle: record.marketLifecycle, tradingClosesAt: quote.close_time ?? null,
+    title: record.marketTitle, lifecycle: record.marketLifecycle, tradingOpensAt: quote.open_time ?? null, tradingClosesAt: quote.close_time ?? null,
     settlementAsset: 'USD', reviewedPayout: false, feeSchedule: null as KalshiScenarioFeeSchedule | null, expectedResolutionAt: quote.expected_expiration_time ?? null,
     establishedPayoutUnit: standard ? '1' : null, retrievedAt, resolution,
     outcomes: record.outcomes.map((item) => {

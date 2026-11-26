@@ -291,7 +291,12 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       const ref = { batchId: batch.id, row: index + 2 }
       const observation = { ...row, account: batch.associatedAccountId ?? row.account }
       const supportOnly = row.type === 'history_complete' || row.type === 'opening_cash' || row.type === 'opening_inventory' || row.type === 'opening_position' || row.type === 'mark'
-      if (batch.contentHash.startsWith('simulation:')) return { ...ref, observation, acquisition: 'demo' }
+      if (batch.contentHash.startsWith('simulation:')) {
+        if (demoCapture && row.id === 'simulation:coverage' && observation.type === 'history_complete') {
+          observation.coveredThrough = demoCapture.dataset.capturedAt
+        }
+        return { ...ref, observation, acquisition: 'demo' }
+      }
       if (batch.manual) return { ...ref, observation, authority: 'user_accepted', acquisition: 'manual' }
       if (supportOnly) return { ...ref, observation }
       const requested = row.id && Object.hasOwn(batch.sourceLinks, row.id) ? batch.sourceLinks[row.id] : null
