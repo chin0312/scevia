@@ -174,6 +174,16 @@ describe('historical hypothetical replay', () => {
     const another = freezeReplay(evaluateReplay(configuration, { ...data, quotes: [{ ...data.quotes[0]!,
       source: 'another', method: 'historical_sample', revision: 'different-method' }] }, [], at(11)))
     expect(comparisonEvidenceQualifications([frozen, another], [at(5)])).toMatchObject({ marketSourcePoints: 1, coveragePoints: 0 })
+    const sample = frozen.history.find(({ asOf }) => asOf === at(5))!
+    const qualified = { ...frozen, history: [{ ...sample, referenceQuality: { ...sample.referenceQuality!,
+      staleReferenceCount: 0, carriedForwardReferenceCount: 1, unknownObservationAgeCount: 1,
+    } }] }
+    const { referenceQuality: _omitted, ...legacyPoint } = sample
+    expect(comparisonEvidenceQualifications([frozen, qualified, { ...frozen, history: [legacyPoint] }], [at(5)])).toMatchObject({
+      carriedForwardDifferencePoints: 1, staleDifferencePoints: 1, unknownAgeDifferencePoints: 1, missingReferenceQualityPoints: 1,
+    })
+    expect(presentReplay({ ...frozen, history: [legacyPoint] }, false).history[0]?.referenceQuality).toBeNull()
+
 
     const retrospective = { ...configuration, mode: 'retrospective' as const, positions: configuration.positions.map((row) => ({
       ...row, entry: { ...row.entry, at: at(2) },

@@ -120,7 +120,9 @@ export function sharedEvidenceChanges(results: FrozenReplayResult[]) {
 export function comparisonEvidenceQualifications(results: FrozenReplayResult[], grid: string[]) {
   const atGrid = new Set(grid)
   const sources = new Map<string, Set<string>>()
-  const differing = { marketSources: new Set<string>(), fxSources: new Set<string>(), fallback: new Set<string>(), coverage: new Set<string>() }
+  const missingQuality = new Set<string>()
+  const differing = { marketSources: new Set<string>(), fxSources: new Set<string>(), fallback: new Set<string>(),
+    coverage: new Set<string>(), carriedForward: new Set<string>(), stale: new Set<string>(), unknownAge: new Set<string>() }
   for (const result of results) {
     const used = new Map<string, Set<string>>()
     const add = (kind: keyof typeof differing, asOf: string, subject: string, values: unknown) => {
@@ -132,7 +134,13 @@ export function comparisonEvidenceQualifications(results: FrozenReplayResult[], 
     const market = new Map(result.evidence.market.map((row) => [row.revision, row]))
     const fx = new Map(result.evidence.fx.map((row) => [row.revision, row]))
     for (const row of result.history) if (atGrid.has(row.asOf)) {
-      add('coverage', row.asOf, '', [row.financialCoverage, row.fxCoverage, row.referenceQuality?.marketPriceCoverage ?? 'not_recorded'])
+      const quality = row.referenceQuality
+      add('coverage', row.asOf, '', [row.financialCoverage, row.fxCoverage, quality?.marketPriceCoverage ?? 'not_recorded'])
+      if (quality) {
+        add('carriedForward', row.asOf, '', quality.carriedForwardReferenceCount > 0)
+        add('stale', row.asOf, '', quality.staleReferenceCount > 0)
+        add('unknownAge', row.asOf, '', quality.unknownObservationAgeCount > 0)
+      } else missingQuality.add(row.asOf)
     }
     if ('snapshots' in result) {
       for (const point of result.snapshots) {
@@ -175,5 +183,7 @@ export function comparisonEvidenceQualifications(results: FrozenReplayResult[], 
     }
   }
   return { marketSourcePoints: differing.marketSources.size, fxSourcePoints: differing.fxSources.size,
-    fallbackPoints: differing.fallback.size, coveragePoints: differing.coverage.size }
+    fallbackPoints: differing.fallback.size, coveragePoints: differing.coverage.size,
+    carriedForwardDifferencePoints: differing.carriedForward.size, staleDifferencePoints: differing.stale.size,
+    unknownAgeDifferencePoints: differing.unknownAge.size, missingReferenceQualityPoints: missingQuality.size }
 }

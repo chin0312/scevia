@@ -17,6 +17,8 @@ Phase 7 owns shared authorized market-price storage, source-aware quote deduplic
 
 ## Phase 9 authorized validation inputs
 
+Use the [Phase 9 operator and validation checklist](DATA_ACQUISITION_STRATEGY.md#live-data-acceptance-checklist) for access, approved inputs, required checks and optional sources.
+
 1. Written provider and Polygon RPC permission covering the intended endpoints or exports, data retention and display, including a scoped read-only Kalshi credential or an approved export. Supply the approved Polygon RPC endpoint and representative wallet address, transaction hashes and date range through the configured access path.
 2. Approved populated Kalshi account or exports and Polymarket activity for the same declared cutoff, plus independent opening/ending cash, fills, fee and rebate totals, positions, settlements, redemptions and P&L. Include ambiguous events and a representative history size.
 3. A reviewed real-demo plan with active and resolved market identities, native collateral, eligible price and trading-window evidence, verified resolution evidence, and independently calculated expected simulated results.

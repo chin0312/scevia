@@ -31,7 +31,12 @@ Implementation and coverage below describe documented interfaces and fixture-tes
 
 ## Live-data acceptance checklist
 
-### Required first
+### Operator actions before validation
+
+- Confirm permitted endpoint, retention and display scope. Supply only the credentials needed for the selected native paths, the approved Polygon RPC endpoint and populated accounts or permitted exports with independent financial statements.
+- Approve any paid service before purchase. Public native market endpoints and the ECB/Kraken reference collectors use keyless paths where applicable. The selected CoinGecko Demo PUSD path requires a key. Optional trials below depend on a demonstrated evidence gap.
+
+### Technical validation in order
 
 1. Confirm intended use, endpoint access, local storage, attribution, retention and display rights for Polymarket and Kalshi public data. Select approved active and resolved markets with exact native outcomes and independent payout evidence. On the loopback backend, set `POLYMARKET_LIVE_DATA_AUTHORIZED=YES` and/or `KALSHI_PUBLIC_DATA_AUTHORIZED=YES` with the matching `KALSHI_ENVIRONMENT`. Set `CONTINUOUS_TRACKING_ENABLED=YES` and `MARKET_TRACKING_RETENTION_DAYS` to the approved duration. Then run `npm run db:migrate` and `npm run dev`. Use the authorized `POST /v1/market-evidence` and `POST /v1/market-references/history` routes to verify native identity, price timestamps, and actual archive coverage.
 2. Register for a CoinGecko Demo key and verify its plan terms for the intended use, including any public display. Set `COINGECKO_DEMO_API_KEY` and `COINGECKO_PUSD_REFERENCE_AUTHORIZED=YES`. Separately confirm ECB and Kraken reuse terms and set `ECB_FX_REFERENCE_AUTHORIZED=YES` and `KRAKEN_USDC_REFERENCE_AUTHORIZED=YES` only for the approved services. Set `FX_REFERENCE_RETENTION_DAYS` to the approved duration. Check authenticated `GET /v1/fx/reference?base=PUSD&currency=USD` for the exact Polygon token and compare the rate with independent evidence. Where approved, run `FX_ARCHIVE_AUTHORIZED=YES npm run fx:archive -- coingecko-pusd` and repeat with `ecb` or `kraken`. CoinGecko Demo is free and key-based. ECB/Kraken collectors use keyless endpoints. A free endpoint or key does not establish public display rights.
@@ -42,11 +47,15 @@ Implementation and coverage below describe documented interfaces and fixture-tes
 4. Supply an approved populated Polymarket wallet, bounded historical range and permitted Polygon RPC URL. Set `POLYMARKET_POLYGON_RPC_AUTHORIZED=YES` and `POLYMARKET_POLYGON_RPC_URL`. Set `TRACKED_PROVIDER_ACCOUNT_IDS` only to approved backend account UUIDs. For Kalshi use approved read-only `KALSHI_ACCOUNT_DATA_AUTHORIZED=YES`, the matching `KALSHI_ENVIRONMENT`, `KALSHI_PROVIDER_ACCOUNT_ID`, `KALSHI_PORTFOLIO_ID`, `KALSHI_KEY_ID` and `KALSHI_PRIVATE_KEY_FILE`, or a permitted native export. RPC provider quotas, fees and account/export permissions need operator confirmation.
 5. Against independent statements, run authenticated `POST /v1/provider-accounts/<account-id>/sync?scope=current` and `?scope=history` twice, and compare cash, positions, trades, fees, rebates, settlement and redemption. With `POLYMARKET_RECEIPT_DISCOVERY_AUTHORIZED=YES`, run `npm run verify:polymarket-account-receipts -- <account-id> <from-ISO> <through-ISO> [approved-index-file.json]` for a window of up to seven days. Review the finalized log-level proposals and unresolved rows locally. Verify market-only valuation updates, interrupted worker recovery and frozen scenario readback. Keep credentials, wallet identifiers and statements outside Git, CI and public PRs.
 
+Record the verified archive period, applicable fee and payout evidence, successful reconciliation and Demo results, request volumes, observed quotas and costs. Technical fixture results do not substitute for this Phase 9 acceptance record.
+
 ### Optional supplementary trials
 
 6. Trial Predexon discovery and history against exact Kalshi and Polymarket IDs, HyperSync candidate exports against finalized receipts, and GeckoTerminal exact Polygon token and pool corroboration. Verify plan-specific scope, quotas and reuse before calling any service. Predexon lists a free core tier and reserves streaming for paid plans. No paid subscription has been approved. Prediction.com, Frankfurter and the other candidates are optional where they address a measured evidence gap.
 
 ## Reporting contract
+
+Phase 10 Settings will initially offer USD (default), EUR and GBP. The backend also supports SGD and MYR for API use, historical records and saved results. Provider-native settlement assets remain USD, USDC and PUSD. Reporting selection changes presentation and does not change native funding or settlement.
 
 `PUT /v1/preferences/reporting` takes `currency` and optional `fiatSource` and `stablecoinSource`. The supported choices are `ecb_euro_reference`, `kraken_usdc_usd_ohlc`, and the `coingecko_polygon_pusd_usd` family. Null restores automatic selection. These preferences select from eligible stored evidence and do not enable a collector or grant data rights. A CoinGecko daily source alias selects the same family. Eligibility excludes stale rates before ranking. If that family has no eligible reference for a leg, another eligible source can be used with `fallback: true`. Each leg retains its exact source. A stale direct rate may be shown separately as qualified last-known evidence. Same-source conflicts are surfaced, and covered daily observations are indicative. None of these references promises executable pricing.
 
