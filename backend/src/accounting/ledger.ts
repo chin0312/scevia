@@ -31,20 +31,21 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
     }
     const authority = group.some((item) => item.authority === 'user_accepted') ? 'user_accepted'
       : group.some((item) => 'providerAccountId' in item) ? 'provider_evidence' : 'user_declared'
-    return [{ ...observation, economicId: id, authority, sources: sources(group) }]
+    return [{ ...observation, economicId: id, authority, managedHistory: observation.type === 'history_complete' && group.every((item) => item.acquisition === 'demo'), sources: sources(group) }]
   }).sort((a, b) => a.timestamp.localeCompare(b.timestamp)
     || Number(b.type === 'opening_inventory' || b.type === 'opening_cash')
       - Number(a.type === 'opening_inventory' || a.type === 'opening_cash')
     || Number(a.feeTiming === 'execution_evidence') - Number(b.feeTiming === 'execution_evidence')
+    || Number(b.simulatedResolution !== undefined) - Number(a.simulatedResolution !== undefined)
     || (a.sequence ?? 0) - (b.sequence ?? 0) || a.economicId.localeCompare(b.economicId))
   const positions = new Map<string, {
     venue: string; account: string; asset: string; instrument: string
     quantity: Decimal; basis: Decimal | null; observedInventory: boolean; declaredOpening: boolean; entitlements: Map<string, { quantity: Decimal; rate: Decimal }>; pendingQuantity: Decimal; pending: Decimal
-    mark: Decimal | null; markAt: string | null; markSources: EvidenceReference[]
+    resolvedAt?: string; settledAt?: string; mark: Decimal | null; markAt: string | null; markSources: EvidenceReference[]
   }>()
   const cash = new Map<string, {
     venue: string; account: string; asset: string; delta: Decimal; opening: Decimal | null; openingAt: string | null
-    contributions: Decimal; unclassifiedCashFlow: boolean; realized: Decimal; fees: Decimal; posted: boolean; inventoryOpeningAt: string | null; coverageFrom: string | null; coverageThrough: string | null; incomplete: boolean; pnlIncomplete: boolean
+    contributions: Decimal; unclassifiedCashFlow: boolean; realized: Decimal; fees: Decimal; posted: boolean; inventoryOpeningAt: string | null; coverageFrom: string | null; coverageThrough: string | null; managedHistory: boolean; incomplete: boolean; pnlIncomplete: boolean
   }>()
   type FeeEffect = { kind: 'execution' | 'standalone' | 'funding'; amount: string | null }
   const ledger: Array<{
@@ -55,7 +56,7 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
     let state = cash.get(key)
     if (!state) {
       state = { venue: event.venue, account: event.account, asset, delta: zero(), opening: null, openingAt: null,
-        contributions: zero(), unclassifiedCashFlow: false, realized: zero(), fees: zero(), posted: false, inventoryOpeningAt: null, coverageFrom: null, coverageThrough: null, incomplete: false, pnlIncomplete: false }
+        contributions: zero(), unclassifiedCashFlow: false, realized: zero(), fees: zero(), posted: false, inventoryOpeningAt: null, coverageFrom: null, coverageThrough: null, managedHistory: false, incomplete: false, pnlIncomplete: false }
       cash.set(key, state)
     }
     return state
@@ -76,7 +77,8 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
     JSON.stringify([event.venue, event.account, instrument, event.asset, event.timestamp, event.sequence ?? 0])
   const positionKeys = (event: FinancialObservation) => event.completeSet
     ? [orderKey(event), orderKey(event, event.completeSet.counterInstrument)] : [orderKey(event)]
-  const affectsPosition = (event: FinancialObservation) => event.completeSet !== undefined || ['opening_position', 'buy', 'sell', 'settlement', 'redemption'].includes(event.type)
+  const affectsPosition = (event: FinancialObservation) => !event.simulatedResolution
+    && (event.completeSet !== undefined || ['opening_position', 'buy', 'sell', 'settlement', 'redemption'].includes(event.type))
   for (const event of events.filter(affectsPosition)) {
     for (const key of positionKeys(event)) {
       const previous = ordering.get(key)
@@ -85,7 +87,7 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
   }
   const markGroups = new Map<string, Set<string>>()
   const markKey = (event: FinancialObservation) => JSON.stringify([event.venue, event.account, event.instrument, event.asset, event.timestamp])
-  for (const event of events.filter((candidate) => candidate.type === 'mark')) {
+  for (const event of events.filter((candidate) => candidate.type === 'mark' && !candidate.simulatedResolution)) {
     const key = markKey(event)
     const prices = markGroups.get(key) ?? new Set<string>()
     prices.add(event.price!)
@@ -118,6 +120,30 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
     const reject = (reason: string) => discrepancies.push({ reason, sources: event.sources, scope: scope(event) })
     if (affectsPosition(event) && positionKeys(event).some((key) => { const group = ordering.get(key)!; return group.count > 1 && !group.buysOnly })) { reject('position_event_order_ambiguous'); continue }
 
+    if (event.simulatedResolution && event.instrument) {
+      const holding = positionFor(event, event.instrument)
+      if (event.simulatedResolution.effect !== 'payout') {
+        holding.resolvedAt = event.timestamp
+        holding.mark = null
+        holding.markAt = null
+        holding.markSources = []
+        if (holding.quantity.isZero()) continue
+        if (event.simulatedResolution.effect === 'unverified_resolution') {
+          reject('simulated_resolution_payout_unverified')
+          continue
+        }
+        event.quantity = holding.quantity.toFixed()
+        event.amount = holding.quantity.mul(event.price!).toFixed()
+      } else {
+        const entitlement = holding.entitlements.get(event.entitlementId!)
+        if (!entitlement) continue
+        event.quantity = entitlement.quantity.toFixed()
+        event.amount = entitlement.rate.mul(entitlement.quantity).toFixed()
+      }
+    } else if (event.instrument && positionFor(event, event.instrument).resolvedAt) {
+      if (event.type !== 'mark') reject('simulated_market_already_resolved')
+      continue
+    }
     const amount = new Money(event.amount ?? 0)
     let feeEffect: FeeEffect | undefined
     let delta = zero()
@@ -129,6 +155,7 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
       if (!event.coveredThrough || money.coverageFrom !== null) { reject('history_declaration_conflict'); continue }
       money.coverageFrom = event.timestamp
       money.coverageThrough = event.coveredThrough
+      money.managedHistory = event.managedHistory
       continue
     }
     if (event.type === 'opening_inventory') {
@@ -265,6 +292,12 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
         holding.basis = holding.quantity.isZero() ? zero() : released === null ? null : holding.basis!.minus(released)
         const gross = quantity.mul(price)
         if (event.type === 'settlement') {
+          if (holding.quantity.isZero()) {
+            holding.settledAt = event.timestamp
+            holding.mark = null
+            holding.markAt = null
+            holding.markSources = []
+          }
           holding.entitlements.set(event.id!, { quantity, rate: price })
           entitlementDelta = gross
           holding.pending = holding.pending.plus(gross)
@@ -317,8 +350,13 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
     || [...cash.values()].some((entry) => entry.opening === null || entry.inventoryOpeningAt === null || entry.incomplete || entry.pnlIncomplete)
     || [...positions.values()].some((entry) => !entry.quantity.isZero() && (entry.basis === null || entry.mark === null || staleMark(entry.markAt)))
   const inventoryValues = new Map<string, Decimal | null>()
+  const referenceValues = new Map<string, Decimal | null>()
   for (const holding of positions.values()) {
     const key = JSON.stringify([holding.venue, holding.account, holding.asset])
+    const reference = referenceValues.has(key) ? referenceValues.get(key)! : zero()
+    if (reference !== null) referenceValues.set(key, holding.quantity.isZero()
+      ? reference.plus(holding.pending)
+      : holding.mark === null ? null : reference.plus(holding.pending).plus(holding.mark.mul(holding.quantity)))
     const previous = inventoryValues.has(key) ? inventoryValues.get(key)! : zero()
     if (previous === null) continue
     if (holding.quantity.isZero()) inventoryValues.set(key, previous.plus(holding.pending))
@@ -328,10 +366,11 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
   const accountBalances = [...cash.entries()].map(([key, entry]) => {
     const balance = affected(entry) || entry.opening === null || entry.incomplete ? null : entry.opening.plus(entry.delta)
     const inventory = inventoryValues.has(key) ? inventoryValues.get(key)! : zero()
+    const reference = referenceValues.has(key) ? referenceValues.get(key)! : zero()
     const declaredCoverage = entry.coverageFrom === null || entry.coverageThrough === null ? 'unverified'
       : asOf > entry.coverageThrough ? 'outside_declared_interval'
         : entry.openingAt !== entry.coverageFrom || entry.inventoryOpeningAt !== entry.coverageFrom ? 'opening_state_incompatible'
-          : affected(entry) ? 'declared_with_unresolved_evidence' : 'user_declared_complete'
+          : affected(entry) ? 'declared_with_unresolved_evidence' : entry.managedHistory ? 'simulated_ledger_complete' : 'user_declared_complete'
     return { venue: entry.venue, account: entry.account, asset: entry.asset,
       opening: entry.opening?.toFixed() ?? null, knownDelta: entry.delta.toFixed(), knownDeclaredContributions: entry.contributions.toFixed(),
       netContributions: entry.unclassifiedCashFlow || affected(entry) ? null : entry.contributions.toFixed(),
@@ -348,6 +387,8 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
       feeAvailability: affected(entry) || entry.incomplete ? 'known_component' : 'selected_events_only',
       realizedAvailability: affected(entry) || entry.pnlIncomplete || entry.inventoryOpeningAt === null ? 'known_component' : 'selected_events_only',
       openingInventoryAt: entry.inventoryOpeningAt,
+      referencePortfolioValue: balance === null || reference === null || entry.inventoryOpeningAt === null
+        ? null : balance.plus(reference).toFixed(),
       portfolioValue: balance === null || inventory === null || entry.inventoryOpeningAt === null
         ? null : balance.plus(inventory).toFixed(),
     }
@@ -370,6 +411,9 @@ export function replayAccounting(evidence: Evidence[], asOf: string, providerEvi
       pendingQuantity: entry.pendingQuantity.toFixed(), pending: entry.pending.toFixed(), mark: entry.mark?.toFixed() ?? null,
       averageCost: entry.basis === null || entry.quantity.isZero() ? null : entry.basis.div(entry.quantity).toFixed(),
       markStatus: entry.mark === null ? 'unavailable' : staleMark(entry.markAt) ? 'stale' : 'estimated',
+      valuationQualification: entry.mark === null ? entry.quantity.isZero() ? entry.settledAt ? 'settled_no_open_quantity' : 'no_open_quantity' : 'unavailable'
+        : staleMark(entry.markAt) ? 'last_known_reference' : 'fresh_reference',
+      referenceMarketValue: entry.quantity.isZero() ? '0' : entry.mark?.mul(entry.quantity).toFixed() ?? null,
       marketValue: entry.quantity.isZero() ? '0' : entry.mark === null || staleMark(entry.markAt) ? null : entry.quantity.mul(entry.mark).toFixed(),
       unrealized: positionAffected(entry) || (!entry.declaredOpening && !cash.get(JSON.stringify([entry.venue, entry.account, entry.asset]))?.inventoryOpeningAt) || entry.mark === null || staleMark(entry.markAt) || entry.basis === null
         ? null : entry.quantity.mul(entry.mark).minus(entry.basis).toFixed(),

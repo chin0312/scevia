@@ -1,0 +1,1 @@
+ALTER TABLE "scevia"."portfolios" ADD COLUMN "demo" jsonb;

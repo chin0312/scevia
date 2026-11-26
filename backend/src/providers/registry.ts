@@ -1,3 +1,4 @@
+import { KalshiAdapter } from './kalshi/adapter.js'
 import type { ProviderAdapter } from './adapter.js'
 import { ProviderAdapterError } from './adapter.js'
 import { MultiOutcomeFixtureAdapter } from './fixtures/multi-outcome-adapter.js'
@@ -23,8 +24,11 @@ export class ProviderRegistry {
   }
 }
 
-export const providerRegistry = new ProviderRegistry([
-  new PolymarketAdapter(),
+export const createProviderRegistry = (kalshi = new KalshiAdapter(), polymarket = new PolymarketAdapter()) => new ProviderRegistry([
+  polymarket,
+  kalshi,
   new MultiOutcomeFixtureAdapter(),
   new SnapshotFixtureAdapter(),
 ])
+
+export const providerRegistry = createProviderRegistry()

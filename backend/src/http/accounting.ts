@@ -1,9 +1,12 @@
+import { demoMarketAt } from '../demo/dataset.js'
+import { demoResolutionEvidence } from '../demo/resolutions.js'
+import { kalshiCsvMapping, parseMappedKalshiCsv } from '../accounting/kalshi-csv.js'
 import { registerScenarioRoutes } from './scenarios.js'
-import { methodology, scopedReference, ScenarioError, type ScenarioBaseline } from '../scenarios/engine.js'
+import { methodology, scopedReference, ScenarioError, type ScenarioBaseline, type ScenarioHolding, type FundingBucket } from '../scenarios/engine.js'
 import { canonicalInstrumentKeys, instrumentKey } from '../analytics/scope.js'
 import { Decimal } from 'decimal.js'
 import { createHash, randomUUID } from 'node:crypto'
-import { and, count, desc, eq, inArray, isNotNull, isNull, lte, or } from 'drizzle-orm'
+import { and, count, desc, eq, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { Database } from '../db/client.js'
@@ -59,18 +62,18 @@ function concurrentWrite(error: unknown): boolean {
 }
 
 
-export function registerAccountingRoutes(app: FastifyInstance, database: Database, resolvePublic?: (url: string) => Promise<unknown>) {
+export function registerAccountingRoutes(app: FastifyInstance, database: Database, resolvePublic?: (url: string, type: import('../scenarios/public-market.js').PublicSelection['assetIdType'], assetId?: string) => Promise<unknown>) {
   async function owned(portfolioId: string, ownerId: string) {
     const [row] = await database.select({ id: portfolios.id }).from(portfolios)
       .where(and(eq(portfolios.id, portfolioId), eq(portfolios.ownerId, ownerId))).limit(1)
     return row !== undefined
   }
-  app.post<{ Params: { portfolioId: string }; Body: { csv: string; providerAccountId?: string; sourceLinks?: Record<string, string>; replaces?: string; acceptUnlinked?: boolean } }>(prefix + '/imports/preview', {
+  app.post<{ Params: { portfolioId: string }; Body: { csv: string; kalshiMapping?: unknown; providerAccountId?: string; sourceLinks?: Record<string, string>; replaces?: string; acceptUnlinked?: boolean } }>(prefix + '/imports/preview', {
     bodyLimit: 512 * 1024,
     schema: {
       ...auth, tags: ['accounting'], summary: 'Validate a canonical CSV and create an expiring preview',
       params: portfolioParams,
-      body: { type: 'object', required: ['csv'], additionalProperties: false, properties: { csv: { type: 'string', maxLength: 500000 }, providerAccountId: uuid, replaces: uuid, acceptUnlinked: { type: 'boolean' }, sourceLinks: { type: 'object', maxProperties: 2000, additionalProperties: uuid } } },
+      body: { type: 'object', required: ['csv'], additionalProperties: false, properties: { csv: { type: 'string', maxLength: 500000 }, kalshiMapping: { type: 'object', additionalProperties: true }, providerAccountId: uuid, replaces: uuid, acceptUnlinked: { type: 'boolean' }, sourceLinks: { type: 'object', maxProperties: 2000, additionalProperties: uuid } } },
     },
   }, async (request, reply) => {
     const { portfolioId } = request.params
@@ -83,13 +86,56 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const association = request.body.providerAccountId ?? null
     const sourceLinks = request.body.sourceLinks ?? {}
     const acceptUnlinked = request.body.acceptUnlinked === true
-    const [account] = association ? await database.select({ id: providerAccounts.id, venue: providerAccounts.providerCode })
+    const [account] = association ? await database.select({ id: providerAccounts.id, venue: providerAccounts.providerCode, externalId: providerAccounts.externalAccountId })
       .from(providerAccounts).where(and(eq(providerAccounts.id, association), eq(providerAccounts.portfolioId, portfolioId))) : []
     if (association && !account) return reply.code(404).send(missing)
     if (!association && (acceptUnlinked || Object.keys(sourceLinks).length)) return reply.code(422).send({ error: { code: 'source_links_require_account' } })
     let parsed: ReturnType<typeof parseFinancialCsv>
-    try { parsed = parseFinancialCsv(request.body.csv) }
+    try {
+      if (request.body.kalshiMapping === undefined) parsed = parseFinancialCsv(request.body.csv)
+      else {
+        const mapping = kalshiCsvMapping.safeParse(request.body.kalshiMapping)
+        if (!mapping.success) throw new Error('kalshi_csv_mapping_invalid')
+        parsed = parseMappedKalshiCsv(request.body.csv, mapping.data)
+      }
+    }
     catch (error) { return reply.code(422).send({ error: { code: (error as Error).message } }) }
+    if (request.body.kalshiMapping !== undefined && !parsed.issues.length) {
+      const namespace = account?.externalId.startsWith('kalshi:demo:') ? 'demo:' : ''
+      const nativeIds = [...new Set(parsed.rows.flatMap((row) => row.instrument ? [namespace + row.instrument] : []))]
+      if (nativeIds.length > 2000) return reply.code(422).send({ error: { code: 'kalshi_mapping_scope_limit' } })
+      const matched = nativeIds.length ? await database.select({ id: instruments.id, native: instruments.externalId, ticker: markets.externalId })
+        .from(instruments).innerJoin(markets, eq(instruments.marketId, markets.id))
+        .where(and(eq(markets.providerCode, 'kalshi'), inArray(instruments.externalId, nativeIds))) : []
+      const canonical = new Map(matched.filter((row) => row.native === row.ticker + ':yes' || row.native === row.ticker + ':no')
+        .map((row) => [row.native, row.id]))
+      parsed.rows = parsed.rows.map((row) => {
+        const id = row.instrument ? canonical.get(namespace + row.instrument) : undefined
+        return id ? { ...row, instrument: id, canonicalInstrumentId: id } : row
+      })
+    }
+    const mappedKalshiIds = [...new Set(parsed.rows.flatMap((row) => row.venue === 'kalshi' && row.canonicalInstrumentId ? [row.canonicalInstrumentId] : []))]
+    if (mappedKalshiIds.length > 2000) return reply.code(422).send({ error: { code: 'kalshi_mapping_scope_limit' } })
+    if (mappedKalshiIds.length) {
+      const matches = await database.select({ nativeMarket: markets.externalId }).from(instruments)
+        .innerJoin(markets, eq(instruments.marketId, markets.id))
+        .where(and(eq(markets.providerCode, 'kalshi'), inArray(instruments.id, mappedKalshiIds)))
+      const demo = account?.externalId.startsWith('kalshi:demo:') === true
+      if (matches.length !== mappedKalshiIds.length || matches.some((row) => row.nativeMarket.startsWith('demo:') !== demo)) {
+        return reply.code(422).send({ error: { code: 'kalshi_import_environment_mismatch' } })
+      }
+    }
+    const explicitIds = [...new Set(parsed.rows.flatMap((row) => row.canonicalInstrumentId ? [row.canonicalInstrumentId] : []))]
+    if (explicitIds.length > 2000) return reply.code(422).send({ error: { code: 'import_mapping_scope_limit' } })
+    if (explicitIds.length) {
+      const [portfolio] = await database.select({ revision: sql<string | null>`coalesce(${portfolios.demo}->>'catalogRevision', ${portfolios.demo}->>'revision')` }).from(portfolios)
+        .where(eq(portfolios.id, portfolioId))
+      const catalog = await database.select({ native: markets.externalId }).from(instruments)
+        .innerJoin(markets, eq(instruments.marketId, markets.id)).where(inArray(instruments.id, explicitIds))
+      if (catalog.some((row) => row.native.startsWith('simulation:') && !row.native.startsWith('simulation:' + portfolio?.revision + ':'))) {
+        return reply.code(422).send({ error: { code: 'demo_instrument_scope_mismatch' } })
+      }
+    }
     const unresolvedRows = parsed.rows.filter((row) => !row.id || ((row.type === 'split' || row.type === 'merge') && !row.completeSet)).length
     if (parsed.issues.length) return reply.code(422).send({ ...parsed, unresolvedRows, batchId: null })
     if (account && parsed.rows.some((row) => row.venue !== account.venue)) {
@@ -219,7 +265,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
   })
 
   async function loadEvidence(portfolioId: string, cutoff: string, preview?: Pick<typeof batches.$inferSelect,
-    'id' | 'observations' | 'associatedAccountId' | 'sourceLinks'> & { manual?: boolean; acceptUnlinked?: boolean }, read?: AccountingRead, replaces?: string, accountScope?: string[]) {
+    'id' | 'observations' | 'associatedAccountId' | 'sourceLinks' | 'contentHash'> & { manual?: boolean; acceptUnlinked?: boolean }, read?: AccountingRead, replaces?: string, accountScope?: string[]) {
     const readAll = async (tx: AccountingRead) => {
       const confirmed = await tx.select().from(batches).where(and(eq(batches.portfolioId, portfolioId),
         isNotNull(batches.confirmedAt), isNull(batches.supersededAt))).orderBy(batches.id)
@@ -230,18 +276,27 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       }).from(decisions).where(eq(decisions.portfolioId, portfolioId)).orderBy(decisions.recordKey, desc(decisions.revision)).limit(10001)
       const [last] = await tx.select({ revision: decisions.revision }).from(decisions)
         .where(eq(decisions.portfolioId, portfolioId)).orderBy(desc(decisions.revision)).limit(1)
-      return [confirmed, provider, latest, last?.revision ?? 0] as const
+      const [workspace] = await tx.select({ demo: portfolios.demo }).from(portfolios).where(eq(portfolios.id, portfolioId))
+      const resolutions = workspace?.demo ? await demoResolutionEvidence(tx, portfolioId, workspace.demo, provider.accounts) : []
+      return [confirmed, provider, latest, last?.revision ?? 0, resolutions, workspace?.demo] as const
     }
-    const [confirmed, provider, latest, decisionRevision] = read ? await readAll(read)
+    const [confirmed, provider, latest, decisionRevision, resolutions, demoCapture] = read ? await readAll(read)
       : await database.transaction(readAll, { isolationLevel: 'repeatable read', accessMode: 'read only' })
     const sources = new Map(provider.evidence.flatMap((item) =>
       'sourceRecordId' in item && !item.unresolvedReason ? [[item.sourceRecordId, item] as const] : []))
     const connected = new Set(provider.accounts.filter((account) => account.kind !== 'file_import').map((account) => account.account))
     const supplementCandidates = new Set<string>()
-    const imported: Evidence[] = (preview ? [...confirmed, preview] : confirmed).flatMap((batch) => batch.observations.map((row, index): Evidence => {
+    const imported: Evidence[] = (preview ? [...confirmed, preview] : confirmed).flatMap((batch) => batch.observations.map((row, index): Evidence | null => {
+      if (batch.contentHash.startsWith('simulation:') && row.id?.startsWith('simulation:settlement:')) return null
       const ref = { batchId: batch.id, row: index + 2 }
       const observation = { ...row, account: batch.associatedAccountId ?? row.account }
       const supportOnly = row.type === 'history_complete' || row.type === 'opening_cash' || row.type === 'opening_inventory' || row.type === 'opening_position' || row.type === 'mark'
+      if (batch.contentHash.startsWith('simulation:')) {
+        if (demoCapture && row.id === 'simulation:coverage' && observation.type === 'history_complete') {
+          observation.coveredThrough = demoCapture.dataset.capturedAt
+        }
+        return { ...ref, observation, acquisition: 'demo' }
+      }
       if (batch.manual) return { ...ref, observation, authority: 'user_accepted', acquisition: 'manual' }
       if (supportOnly) return { ...ref, observation }
       const requested = row.id && Object.hasOwn(batch.sourceLinks, row.id) ? batch.sourceLinks[row.id] : null
@@ -259,7 +314,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
         return { ...ref, observation, unresolvedReason: requested ? 'linked_source_unavailable' : 'cross_source_overlap_unresolved' }
       }
       return { ...ref, observation }
-    }))
+    }).filter((row): row is Evidence => row !== null))
     const prior = imported.filter((item) => 'batchId' in item && item.batchId === replaces)
     const allEvidence = [...provider.evidence, ...imported.filter((item) => !('batchId' in item) || item.batchId !== replaces)]
     const candidateOverlaps = supplementCandidates.size ? potentialOverlaps(allEvidence) : new Map()
@@ -275,7 +330,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       rawEvidence.filter((item) => !('batchId' in item) || item.batchId !== preview?.id), decisionMap)
       : { changes: new Map<string, PortfolioDecision>(), report: [] }
     const applied = applyDecisions(rawEvidence, new Map([...decisionMap, ...replacement.changes]))
-    return { ...provider, ...applied, rawEvidence, decisionMap, decisionRevision, replacement,
+    return { ...provider, ...applied, evidence: [...applied.evidence, ...resolutions], resolutions, demoCapture, rawEvidence, decisionMap, decisionRevision, replacement,
       recordDecisionRevisions: new Map(latest.map(({ key, revision }) => [key, revision])),
       truncated: provider.truncated || latest.length > 10000,
       selected: applied.records.some((record) => record.decision !== null) }
@@ -410,15 +465,17 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       if (change.action === 'reset_identity') delete next.identity
       if (change.action === 'reset_duplicate') delete next.duplicate
       if (change.action === 'exclude') { next.membership = 'excluded'; next.membershipRevision = record.revision }
+      const reviewedKalshiCash = !selection && record.source.kind === 'provider'
+        && record.originalReason === 'kalshi_final_cash_requires_account_attribution'
       if (change.action === 'include') {
         next.membership = 'included'
         next.membershipRevision = record.revision
-        if (record.source.kind === 'import' && (record.originalReason || !original.id) && !next.identity) {
+        if (reviewedKalshiCash || (record.source.kind === 'import' && (record.originalReason || !original.id) && !next.identity)) {
           next.identity = { mode: 'include', revision: record.revision }
         }
       }
       if (change.action === 'distinct') next.identity = { mode: 'distinct', revision: record.revision }
-      if (record.source.kind === 'provider' && (change.action === 'distinct' || (change.action === 'include' && record.originalReason !== null))) {
+      if (record.source.kind === 'provider' && (change.action === 'distinct' || (change.action === 'include' && record.originalReason !== null && !reviewedKalshiCash))) {
         throw new Error('provider_evidence_cannot_be_promoted')
       }
 
@@ -444,7 +501,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       const { venue, account } = records.get(key)!.original
       return JSON.stringify([venue, account])
     }))
-    const revision = digest([selection ?? null, ordered, input.records.filter(({ original }) =>
+    const revision = digest([selection ?? null, ordered, input.resolutions.filter(({ observation }) => affectedAccounts.has(JSON.stringify([observation.venue, observation.account]))).map((row) => row.observation), input.records.filter(({ original }) =>
       affectedAccounts.has(JSON.stringify([original.venue, original.account])))
       .map(({ key, revision, decision }) => [key, revision, decision, input.recordDecisionRevisions.get(key) ?? null]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))])
     const next = new Map([...input.decisionMap, ...changes])
@@ -466,7 +523,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
           const proposed = applyDecisions(plan.input.rawEvidence, plan.next)
           const asOf = new Date().toISOString()
           const before = replayAccounting(plan.input.evidence, asOf)
-          const after = replayAccounting(proposed.evidence, asOf)
+          const after = replayAccounting([...proposed.evidence, ...plan.input.resolutions], asOf)
           return { revision: plan.revision, affected: plan.changes.size, before: before.cash, after: after.cash,
             beforeHoldings: before.holdings, afterHoldings: after.holdings,
             beforeDiscrepancyCount: before.discrepancies.length, afterDiscrepancyCount: after.discrepancies.length }
@@ -575,8 +632,9 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       || left.account.localeCompare(right.account)).map(({ venue, account, assets }) => ({ venue, account,
       knownAssets: [...assets].sort(), selectedAssetEvidence: assets.has(asset) ? 'observed' : 'unknown' }))
     return { evidence, context: { asOf, asset, accounts, accountIdentities, venue: venue ?? null,
-      evidenceRevision: digest(input.records.filter((record) => inScope(record.adjusted))
-        .map((record) => [record.key, record.revision, record.decision]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))),
+      evidenceRevision: digest([input.records.filter((record) => inScope(record.adjusted))
+        .map((record) => [record.key, record.revision, record.decision]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+        input.resolutions.filter((row) => inScope(row.observation) && row.observation.timestamp <= asOf).map((row) => row.observation)]),
       coverageRevision: digest(input.coverage.filter(inScope)
         .map((row) => [row.venue, row.account, row.entity, row.status, row.lastSuccessfulRunId, row.lastAttemptStatus,
           row.lastAttemptAt?.toISOString(), row.lastSuccessfulSyncAt?.toISOString()])
@@ -734,7 +792,13 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const held = canonicalHoldings.filter((row) => row.quantityStatus === 'reconstructed_from_declaration').map((row) => row.instrument)
     const recentSnapshotIds = snapshots.filter((row) => new AnalyticalDecimal(row.quantity).gt(0)
       && Date.parse(asOf) - row.observedAt.getTime() <= 86_400_000).map((row) => row.instrument)
-    const { metadata, rules, effective, reported } = await loadExposureCatalog(tx, asOf, asset, ids, held, recentSnapshotIds, selected)
+    const catalog = await loadExposureCatalog(tx, asOf, asset, ids, held, recentSnapshotIds, selected)
+    const { rules, effective, reported } = catalog
+    const metadata = catalog.metadata.map((row) => {
+      const view = input.demoCapture ? demoMarketAt(input.demoCapture, row.provider, row.providerMarket, asOf) : null
+      return view ? { ...row, lifecycle: view.lifecycle, title: view.asOf?.title ?? row.title,
+        resolvesAt: view.asOf?.resolvesAt ? new Date(view.asOf.resolvesAt) : null } : row
+    })
     const edgeOrder = (left: { left: string; right: string }, right: { left: string; right: string }) =>
       left.left.localeCompare(right.left) || left.right.localeCompare(right.right)
     const response = { context, metadataBasis: 'current_catalog',
@@ -743,7 +807,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
           || left.instrument.localeCompare(right.instrument) || left.sourceRecordId.localeCompare(right.sourceRecordId))),
       catalogRevision: digest(metadata.map((row) => ({ ...row, resolvesAt: row.resolvesAt?.toISOString() ?? null }))
         .sort((left, right) => left.instrument.localeCompare(right.instrument))),
-      reportedExposure: analyzeReportedExposure(snapshots, input.coverage, asOf, asset, metadata, rules, reported.edges, reported.graphLimit),
+      reportedExposure: analyzeReportedExposure(snapshots, input.coverage, asOf, asset, metadata, rules, reported.edges, reported.graphLimit, input.balances.filter((row) => accounts.includes(row.account) && (!scope.venue || row.venue === scope.venue))),
       settlementEvidenceRevision: digest([
         rules.map((rule) => ({ ...rule, reviewedAt: rule.reviewedAt.toISOString() })).sort((left, right) => left.market.localeCompare(right.market)),
         { effectiveLimit: effective.graphLimit, reportedLimit: reported.graphLimit,
@@ -751,17 +815,24 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
           reported: reported.edges.sort(edgeOrder).map((edge) => ({ ...edge, reviewedAt: edge.reviewedAt.toISOString() })) },
       ]),
       ...analyzeExposure(state, asset, accounts, metadata, rules, effective.edges, effective.graph, effective.graphLimit, context.accountIdentities, canonicalKeys) }
-    return { response, state, canonicalKeys, metadata, effective, rules, evidence }
+    return { response, state, canonicalKeys, metadata, effective, rules, evidence, balances: input.balances, coverage: input.coverage, providerAccounts: input.accounts }
   }
 
   registerScenarioRoutes(app, database, owned, async (tx, portfolioId, source, publicInstruments): Promise<ScenarioBaseline> => {
     const { mode, asset, local } = source
-    const publicMatches = publicInstruments.length ? await tx.select({ id: instruments.id, token: instruments.externalId,
+    const asOf = new Date(source.asOf).toISOString()
+    const [demoPortfolio] = await tx.select({ demo: portfolios.demo }).from(portfolios).where(eq(portfolios.id, portfolioId))
+    const capture = demoPortfolio?.demo
+    const namespace = capture ? 'simulation:' + (capture.catalogRevision ?? capture.revision) + ':' : null
+    const tokens = publicInstruments.flatMap((row) => namespace ? [row.nativeInstrument!, namespace + row.nativeInstrument] : [row.nativeInstrument!])
+    const publicMatches = tokens.length ? await tx.select({ id: instruments.id, token: instruments.externalId,
       market: markets.externalId, provider: markets.providerCode }).from(instruments).innerJoin(markets, eq(instruments.marketId, markets.id))
-      .where(and(eq(markets.providerCode, 'polymarket'), inArray(instruments.externalId, publicInstruments.map((row) => row.nativeInstrument!)))) : []
+      .where(and(inArray(markets.providerCode, ['polymarket', 'kalshi']), inArray(instruments.externalId, tokens))) : []
     const aliases: Record<string, string> = {}
     const normalizedPublic = publicInstruments.map((row) => {
-      const exact = publicMatches.find((entry) => entry.provider === row.provider && entry.market === row.nativeMarket && entry.token === row.nativeInstrument)
+      const matches = (prefix: string) => publicMatches.find((entry) => entry.provider === row.provider
+        && entry.market === prefix + row.nativeMarket && entry.token === prefix + row.nativeInstrument)
+      const exact = (namespace ? matches(namespace) : undefined) ?? matches('')
       if (exact) aliases[row.id] = exact.id
       return { ...row, id: exact?.id ?? row.id }
     })
@@ -769,19 +840,29 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const venueFor = (provider: string) => ['polymarket', 'kalshi'].includes(provider) ? provider : undefined
     const metadataFor = (entry: Awaited<ReturnType<typeof loadExposureCatalog>>['metadata'][number]) => {
       const venue = venueFor(entry.provider)
-      return { market: entry.market, event: entry.event, outcome: entry.outcome, lifecycle: entry.lifecycle,
-        provider: entry.provider, nativeMarket: entry.providerMarket, nativeInstrument: entry.nativeInstrument, providerMarket: entry.providerMarket,
-        settlementAsset: entry.settlementAsset ?? entry.marketAsset, resolvesAt: entry.resolvesAt?.toISOString() ?? null,
+      const view = capture ? demoMarketAt(capture, entry.provider, entry.providerMarket, asOf) : null
+      const simulated = view?.identity
+      const updated = view?.asOf
+      const lifecycle = view?.lifecycle ?? entry.lifecycle
+      return { ...(updated?.feeSchedule ? { feeSchedule: updated.feeSchedule } : {}), market: entry.market, event: entry.event, outcome: entry.outcome, lifecycle,
+        provider: entry.provider, nativeMarket: simulated?.nativeMarket ?? entry.providerMarket,
+        nativeInstrument: simulated && namespace ? entry.nativeInstrument.slice(namespace.length) : entry.nativeInstrument,
+        providerMarket: entry.providerMarket,
+        settlementAsset: entry.settlementAsset ?? entry.marketAsset, resolvesAt: updated?.resolvesAt ?? entry.resolvesAt?.toISOString() ?? null,
         ...(venue ? { venue } : {}) }
     }
-    const asOf = new Date(source.asOf).toISOString()
     const actual = mode === 'actual' ? await loadExposureInputs(tx, portfolioId, asOf, asset,
       { accounts: source.accounts.join(','), ...(source.venue === undefined ? {} : { venue: source.venue }) }, catalog) : null
     const model = actual ?? await loadExposureCatalog(tx, asOf, asset, catalog, [], [], catalog)
     const listings = new Map(model.metadata.map((row) => [row.instrument, row]))
+    if (model.metadata.some((row) => row.providerMarket.startsWith('simulation:'))) {
+      if (model.metadata.some((row) => row.providerMarket.startsWith('simulation:')
+        && !row.providerMarket.startsWith('simulation:' + (capture?.catalogRevision ?? capture?.revision) + ':'))) throw new ScenarioError('demo_instrument_scope_mismatch')
+    }
     const baselineInstruments = new Map(normalizedPublic.map((row) => [row.id, row]))
     for (const id of catalog) {
-      const entry = listings.get(id)!
+      const entry = listings.get(id)
+      if (!entry) throw new ScenarioError('catalog_instrument_unavailable')
       if ((entry.settlementAsset ?? entry.marketAsset) && (entry.settlementAsset ?? entry.marketAsset) !== asset) throw new ScenarioError('catalog_instrument_asset_mismatch')
       baselineInstruments.set(id, { id, mark: null, ...baselineInstruments.get(id), ...metadataFor(entry) })
     }
@@ -789,7 +870,13 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const bucketKey = (row: { venue: string; account: string }) => JSON.stringify([row.venue, row.account])
     const cashRows = actual?.state.cash.filter((row) => row.asset === asset) ?? []
     const positions = actual?.state.holdings.filter((row) => row.asset === asset) ?? []
-    const buckets = mode === 'scratch' ? source.buckets.map((row) => ({ ...row, pending: '0' }))
+    const useObserved = mode === 'actual' && source.useReportedKalshiSnapshot === true
+    if (useObserved && asset !== 'USD') throw new ScenarioError('reported_kalshi_baseline_asset_mismatch')
+    const connectedKalshi = new Set(actual?.providerAccounts.filter((row) => row.venue === 'kalshi' && row.kind === 'authenticated_account')
+      .map((row) => row.account))
+    const observedBalances = useObserved ? actual!.response.reportedExposure.cash.filter((row) =>
+      row.venue === 'kalshi' && connectedKalshi.has(row.account) && row.availability === 'eligible') : []
+    const buckets: FundingBucket[] = mode === 'scratch' ? source.buckets.map((row) => ({ ...row, pending: '0' }))
       : actual!.response.context.accountIdentities.map((scope) => {
         const cash = cashRows.find((row) => row.venue === scope.venue && row.account === scope.account)
         const scoped = positions.filter((row) => row.venue === scope.venue && row.account === scope.account)
@@ -803,12 +890,15 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
         const inventoryComplete = pendingKnown && !actual!.state.discrepancies.some(({ scope: issue, reason }) =>
           issue.venue === scope.venue && issue.account === scope.account && (issue.asset === asset || issue.asset === 'UNKNOWN')
           && reason !== 'same_time_marks_conflict' && (issue.instrument !== null || issue.type === 'opening_inventory' || issue.type === 'unresolved_activity'))
-        return { id: bucketKey(scope), inventoryComplete, ...(tradingVenue ? { tradingVenue } : {}), venue: scope.venue, account: scope.account, cash: cash?.balance ?? null, pending,
+        const observed = cash?.balance == null ? observedBalances.find((row) => row.account === scope.account && row.venue === scope.venue) : undefined
+        return { id: bucketKey(scope), inventoryComplete, ...(tradingVenue ? { tradingVenue } : {}), venue: scope.venue, account: scope.account,
+          cash: cash?.balance ?? (observed ? new AnalyticalDecimal(observed.balance).toFixed() : null), pending,
+          ...(observed ? { cashObservation: { sourceRecordId: observed.sourceRecordId, asOf: observed.observedAt } } : {}),
           coverage: cash?.historyCoverage ?? 'unverified', inventoryAt: cash?.openingInventoryAt ?? null,
           pendingEntitlements: scoped.flatMap((row) => row.entitlements.map((entitlement) =>
             ({ instrument: row.instrument, ...entitlement }))) }
       })
-    const holdings = positions.filter((row) => new AnalyticalDecimal(row.quantity).gt(0)).map((row) => {
+    const holdings: ScenarioHolding[] = positions.filter((row) => new AnalyticalDecimal(row.quantity).gt(0)).map((row) => {
       const isCanonical = actual!.canonicalKeys.has(instrumentKey(row, row.instrument))
       const identity = isCanonical ? listings.get(row.instrument) : undefined
       const id = identity ? row.instrument : 'holding:' + digest([row.venue, row.account, row.instrument])
@@ -818,6 +908,26 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
         quantityKnown: row.quantityStatus === 'reconstructed_from_declaration', basis: row.basisAvailability === 'selected_events_only' ? row.basis : null,
         originalInstrument: row.instrument, mark: candidateMark, markAt: row.markAt }
     })
+    if (useObserved) {
+      for (const row of actual!.response.reportedExposure.rows) {
+        if (row.venue !== 'kalshi' || !connectedKalshi.has(row.account) || !row.eligibleQuantity || !new AnalyticalDecimal(row.quantity).gt(0)) continue
+        const bucket = buckets.find((entry) => entry.id === bucketKey(row))
+        const identity = listings.get(row.instrument)
+        if (!bucket || bucket.inventoryComplete || !identity) continue
+        const prior = holdings.findIndex((entry) => entry.bucket === bucket.id && entry.originalInstrument === row.instrument)
+        if (prior >= 0 && holdings[prior]?.quantityKnown) continue
+        baselineInstruments.set(row.instrument, { id: row.instrument, mark: null, ...baselineInstruments.get(row.instrument), ...metadataFor(identity) })
+        const holding = { bucket: bucket.id, instrument: row.instrument, originalInstrument: row.instrument,
+          quantity: new AnalyticalDecimal(row.quantity).toFixed(), quantityKnown: true, basis: null, mark: row.referenceMark,
+          markAt: row.referenceMark === null ? null : row.markAt?.toISOString() ?? null,
+          quantityObservation: { sourceRecordId: row.sourceRecordId, asOf: row.observedAt.toISOString() } }
+        if (prior < 0) holdings.push(holding)
+        else holdings[prior] = holding
+      }
+      if (!buckets.some((bucket) => bucket.cashObservation) && !holdings.some((row) => row.quantityObservation)) {
+        throw new ScenarioError('reported_kalshi_baseline_unavailable')
+      }
+    }
     for (const [id, instrument] of baselineInstruments) {
       if (!listings.has(id) || instrument.mark !== null || !actual) continue
       const observations = new Map(holdings.filter((row) => row.instrument === id && row.quantityKnown && row.mark !== null && row.markAt !== null)
@@ -840,6 +950,16 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       const reference = scopedReference([...observations.values()])
       if (reference) baselineInstruments.set(id, { ...instrument, ...reference })
     }
+    if (actual) {
+      const scoped = actual.providerAccounts.filter((row) => row.venue === 'kalshi' && row.kind === 'authenticated_account'
+        && actual.response.context.accountIdentities.some((entry) => entry.account === row.account && entry.venue === row.venue))
+      const environments = new Set(scoped.map((row) => row.externalId.startsWith('kalshi:demo:')))
+      const selectedKalshi = [...baselineInstruments.values()].filter((row) => row.provider === 'kalshi')
+      if (environments.size > 1 || selectedKalshi.some((row) => row.nativeMarket?.startsWith('demo:') && !environments.has(true))
+        || (environments.has(true) && selectedKalshi.some((row) => !row.nativeMarket?.startsWith('demo:')))) {
+        throw new ScenarioError('kalshi_scenario_environment_mismatch')
+      }
+    }
     if (!buckets.length || buckets.length > 100 || holdings.length > 250) throw new ScenarioError('baseline_scope_limit')
     const rules = model.rules.filter((rule) => model.effective.graph.has(rule.market) && rule.asset === asset && rule.reviewedAt.toISOString() <= asOf
       && [rule.yes, rule.no].every((id) => listings.get(id)?.market === rule.market)
@@ -858,10 +978,58 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       settlementGraphLimited: model.effective.graphLimit,
       missingRules: [...model.effective.graph].filter((id) => !rules.some((rule) => rule.id === id)).sort(),
       revisions: actual ? { public: digest(publicInstruments), financial: actual.response.context.evidenceRevision, coverage: actual.response.context.coverageRevision,
-        catalog: actual.response.catalogRevision, snapshots: actual.response.snapshotRevision, settlement: actual.response.settlementEvidenceRevision }
+        catalog: actual.response.catalogRevision, snapshots: useObserved ? digest([actual.response.snapshotRevision, buckets.map((bucket) => bucket.cashObservation ?? null)]) : actual.response.snapshotRevision,
+        settlement: actual.response.settlementEvidenceRevision }
         : { public: digest(publicInstruments), catalog: digest(model.metadata.map((row) => ({ ...row, resolvesAt: row.resolvesAt?.toISOString() ?? null })).sort((a, b) => a.instrument.localeCompare(b.instrument))),
           settlement: digest([rules.sort((a, b) => a.id.localeCompare(b.id)), constraints.sort((a, b) => a.left.localeCompare(b.left) || a.right.localeCompare(b.right))]) } }
   }, resolvePublic)
+
+  app.get<{ Params: { portfolioId: string }; Querystring: unknown }>(prefix + '/analytics/denominations', {
+    schema: { ...auth, tags: ['analytics'], params: portfolioParams, summary: 'Report native denominations and optional indicative USD value' },
+  }, async (request, reply) => {
+    const { portfolioId } = request.params
+    if (!await owned(portfolioId, request.principalId!)) return reply.code(404).send(missing)
+    const conversionRate = z.string().regex(/^\d{1,8}(?:\.\d{1,12})?$/).refine((rate) => new AnalyticalDecimal(rate).gt(0))
+    const query = z.object({ asOf: z.iso.datetime({ offset: true }), assumedUsdPerUsdc: conversionRate.optional(),
+      assumedUsdPerPusd: conversionRate.optional() }).strict().safeParse(request.query)
+    if (!query.success) return reply.code(422).send({ error: { code: 'invalid_denomination_scope' } })
+    const asOf = new Date(query.data.asOf).toISOString()
+    const input = await loadEvidence(portfolioId, asOf)
+    if (input.truncated) return reply.code(422).send({ error: { code: 'provider_evidence_limit' } })
+    const state = replayAccounting(input.evidence, asOf)
+    const assets = [...new Set([...state.cash, ...input.balances, ...input.positions].flatMap((row) => row.asset ? [row.asset] : []))].sort()
+    const accounts = new Map([...input.accounts, ...input.evidence.map((row) => row.observation)]
+      .map((row) => [JSON.stringify([row.venue, row.account]), { venue: row.venue, account: row.account }]))
+    const groups = assets.map((asset) => {
+      const scopeKey = (row: { account: string; venue: string }) => JSON.stringify([row.venue, row.account])
+      const rows = state.cash.filter((row) => row.asset === asset)
+      const observed = input.balances.filter((row) => row.asset === asset)
+      const knownScopes = new Map([...rows, ...observed, ...input.positions.filter((row) => row.asset === asset)]
+        .map((row) => [scopeKey(row), { account: row.account, venue: row.venue }]))
+      const ranked = new Map(rows.map((row) => [scopeKey(row), row]))
+      const known = rows.filter((row) => row.portfolioValue !== null)
+      const sum = known.reduce((value, row) => value.plus(row.portfolioValue!), new AnalyticalDecimal(0)).toFixed()
+      const complete = known.length > 0 && known.length === knownScopes.size
+      return { asset, knownValue: known.length ? sum : null, value: complete ? sum : null,
+        coverage: complete ? 'selected_asset_buckets' : 'partial',
+        observedCash: observed.map(({ venue, account, balance, observedAt, sourceRecordId }) =>
+          ({ venue, account, balance, observedAt, sourceRecordId })),
+        accounts: [...knownScopes].map(([key, row]) => ({ ...row, balance: ranked.get(key)?.balance ?? null,
+          portfolioValue: ranked.get(key)?.portfolioValue ?? null })) }
+    })
+    const unknownAccounts = [...accounts.values()].filter((scope) => !state.cash.some((row) => row.account === scope.account && row.venue === scope.venue))
+    const rate = query.data.assumedUsdPerUsdc
+    const pusd = query.data.assumedUsdPerPusd
+    const rates: Record<string, string | undefined> = { USD: '1', USDC: rate, PUSD: pusd }
+    const supported = groups.length > 0 && !unknownAccounts.length && groups.every((group) =>
+      Boolean(rates[group.asset]) && group.value !== null)
+    const missingAssumption = groups.some((group) => (group.asset === 'USDC' || group.asset === 'PUSD') && !rates[group.asset])
+    return { asOf, scope: 'selected_financial_evidence_only', groups, unknownAccounts,
+      indicativeUsd: supported ? { value: groups.reduce((total, group) =>
+        total.plus(new AnalyticalDecimal(group.value!).mul(rates[group.asset]!)), new AnalyticalDecimal(0)).toFixed(),
+        usdPerUsdc: rate, ...(pusd ? { usdPerPusd: pusd } : {}), methodology: 'user_assumed_rate', asOf, fundsTransferable: false } : null,
+      conversionAvailability: supported ? 'indicative' : missingAssumption ? 'assumption_required' : 'incomplete_or_unsupported_evidence' }
+  })
 
   app.get<{ Params: { portfolioId: string }; Querystring: unknown }>(prefix + '/analytics/exposure', {
     schema: { ...auth, tags: ['analytics'], summary: 'Read allocation, resolution timeline and reviewed settlement risk',

@@ -82,14 +82,19 @@ async function upsertSourceRecord(
     ))
     .limit(1)
 
+  const signedNetPosition = record.kind === 'position' && payload.signed_net_lifecycle === true
+  const incomingRevisionAt = record.kind === 'market' && record.sourceUpdatedAt !== null
+    ? new Date(record.sourceUpdatedAt)
+    : signedNetPosition && typeof payload.last_updated_ts === 'string' ? new Date(payload.last_updated_ts) : null
   if (current) {
     if (current.payloadSha256 === payloadSha256) return { id: current.id, accepted: true, duplicate: true }
-    const incomingRevisionAt = record.kind === 'market' && record.sourceUpdatedAt !== null
-      ? new Date(record.sourceUpdatedAt)
-      : null
     const staleMarketRevision = record.kind === 'market' && current.sourceRevisionAt !== null
       && (incomingRevisionAt === null || incomingRevisionAt < current.sourceRevisionAt)
-    if (staleMarketRevision) {
+    const stalePosition = signedNetPosition && current.sourceRevisionAt !== null
+      && (incomingRevisionAt === null || incomingRevisionAt < current.sourceRevisionAt
+        || (incomingRevisionAt.getTime() === current.sourceRevisionAt.getTime()
+          && (payload.position_fp !== current.payload.position_fp || (current.payload.finalized_market === true && payload.finalized_market !== true))))
+    if (staleMarketRevision || stalePosition) {
       if (current.payloadSha256 !== payloadSha256) {
         await tx.insert(sourceRecordRevisions).values({
           sourceRecordId: current.id,
@@ -104,7 +109,7 @@ async function upsertSourceRecord(
       // Keep the latest source-record payload, but let upsertMarket decide the
       // event and market revisions independently. A newer event revision can
       // accompany an older market revision in the same provider response.
-      return { id: current.id, accepted: true, duplicate: false }
+      return { id: current.id, accepted: !stalePosition, duplicate: false }
     }
     if (current.payloadSha256 !== payloadSha256) {
       await tx.insert(sourceRecordRevisions).values({
@@ -122,7 +127,7 @@ async function upsertSourceRecord(
       payloadSha256,
       normalizationVersion: '1',
       sourceOccurredAt: sourceOccurredAt === null ? null : new Date(sourceOccurredAt),
-      sourceRevisionAt: record.kind === 'market' && record.sourceUpdatedAt !== null ? new Date(record.sourceUpdatedAt) : null,
+      sourceRevisionAt: incomingRevisionAt,
       retrievedAt: new Date(retrievedAt),
     }).where(eq(sourceRecords.id, current.id))
     return { id: current.id, accepted: true, duplicate: false }
@@ -136,7 +141,7 @@ async function upsertSourceRecord(
     payloadSha256,
     normalizationVersion: '1',
     sourceOccurredAt: sourceOccurredAt === null ? null : new Date(sourceOccurredAt),
-    sourceRevisionAt: record.kind === 'market' && record.sourceUpdatedAt !== null ? new Date(record.sourceUpdatedAt) : null,
+    sourceRevisionAt: incomingRevisionAt,
     retrievedAt: new Date(retrievedAt),
   }).onConflictDoNothing().returning({ id: sourceRecords.id })
   if (created) return { id: created.id, accepted: true, duplicate: false }
@@ -150,7 +155,7 @@ async function upsertSourceRecord(
   return { id: raced.id, accepted: true, duplicate: true }
 }
 
-async function upsertMarket(
+export async function upsertMarket(
   tx: DatabaseTransaction,
   providerCode: string,
   record: Extract<NormalizedRecord, { kind: 'market' }>,
@@ -348,9 +353,22 @@ export async function persistPage(input: PersistPageInput): Promise<PersistPageR
       recordsByType[record.kind] = (recordsByType[record.kind] ?? 0) + 1
     }
 
-    for (const record of financialRecords) {
+    for (const incoming of financialRecords) {
+      let record = incoming
+      if (input.providerCode === 'kalshi' && incoming.kind === 'activity_fact'
+        && incoming.externalId.startsWith('settlement:') && incoming.occurredAt !== null) {
+        const [prior] = await tx.select({ time: sourceRecords.sourceOccurredAt }).from(sourceRecords)
+          .where(and(eq(sourceRecords.providerAccountId, input.providerAccountId), eq(sourceRecords.recordType, 'activity_fact'),
+            eq(sourceRecords.externalRecordId, incoming.externalId))).limit(1)
+        if (prior?.time && prior.time.getTime() !== Date.parse(incoming.occurredAt)) {
+          record = { ...incoming, externalId: incoming.externalId + ':time-conflict:' + Date.parse(incoming.occurredAt),
+            classification: 'unresolved', activityType: 'KALSHI_SETTLEMENT_TIME_CONFLICT',
+            resolutionReason: 'kalshi_settlement_time_conflict' }
+        }
+      }
       if ('feeAmount' in record) assertFeeIsExplicit(record)
       const source = await upsertSourceRecord(tx, { providerAccountId: input.providerAccountId, record, retrievedAt: input.retrievedAt })
+      if (!source.accepted) continue
       const sourceRecordId = source.id
       if (source.duplicate) exactDuplicates += 1
       else recordsPersisted += 1
@@ -494,7 +512,7 @@ export async function persistPage(input: PersistPageInput): Promise<PersistPageR
           .from(positionSnapshots)
           .where(and(eq(positionSnapshots.providerAccountId, input.providerAccountId), eq(positionSnapshots.instrumentId, instrumentId), eq(positionSnapshots.isCurrent, true)))
           .limit(1)
-        const canUpdateCurrent = input.snapshotSemantics.positions === 'incremental'
+        const canUpdateCurrent = input.snapshotSemantics.positions === 'incremental' && input.providerCode !== 'kalshi'
           && (!coverage?.snapshotAsOf || observedAt >= coverage.snapshotAsOf)
           && (!current || observedAt >= current.observedAt)
         if (canUpdateCurrent) {
@@ -865,6 +883,7 @@ export async function finalizeSnapshots(input: {
   stream: ProviderSyncStream
   reports: Partial<Record<CoverageEntity, EntityCoverageReport>>
   finishedAt: Date
+  stageKalshiPositions?: boolean
 }): Promise<{ positionSnapshotComplete: boolean; cashBalanceSnapshotComplete: boolean }> {
   const { tx, providerAccountId, runId, stream, reports, finishedAt } = input
   let positionSnapshotComplete = false
@@ -904,6 +923,21 @@ export async function finalizeSnapshots(input: {
         eq(schema.dataCoverage.entityType, 'positions'),
       ))
       positionSnapshotComplete = true
+    }
+  }
+
+  if (input.stageKalshiPositions && stream.snapshotSemantics.positions === 'incremental') {
+    const incoming = await tx.selectDistinctOn([positionSnapshots.instrumentId], {
+      id: positionSnapshots.id, instrument: positionSnapshots.instrumentId, observedAt: positionSnapshots.observedAt,
+    }).from(positionSnapshots).where(and(eq(positionSnapshots.providerAccountId, providerAccountId),
+      eq(positionSnapshots.syncRunId, runId))).orderBy(positionSnapshots.instrumentId, sql`${positionSnapshots.ingestedAt} DESC`, sql`${positionSnapshots.id} DESC`)
+    for (const row of incoming) {
+      const scope = and(eq(positionSnapshots.providerAccountId, providerAccountId), eq(positionSnapshots.instrumentId, row.instrument),
+        eq(positionSnapshots.isCurrent, true))
+      const [current] = await tx.select({ observedAt: positionSnapshots.observedAt }).from(positionSnapshots).where(scope).limit(1)
+      if (current && current.observedAt > row.observedAt) continue
+      await tx.update(positionSnapshots).set({ isCurrent: false }).where(scope)
+      await tx.update(positionSnapshots).set({ isCurrent: true }).where(eq(positionSnapshots.id, row.id))
     }
   }
 

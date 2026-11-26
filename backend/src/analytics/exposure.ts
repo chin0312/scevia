@@ -186,14 +186,29 @@ interface SnapshotCoverage {
   account: string; venue: string; entity: string; status: string; lastSuccessfulRunId: string | null
   lastAttemptStatus: string | null; lastAttemptAt: Date | null; lastSuccessfulSyncAt: Date | null
 }
+interface ReportedBalance {
+  account: string; venue: string; asset: string; sourceRecordId: string; syncRunId: string; observedAt: Date; balance: string
+}
+
+export function reportedCashRows(balances: ReportedBalance[], coverage: SnapshotCoverage[], asset: string, asOf: string) {
+  const cutoff = Date.parse(asOf)
+  return balances.filter((row) => row.asset === asset && row.observedAt.getTime() <= cutoff).map((row) => {
+    const scope = coverage.find((entry) => entry.entity === 'cash_balances' && entry.account === row.account && entry.venue === row.venue)
+    const recent = cutoff - row.observedAt.getTime() <= 86_400_000
+    const eligible = recent && scope?.lastSuccessfulRunId === row.syncRunId
+      && scope.lastSuccessfulSyncAt !== null && scope.lastSuccessfulSyncAt.getTime() <= cutoff
+    return { ...row, observedAt: row.observedAt.toISOString(), availability: eligible ? 'eligible' as const : recent ? 'uncertain' as const : 'stale' as const }
+  })
+}
+
 export function analyzeReportedExposure(snapshots: ReportedSnapshot[], coverage: SnapshotCoverage[], asOf: string,
-  asset: string, metadata: MarketIdentity[], rules: ReviewedRule[], edges: SettlementConstraint[], graphLimit: boolean) {
+  asset: string, metadata: MarketIdentity[], rules: ReviewedRule[], edges: SettlementConstraint[], graphLimit: boolean, balances: ReportedBalance[] = []) {
   const cutoff = Date.parse(asOf)
   const index = new Map(metadata.map((item) => [item.instrument, item]))
   const rows = snapshots.filter((row) => row.asset === asset && row.observedAt.getTime() <= cutoff).map((row) => {
     const scope = coverage.find((entry) => entry.entity === 'positions' && entry.account === row.account && entry.venue === row.venue)
     const recent = cutoff - row.observedAt.getTime() <= 86_400_000
-    const member = scope?.lastSuccessfulRunId === row.syncRunId && scope.lastAttemptStatus === 'complete'
+    const member = scope?.lastSuccessfulRunId === row.syncRunId && (scope.lastAttemptStatus === 'complete' || row.venue === 'kalshi')
       && scope.lastSuccessfulSyncAt !== null && scope.lastSuccessfulSyncAt.getTime() <= cutoff
       && scope.lastAttemptAt !== null && scope.lastAttemptAt.getTime() <= cutoff
     const usableMark = row.mark !== null && row.markAt !== null && row.markAt.getTime() <= cutoff
@@ -203,7 +218,7 @@ export function analyzeReportedExposure(snapshots: ReportedSnapshot[], coverage:
       providerCoverage: scope?.status ?? 'unknown',
       eligibleQuantity: recent && member && !new D(row.quantity).isNegative(),
       referenceMark: usableMark ? row.mark : null,
-      observedMarketValue: recent && member && usableMark ? new D(row.quantity).mul(row.mark!).toFixed() : null }
+      observedMarketValue: recent && member ? new D(row.quantity).isZero() ? '0' : usableMark ? new D(row.quantity).mul(row.mark!).toFixed() : null : null }
   })
   const eligibleRules = rules.filter((rule) => rule.asset === asset && rule.reviewedAt.toISOString() <= asOf
     && index.get(rule.yes)?.market === rule.market && index.get(rule.no)?.market === rule.market
@@ -219,7 +234,25 @@ export function analyzeReportedExposure(snapshots: ReportedSnapshot[], coverage:
   const result = graphLimit ? { status: 'unavailable' as const, reason: 'reviewed_graph_limit' }
     : settlementRisk(groups, edges.filter((edge) => connected.has(edge.left) && connected.has(edge.right)),
       [...connected].filter((market) => !groups.some((group) => group.id === market)))
+  const cash = reportedCashRows(balances, coverage, asset, asOf)
+  const knownCash = cash.filter((row) => row.availability === 'eligible').map((row) => row.balance)
+  const knownPositions = rows.flatMap((row) => row.observedMarketValue === null ? [] : [row.observedMarketValue])
+  const knownSubtotal = (values: string[]) => values.length ? values.reduce((total, value) => total.plus(value), new D(0)).toFixed() : null
+  const events = new Map<string, Decimal>()
+  for (const row of rows) {
+    const event = index.get(row.instrument)?.event
+    if (event && row.observedMarketValue !== null && new D(row.observedMarketValue).gt(0)) {
+      events.set(event, (events.get(event) ?? new D(0)).plus(row.observedMarketValue))
+    }
+  }
+  const eventRows = [...events].sort(([left], [right]) => left.localeCompare(right))
+  const eventMetrics = concentration(eventRows.map(([, value]) => value.toFixed()))
   return { scope: 'provider_reported_known_components', effectivePortfolioReplacement: false,
+    cash, knownCashSubtotal: knownSubtotal(knownCash), knownPositionSubtotal: knownSubtotal(knownPositions),
+    knownCombinedSubtotal: knownSubtotal([...knownCash, ...knownPositions]),
+    portfolioNav: null, valuationScope: 'known_components_only',
+    eventAllocation: { denominator: eventMetrics?.denominator ?? null, hhi: eventMetrics?.hhi ?? null,
+      rows: eventRows.map(([id, value], index) => ({ id, value: value.toFixed(), weight: eventMetrics!.weights[index]! })) },
     rows, settlement: { scope: 'eligible_observed_positions_only', unsupportedCount: rows.filter((row) => !matched.includes(row)).length,
       result } }
 }

@@ -2,7 +2,7 @@ import { and, desc, eq, inArray, lte, sql } from 'drizzle-orm'
 import { Decimal } from 'decimal.js'
 import type { Database } from '../db/client.js'
 import { activityFactOccurrences, cashBalanceSnapshots, cashMovements, dataCoverage, fills, instruments, markets, positionSnapshots,
-  priceObservations, providerAccounts, providerActivityFacts, settlements, sourceRecords } from '../db/schema.js'
+  priceObservations, providerAccounts, providerActivityFacts, settlements, sourceRecords, syncRuns } from '../db/schema.js'
 import type { Evidence, FinancialObservation } from './model.js'
 
 const limit = 5001
@@ -28,12 +28,14 @@ export async function loadProviderEvidence(db: Pick<Database, 'select' | 'select
       .innerJoin(providerAccounts, eq(settlements.providerAccountId, providerAccounts.id))
       .innerJoin(sourceRecords, eq(settlements.sourceRecordId, sourceRecords.id))
       .where(and(owned, lte(settlements.settledAt, asOf))).orderBy(settlements.settledAt, settlements.id).limit(limit)
-  const factRows = await db.select({ ...account, ...source, row: providerActivityFacts, firstIngestedAt: sourceRecords.ingestedAt,
+  const factRows = await db.select({ ...account, ...source, row: providerActivityFacts, instrument: instruments.id, payload: sourceRecords.payload, firstIngestedAt: sourceRecords.ingestedAt,
       largestObservedRunCount: sql<number | null>`(select max(observations) from ${activityFactOccurrences}
         where ${activityFactOccurrences.activityFactId} = ${providerActivityFacts.id})`.as('largest_observed_run_count'),
     }).from(providerActivityFacts)
       .innerJoin(providerAccounts, eq(providerActivityFacts.providerAccountId, providerAccounts.id))
       .innerJoin(sourceRecords, eq(providerActivityFacts.sourceRecordId, sourceRecords.id))
+      .leftJoin(markets, and(eq(providerAccounts.providerCode, markets.providerCode), eq(providerActivityFacts.externalMarketId, markets.externalId)))
+      .leftJoin(instruments, and(eq(instruments.marketId, markets.id), eq(providerActivityFacts.externalInstrumentId, instruments.externalId)))
       .where(owned).orderBy(providerActivityFacts.id).limit(limit)
   const markRows = await db.select({ ...account, ...source, row: priceObservations }).from(priceObservations)
       .innerJoin(providerAccounts, eq(priceObservations.providerAccountId, providerAccounts.id))
@@ -44,19 +46,25 @@ export async function loadProviderEvidence(db: Pick<Database, 'select' | 'select
       syncRunId: positionSnapshots.syncRunId, asset: positionSnapshots.settlementAssetCode,
       observedAt: positionSnapshots.observedAt, mark: positionSnapshots.markPrice, markAt: positionSnapshots.markAt, quantity: positionSnapshots.quantity, averageCost: positionSnapshots.averageCostPrice,
     }).from(positionSnapshots).innerJoin(providerAccounts, eq(positionSnapshots.providerAccountId, providerAccounts.id))
-      .where(and(owned, lte(positionSnapshots.observedAt, asOf), eq(positionSnapshots.origin, 'provider_reported')))
+      .innerJoin(syncRuns, eq(positionSnapshots.syncRunId, syncRuns.id))
+      .where(and(owned, lte(positionSnapshots.observedAt, asOf), eq(positionSnapshots.origin, 'provider_reported'),
+        sql`(${providerAccounts.providerCode} <> 'kalshi' OR ${providerAccounts.kind} <> 'authenticated_account'
+          OR (${syncRuns.status} = 'complete' AND ${syncRuns.finishedAt} <= ${asOf.toISOString()}::timestamptz))`))
       .orderBy(positionSnapshots.providerAccountId, positionSnapshots.instrumentId, desc(positionSnapshots.observedAt), desc(positionSnapshots.ingestedAt), desc(positionSnapshots.id)).limit(501)
   const balances = await db.selectDistinctOn([cashBalanceSnapshots.providerAccountId, cashBalanceSnapshots.assetCode], {
       ...account, sourceRecordId: cashBalanceSnapshots.sourceRecordId, syncRunId: cashBalanceSnapshots.syncRunId,
       asset: cashBalanceSnapshots.assetCode, observedAt: cashBalanceSnapshots.observedAt, balance: cashBalanceSnapshots.balance,
     }).from(cashBalanceSnapshots).innerJoin(providerAccounts, eq(cashBalanceSnapshots.providerAccountId, providerAccounts.id))
-      .where(and(owned, lte(cashBalanceSnapshots.observedAt, asOf)))
+      .innerJoin(syncRuns, eq(cashBalanceSnapshots.syncRunId, syncRuns.id))
+      .where(and(owned, lte(cashBalanceSnapshots.observedAt, asOf),
+        sql`(${providerAccounts.providerCode} <> 'kalshi' OR ${providerAccounts.kind} <> 'authenticated_account'
+          OR (${syncRuns.cashBalanceSnapshotComplete} AND ${syncRuns.finishedAt} <= ${asOf.toISOString()}::timestamptz))`))
       .orderBy(cashBalanceSnapshots.providerAccountId, cashBalanceSnapshots.assetCode, desc(cashBalanceSnapshots.observedAt), desc(cashBalanceSnapshots.ingestedAt), desc(cashBalanceSnapshots.id)).limit(501)
   const coverage = await db.select({ ...account, entity: dataCoverage.entityType, status: dataCoverage.status,
       lastSuccessfulRunId: dataCoverage.lastSuccessfulRunId, lastSuccessfulSyncAt: dataCoverage.lastSuccessfulSyncAt,
       lastAttemptAt: dataCoverage.lastAttemptAt, lastAttemptStatus: dataCoverage.lastAttemptStatus })
       .from(dataCoverage).innerJoin(providerAccounts, eq(dataCoverage.providerAccountId, providerAccounts.id)).where(owned).limit(limit)
-  const accounts = await db.select({ ...account, kind: providerAccounts.kind }).from(providerAccounts).where(owned).limit(limit)
+  const accounts = await db.select({ ...account, kind: providerAccounts.kind, externalId: providerAccounts.externalAccountId }).from(providerAccounts).where(owned).limit(limit)
   const evidence: Evidence[] = []
   const add = (ref: { account: string; venue: string; sourceRecordId: string; payloadSha256: string },
     event: Pick<FinancialObservation, 'id' | 'timestamp' | 'type' | 'asset'> & Partial<FinancialObservation>, unresolvedReason?: string) => {
@@ -91,11 +99,26 @@ export async function loadProviderEvidence(db: Pick<Database, 'select' | 'select
   }
   for (const ref of factRows) {
     const row = ref.row
+    if (ref.venue === 'kalshi' && ['HISTORICAL_POSITION', 'CASH_STATUS_OBSERVATION', 'KALSHI_PAYOUT_UNVERIFIED'].includes(row.activityType)) continue
     const knownAt = row.occurredAt ?? ref.firstIngestedAt
     if (knownAt > asOf) continue
-    add(ref, { id: null, timestamp: knownAt.toISOString(), type: 'unresolved_activity', asset: row.assetCode ?? 'UNKNOWN',
+    if (ref.venue === 'kalshi' && ref.instrument && row.quantity !== null && row.amount !== null && row.price !== null
+      && row.assetCode === 'USD' && ['KALSHI_BINARY_ENTITLEMENT', 'KALSHI_BINARY_PAYOUT'].includes(row.activityType)) {
+      const paid = row.activityType === 'KALSHI_BINARY_PAYOUT'
+      const id = 'kalshi:' + row.externalId
+      add(ref, { id, timestamp: knownAt.toISOString(), type: paid ? 'redemption' : 'settlement',
+        sequence: paid ? 2 : 1, ...(paid ? { entitlementId: id.slice(0, -':receipt'.length) } : {}),
+        asset: 'USD', instrument: ref.instrument, quantity: fixed(row.quantity), amount: fixed(row.amount), price: fixed(row.price) })
+      continue
+    }
+    const confirmableCash = ref.venue === 'kalshi' && row.resolutionReason === 'kalshi_final_cash_requires_account_attribution'
+      && ['KALSHI_APPLIED_DEPOSIT', 'KALSHI_APPLIED_WITHDRAWAL'].includes(row.activityType) && row.amount !== null
+      && typeof ref.payload.fee_cents === 'number' && Number.isSafeInteger(ref.payload.fee_cents) && ref.payload.fee_cents >= 0
+    add(ref, { id: null, timestamp: knownAt.toISOString(), type: confirmableCash
+      ? row.activityType === 'KALSHI_APPLIED_DEPOSIT' ? 'deposit' : 'withdrawal' : 'unresolved_activity', asset: row.assetCode ?? 'UNKNOWN',
+      ...(confirmableCash ? { fee: new Decimal(ref.payload.fee_cents as number).div(100).toFixed() } : {}),
       instrument: row.externalInstrumentId, quantity: nullable(row.quantity), amount: nullable(row.amount), price: nullable(row.price),
-    }, 'provider_activity_requires_reconciliation')
+    }, confirmableCash ? 'kalshi_final_cash_requires_account_attribution' : 'provider_activity_requires_reconciliation')
     evidence.at(-1)!.providerActivity = {
       type: row.activityType, classification: row.classification, occurredAt: row.occurredAt?.toISOString() ?? null,
       transactionHash: row.transactionHash, externalId: row.externalId, market: row.externalMarketId,

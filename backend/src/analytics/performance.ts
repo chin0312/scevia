@@ -117,16 +117,20 @@ function upperBound(sorted: readonly number[], cutoff: number) {
 
 function valuation(replay: ValuationReplay, accounts: string[], asset: string, openingCutoff: string, scopes: Array<{ venue: string; account: string }>) {
   const balances = replay.cash.filter((bucket) => bucket.asset === asset)
-  const complete = coversAccounts(balances, accounts, scopes) && balances.every((bucket) => bucket.portfolioValue !== null)
+  const complete = coversAccounts(balances, accounts, scopes) && balances.every((bucket) => bucket.referencePortfolioValue !== null)
+  const markTimes = replay.holdings.filter((row) => row.asset === asset && decimal(row.quantity).gt(0) && row.markAt !== null)
+    .map((row) => row.markAt!).sort()
   return {
     asOf: replay.asOf, accounts: balances.length,
-    knownValue: balances.some((bucket) => bucket.portfolioValue !== null)
-      ? sum(balances.flatMap((bucket) => bucket.portfolioValue ?? [])).toFixed() : null,
-    value: complete ? sum(balances.map((bucket) => bucket.portfolioValue!)).toFixed() : null,
+    knownValue: balances.some((bucket) => bucket.referencePortfolioValue !== null)
+      ? sum(balances.flatMap((bucket) => bucket.referencePortfolioValue ?? [])).toFixed() : null,
+    value: complete ? sum(balances.map((bucket) => bucket.referencePortfolioValue!)).toFixed() : null,
+    oldestReferenceMarkAt: markTimes[0] ?? null,
+    staleReferenceCount: markTimes.filter((time) => Date.parse(replay.asOf) - Date.parse(time) > dayMs).length,
     valuationQuality: !complete ? 'unavailable' as const
-      : replay.holdings.some((row) => row.asset === asset && decimal(row.quantity).gt(0) && row.markAt !== replay.asOf)
+      : markTimes.some((time) => time !== replay.asOf)
         ? 'carry_forward_reference_estimate' as const : 'reconstructed_selected_value' as const,
-    returnEligible: complete && balances.every((bucket) => bucket.historyCoverage === 'user_declared_complete'
+    returnEligible: complete && balances.every((bucket) => ['user_declared_complete', 'simulated_ledger_complete'].includes(bucket.historyCoverage)
       && bucket.historyFrom !== null && bucket.historyFrom <= openingCutoff && bucket.netContributions !== null),
   }
 }
@@ -161,13 +165,13 @@ export function analyzePerformance(evidence: Evidence[], accounts: string[], ass
     partitions.set(key, partition)
   }
   // Account/venue scopes have no shared inventory or cash. Reuse their projections until
-  // another source row arrives, a reference mark expires, or a declaration window ends.
+  // another source row arrives or a declaration window ends.
   const prepared = [...partitions.values()].map((partition) => {
     const rows = partition.slice().sort((a, b) => a.observation.timestamp.localeCompare(b.observation.timestamp))
     const times = rows.map((row) => Date.parse(row.observation.timestamp))
     const breakpoints = [...new Set(rows.flatMap((row, index) => {
       const time = times[index]!
-      return [time, ...(row.observation.type === 'mark' ? [time + dayMs + 1] : []),
+      return [time,
         ...(row.observation.coveredThrough ? [Date.parse(row.observation.coveredThrough) + 1] : [])]
     }))].sort((a, b) => a - b)
     return { rows, times, breakpoints, projections: new Map<number, Omit<ValuationReplay, 'asOf'>>() }

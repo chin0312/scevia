@@ -55,3 +55,19 @@ Conditional binary payouts retain established provider units. A declaration over
 `sameActualValuationReferences` covers holding-specific marks and `sameValuationAssumptions` covers instrument references and scenario overrides. `sameFeeMethodology` compares formula categories and `sameFeeAssumptions` includes amounts, rates and material provider parameters. Underfunded and partially funded drafts retain known values and shortfalls. Their normalized change is unavailable.
 
 The scenario settlement result can report `no_open_exposure` with zero gross payout when inventory is established and all open quantities are zero. Eligible cash plus pending entitlements then gives the same modeled minimum and maximum. Incomplete inventory retains unavailable exposure.
+
+Kalshi catalog choices use a provider-native ticker and explicit outcome ID. A scenario can capture a labeled retrieved quote through its frozen preview. Native USD and USDC funding remain isolated and the indicative denomination display rate does not fund trades or rewrite scenario results.
+
+### Connected Kalshi snapshot preview
+
+An actual USD source may explicitly set `useReportedKalshiSnapshot: true`. For the selected authenticated Kalshi accounts, the baseline can freeze recent available cash when reconstructed cash is unavailable, and current observed holdings when reconstructed inventory is incomplete. The baseline and evaluation identify the underlying source records and observation times. Basis is left unknown for snapshot positions, and unobserved inventory remains unknown. A supported sale can produce known cash and position effects while aggregate value, realized P&L and complete settlement stay unavailable. The opt-in leaves Phase 3 accounting and reviewed rules unchanged.
+
+Save and evaluate with the preview token to retain those records. An explicit rebase can report `holding_no_longer_observed`; this is uncertainty, distinct from an established closure. Demo public outcome IDs preserve their `demo:` prefix in `assetId`.
+
+### Multiple denomination draft evaluation
+
+Capture one baseline token per denomination at the same financial cutoff, then call `POST /evaluate-denominations` with `components: [{ baselineToken, input }, ...]` and optional `assumedUsdPerUnit` rates keyed by `USDC` or `PUSD`. The existing evaluator runs independently for each denomination and account. The reporting-only indicative USD value requires every component to be valued, funded and convertible. Joint contractual extrema are unavailable. The response carries `previewDigest`. Send the same component tokens, inputs and rates plus that digest and a name to `POST /denomination-scenarios`. The saved row persists frozen component baselines and rates independently of process-local tokens.
+
+Under `/denomination-scenarios`, list or resume with GET, evaluate the current saved revision in the resume response, and use `PATCH /{id}` for per-asset inputs. Use `POST /compare` with scenario IDs for component compatibility and reporting-rate agreement. `/{id}/duplicate`, `/{id}/delete`, and `/{id}/instruments` support duplication, revision-checked deletion, and extension of one selected asset. An actual-baseline rebase first posts `revision`, `asOf` and optional reviewed `inputs` to `/{id}/rebase`. Confirm with the returned preview token and unchanged revision. A conflict response requires a fresh preview with explicit operation changes.
+
+Denomination scenario PATCH accepts an explicit `assumedUsdPerUnit` revision. Omission preserves the frozen assumptions and `null` clears them. Saved evaluation and rebase keep each account's native funding and settlement separate. A demo public outcome that exactly matches a held provider-native instrument resolves to the existing simulated canonical ID. A PUSD alias uses only an owned capture that independently identifies the same instrument and denomination. USDC-coded public prices and fees do not become PUSD evidence.

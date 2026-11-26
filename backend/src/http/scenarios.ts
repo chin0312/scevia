@@ -7,7 +7,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify'
 import { z } from 'zod'
 import { digest } from '../accounting/decisions.js'
 import type { Database } from '../db/client.js'
-import { portfolioScenarios as scenarios, portfolios } from '../db/schema.js'
+import { portfolioScenarios as scenarios, portfolioScenarioBundles as bundles, portfolios } from '../db/schema.js'
 import { evaluate, validateScenarioOperations, validateInstrumentIdentities, ScenarioError, type ScenarioBaseline, type ScenarioInput, type ScenarioInstrument } from '../scenarios/engine.js'
 
 const id = z.string().trim().min(1).max(200)
@@ -23,7 +23,7 @@ const sourceCommon = {
 }
 const source = z.discriminatedUnion('mode', [
   z.object({ ...sourceCommon, mode: z.literal('actual'), accounts: z.array(id.refine((value) => !value.includes(','))).min(1).max(100),
-    venue: id.optional() }).strict(),
+    venue: id.optional(), useReportedKalshiSnapshot: z.boolean().optional() }).strict(),
   z.object({ ...sourceCommon, mode: z.literal('scratch'), buckets: z.array(z.object({
     id, venue: id, account: id, cash: cashAmount,
   }).strict()).min(1).max(100) }).strict(),
@@ -66,6 +66,11 @@ const extend = instrumentSelection.extend({ revision, input: input.optional() })
 const previewExtension = instrumentSelection.extend({ baselineToken: z.string().length(64) }).strict()
 const evaluation = z.union([z.object({ source, input }).strict(), z.object({ baselineToken: z.string().length(64), input }).strict(), z.object({ scenarioId: z.uuid(), input: input.optional() }).strict()])
 const ids = z.object({ scenarioIds: z.array(z.uuid()).min(2).max(8) }).strict()
+export type FrozenDenominationScenario = {
+  components: Array<{ source: BaselineSource; baseline: ScenarioBaseline; input: ScenarioInput }>
+  assumedUsdPerUnit?: Partial<Record<'USDC' | 'PUSD', string>> | undefined
+}
+
 type Scope = { portfolioId: string; scenarioId?: string }
 type Read = Pick<Database, 'select' | 'selectDistinctOn'>
 
@@ -114,7 +119,7 @@ function comparisonDimensions(rows: Array<{ baseline: ScenarioBaseline; input: S
       const id = baseline.instrumentAliases?.[instrument] ?? instrument
       const schedule = fee.mode === 'provider' ? baseline.instruments.find((row) => row.id === id)?.feeSchedule : undefined
       return { bucket, id, fee: 'value' in fee ? { ...fee, value: new Decimal(fee.value).toFixed() } : fee,
-        schedule: schedule ? { version: schedule.version, rate: new Decimal(schedule.rate).toFixed(), denomination: schedule.denomination, source: schedule.source } : null }
+        schedule: schedule ? { version: schedule.version, rate: new Decimal(schedule.rate).toFixed(), denomination: schedule.denomination, source: schedule.source, ...('makerRate' in schedule ? { makerRate: schedule.makerRate } : {}) } : null }
     }).sort((a, b) => a.bucket.localeCompare(b.bucket) || a.id.localeCompare(b.id))),
     sameCapitalBudget: rows.every((row) => row.result.weightBudget !== null && row.result.weightBudget === rows[0]!.result.weightBudget)
       && same(({ baseline, result }) => [baseline.asset, result.bridge.addedCapital, result.bridge.withdrawnCapital]),
@@ -150,7 +155,7 @@ function run(baseline: ScenarioBaseline, changes: ScenarioInput) {
 export function registerScenarioRoutes(app: FastifyInstance, db: Database,
   owned: (portfolioId: string, ownerId: string) => Promise<boolean>,
   baseline: (tx: Read, portfolioId: string, source: BaselineSource, publicInstruments: ScenarioInstrument[]) => Promise<ScenarioBaseline>,
-  resolvePublic?: (url: string) => Promise<unknown>) {
+  resolvePublic?: (url: string, type: import('../scenarios/public-market.js').PublicSelection['assetIdType'], assetId?: string) => Promise<unknown>) {
   const path = '/portfolios/:portfolioId/scenarios'
   const previews = new Map<string, { portfolioId: string; source: BaselineSource; baseline: ScenarioBaseline; expires: number }>()
   const previewLimit = 64
@@ -159,9 +164,24 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
     validateSource(value)
     if (!frozenPublic && value.publicOutcomes.length && !resolvePublic) throw new ScenarioError('provider_live_disabled')
     const pending = new Map<string, Promise<unknown>>()
+    const requiresDemoIdentity = !frozenPublic && value.asset === 'PUSD' && value.publicOutcomes.length > 0
+    const [demoOwner] = requiresDemoIdentity ? await db.select({ demo: portfolios.demo }).from(portfolios)
+      .where(eq(portfolios.id, portfolioId)).limit(1) : []
     const resolved = frozenPublic ?? await Promise.all(value.publicOutcomes.map(async (selection) => {
-      if (!pending.has(selection.url)) pending.set(selection.url, resolvePublic!(selection.url))
-      return selectPublicOutcome(await pending.get(selection.url), selection, value.asset, new Date(value.asOf).toISOString())
+      const key = selection.assetIdType === 'kalshi_outcome' ? 'kalshi:' + selection.url + ':' + selection.assetId : 'polymarket:' + selection.url
+      if (!pending.has(key)) pending.set(key, resolvePublic!(selection.url, selection.assetIdType, selection.assetId))
+      const market = await pending.get(key)
+      const asOf = new Date(value.asOf).toISOString()
+      if (requiresDemoIdentity && demoOwner?.demo && selection.assetIdType !== 'kalshi_outcome') {
+        if (selection.captureCurrentQuote) throw new ScenarioError('demo_pusd_quote_requires_captured_reference')
+        const identified = selectPublicOutcome(market, selection, 'USDC', asOf)
+        const exact = demoOwner.demo.dataset.markets.some((row) => row.provider === 'polymarket' && row.asset === 'PUSD'
+          && row.nativeMarket === identified.nativeMarket && row.outcomes.some((leg) => leg.instrument === identified.nativeInstrument))
+        if (!exact) throw new ScenarioError('public_market_asset_mismatch')
+        const { feeSchedule: _fees, markSource: _markSource, ...identity } = identified
+        return { ...identity, settlementAsset: 'PUSD', mark: null, markAt: null, latestPrice: null, latestPriceAt: null }
+      }
+      return selectPublicOutcome(market, selection, value.asset, asOf)
     }))
     return db.transaction(async (tx) => {
       const frozen = await baseline(tx, portfolioId, value, resolved)
@@ -272,6 +292,162 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
     if (!current) return notFound(reply)
     return run(current.baseline, value.input ?? current.input)
   }, evaluationResponse)
+  const denominationEvaluation = z.object({
+    components: z.array(z.object({ baselineToken: z.string().length(64), input }).strict()).min(2).max(4),
+    assumedUsdPerUnit: z.partialRecord(z.enum(['USDC', 'PUSD']), cashAmount.refine((value) => new Decimal(value).gt(0))).optional(),
+  }).strict()
+  function freezeDenominations(portfolioId: string, value: z.infer<typeof denominationEvaluation>): FrozenDenominationScenario {
+    return {
+      components: value.components.map(({ baselineToken, input: edits }) => {
+        const { baseline, source } = readPreview(portfolioId, baselineToken)
+        return { source, baseline, input: edits }
+      }).sort((left, right) => left.baseline.asset.localeCompare(right.baseline.asset)),
+      assumedUsdPerUnit: value.assumedUsdPerUnit,
+    }
+  }
+  function evaluateDenominations(frozen: FrozenDenominationScenario) {
+    const components = frozen.components.map(({ baseline, input: edits }) => run(baseline, edits))
+    if (!unique(components.map((row) => row.asset))) throw new ScenarioError('duplicate_scenario_denomination')
+    if (!components.every((row) => row.baselineAsOf === components[0]!.baselineAsOf)) throw new ScenarioError('scenario_cutoff_mismatch')
+    if (!components.every((row) => row.mode === components[0]!.mode)) throw new ScenarioError('scenario_starting_point_mismatch')
+    const rates: Record<string, string> = { ...frozen.assumedUsdPerUnit, USD: '1' }
+    const comparable = components.every((row) => row.bridge.endingValue !== null && row.additionalCapitalRequired === '0' && rates[row.asset])
+    const Report = Decimal.clone({ precision: 70 })
+    return {
+      components, indicativeUsd: comparable ? { valuationBasis: 'assumed_reporting_conversion', rates,
+        value: components.reduce((sum, row) => sum.plus(new Report(row.bridge.endingValue!).mul(rates[row.asset]!)), new Report(0)).toFixed(),
+      } : null,
+      fundingTransfers: false, jointSettlement: { status: 'unavailable', reason: 'cross_denomination_joint_settlement_unsupported' },
+    }
+  }
+  route('POST', '/evaluate-denominations', denominationEvaluation, async ({ portfolioId }, value) => {
+    const frozen = freezeDenominations(portfolioId, value)
+    const result = evaluateDenominations(frozen)
+    return { ...result, previewDigest: digest(frozen) }
+  })
+
+  const bundlePath = '/denomination-scenarios'
+  const getBundle = async (portfolioId: string, scenarioId: string) => (await db.select().from(bundles)
+    .where(and(eq(bundles.id, scenarioId), eq(bundles.portfolioId, portfolioId))).limit(1))[0]
+  const saveBundle = async (portfolioId: string, title: string, frozen: FrozenDenominationScenario) => {
+    evaluateDenominations(frozen)
+    return db.transaction(async (tx) => {
+      await tx.select({ id: portfolios.id }).from(portfolios).where(eq(portfolios.id, portfolioId)).for('update')
+      const [total] = await tx.select({ count: count() }).from(bundles).where(eq(bundles.portfolioId, portfolioId))
+      if (total!.count >= 50) throw new ScenarioError('scenario_count_limit')
+      const [stored] = await tx.insert(bundles).values({ portfolioId, name: title, frozen }).returning()
+      return stored
+    })
+  }
+  const bundleUpdate = async (portfolioId: string, scenarioId: string, version: number, frozen: FrozenDenominationScenario) => {
+    evaluateDenominations(frozen)
+    return (await db.update(bundles).set({ frozen, revision: version + 1, updatedAt: new Date() })
+      .where(and(eq(bundles.portfolioId, portfolioId), eq(bundles.id, scenarioId), eq(bundles.revision, version))).returning())[0]
+  }
+  route('GET', bundlePath, z.undefined(), async ({ portfolioId }) => ({ items: await db.select({
+    id: bundles.id, name: bundles.name, revision: bundles.revision, createdAt: bundles.createdAt, updatedAt: bundles.updatedAt,
+  }).from(bundles).where(eq(bundles.portfolioId, portfolioId)).orderBy(desc(bundles.updatedAt)).limit(50) }))
+  route('POST', bundlePath, denominationEvaluation.extend({ name, previewDigest: z.string().length(64) }),
+    async ({ portfolioId }, value, reply) => {
+      const frozen = freezeDenominations(portfolioId, value)
+      if (digest(frozen) !== value.previewDigest) return stale(reply)
+      return reply.code(201).send(await saveBundle(portfolioId, value.name, frozen))
+    })
+  route('GET', bundlePath + '/:scenarioId', z.undefined(), async ({ portfolioId, scenarioId }, _, reply) => {
+    const current = await getBundle(portfolioId, scenarioId!)
+    return current ? { ...current, result: evaluateDenominations(current.frozen) } : notFound(reply)
+  })
+  route('POST', bundlePath + '/:scenarioId/duplicate', z.object({ name }).strict(), async ({ portfolioId, scenarioId }, value, reply) => {
+    const current = await getBundle(portfolioId, scenarioId!)
+    return current ? reply.code(201).send(await saveBundle(portfolioId, value.name, current.frozen)) : notFound(reply)
+  })
+  route('POST', bundlePath + '/:scenarioId/delete', revisionOnly, async ({ portfolioId, scenarioId }, value, reply) => {
+    if (!await getBundle(portfolioId, scenarioId!)) return notFound(reply)
+    const [deleted] = await db.delete(bundles).where(and(eq(bundles.portfolioId, portfolioId),
+      eq(bundles.id, scenarioId!), eq(bundles.revision, value.revision))).returning({ id: bundles.id })
+    return deleted ? reply.code(204).send() : stale(reply)
+  })
+  const componentInputs = z.record(sourceCommon.asset, input).optional()
+  function applyComponentInputs(frozen: FrozenDenominationScenario, edits: z.infer<typeof componentInputs>) {
+    if (!edits) return frozen
+    if (Object.keys(edits).some((asset) => !frozen.components.some((row) => row.baseline.asset === asset))) {
+      throw new ScenarioError('unknown_scenario_denomination')
+    }
+    return { ...frozen, components: frozen.components.map((row) => ({ ...row, input: edits[row.baseline.asset] ?? row.input })) }
+  }
+  route('PATCH', bundlePath + '/:scenarioId', z.object({ revision, inputs: componentInputs, assumedUsdPerUnit: denominationEvaluation.shape.assumedUsdPerUnit.unwrap().nullable().optional() }).strict(),
+    async ({ portfolioId, scenarioId }, value, reply) => {
+      const current = await getBundle(portfolioId, scenarioId!)
+      if (!current) return notFound(reply)
+      if (current.revision !== value.revision) return stale(reply)
+      const edited = applyComponentInputs(current.frozen, value.inputs)
+      const frozen = value.assumedUsdPerUnit === undefined ? edited : { ...edited, assumedUsdPerUnit: value.assumedUsdPerUnit ?? undefined }
+      return await bundleUpdate(portfolioId, scenarioId!, value.revision, frozen) ?? stale(reply)
+    })
+  route('POST', bundlePath + '/:scenarioId/instruments', extend.extend({ asset: sourceCommon.asset }),
+    async ({ portfolioId, scenarioId }, value, reply) => {
+      const current = await getBundle(portfolioId, scenarioId!)
+      if (!current) return notFound(reply)
+      if (current.revision !== value.revision) return stale(reply)
+      const target = current.frozen.components.find((row) => row.baseline.asset === value.asset)
+      if (!target) throw new ScenarioError('unknown_scenario_denomination')
+      const expanded = { ...await extendBaseline(portfolioId, target, value), input: value.input ?? target.input }
+      const frozen = { ...current.frozen, components: current.frozen.components.map((row) => row === target ? expanded : row) }
+      return await bundleUpdate(portfolioId, scenarioId!, value.revision, frozen) ?? stale(reply)
+    })
+  route('POST', bundlePath + '/compare', ids, async ({ portfolioId }, value, reply) => {
+    if (!unique(value.scenarioIds)) throw new ScenarioError('duplicate_comparison_scenario')
+    const rows = await db.select().from(bundles).where(and(eq(bundles.portfolioId, portfolioId), inArray(bundles.id, value.scenarioIds)))
+    if (rows.length !== value.scenarioIds.length) return notFound(reply)
+    const ordered = value.scenarioIds.map((id) => rows.find((row) => row.id === id)!)
+    const compatibleAssets = ordered.every(({ frozen }) => digest(frozen.components.map((row) => row.baseline.asset))
+      === digest(ordered[0]!.frozen.components.map((row) => row.baseline.asset)))
+    return { compatibleAssets, sameReportingAssumptions: ordered.every(({ frozen }) =>
+      digest(frozen.assumedUsdPerUnit ?? null) === digest(ordered[0]!.frozen.assumedUsdPerUnit ?? null)),
+    compatibility: compatibleAssets ? ordered[0]!.frozen.components.map(({ baseline }, index) => ({
+      asset: baseline.asset, ...comparisonDimensions(ordered.map(({ frozen }) => {
+        const row = frozen.components[index]!
+        return { ...row, result: run(row.baseline, row.input) }
+      })),
+    })) : [],
+    items: ordered.map(({ id, name, revision, frozen }) => ({ id, name, revision, result: evaluateDenominations(frozen) })) }
+  })
+  const bundleRebases = new Map<string, { id: string; portfolioId: string; revision: number; frozen: FrozenDenominationScenario; expires: number }>()
+  route('POST', bundlePath + '/:scenarioId/rebase', z.union([
+    z.object({ revision, asOf: time, inputs: componentInputs }).strict(),
+    z.object({ revision, previewToken: z.string().length(64) }).strict(),
+  ]), async ({ portfolioId, scenarioId }, value, reply) => {
+    const current = await getBundle(portfolioId, scenarioId!)
+    if (!current) return notFound(reply)
+    if (current.revision !== value.revision) return stale(reply)
+    if ('previewToken' in value) {
+      const pending = bundleRebases.get(value.previewToken)
+      if (!pending || pending.expires <= Date.now() || pending.id !== scenarioId || pending.portfolioId !== portfolioId
+        || pending.revision !== value.revision) return stale(reply)
+      const updated = await bundleUpdate(portfolioId, scenarioId!, value.revision, pending.frozen)
+      if (updated) bundleRebases.delete(value.previewToken)
+      return updated ?? stale(reply)
+    }
+    if (current.frozen.components.some((row) => row.source.mode !== 'actual')) throw new ScenarioError('rebase_requires_actual_baseline')
+    const draft = applyComponentInputs(current.frozen, value.inputs)
+    const components = await Promise.all(draft.components.map(async (row) => {
+      const source = { ...row.source, asOf: value.asOf }
+      return { ...row, source, baseline: await capture(portfolioId, source, row.baseline.publicInstruments) }
+    }))
+    const candidate = { ...draft, components }
+    const changes = components.map((row, index) => ({ asset: row.baseline.asset,
+      ...baselineChanges(current.frozen.components[index]!.baseline, row.baseline) }))
+    let result: ReturnType<typeof evaluateDenominations>
+    try { result = evaluateDenominations(candidate) }
+    catch (error) {
+      if (!(error instanceof ScenarioError)) throw error
+      return { previewToken: null, changes, conflict: error.message }
+    }
+    if (bundleRebases.size >= previewLimit) bundleRebases.delete(bundleRebases.keys().next().value!)
+    const previewToken = randomBytes(32).toString('hex')
+    bundleRebases.set(previewToken, { id: scenarioId!, portfolioId, revision: value.revision, frozen: candidate, expires: Date.now() + previewLifetime })
+    return { previewToken, changes, result }
+  })
   async function extendBaseline(portfolioId: string, current: { source: BaselineSource; baseline: ScenarioBaseline },
     value: z.infer<typeof instrumentSelection>) {
     const { catalog, local, publicOutcomes } = value
@@ -303,7 +479,7 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
     const constraints = [...original.constraints, ...added.constraints.filter((edge) => newIds.has(edge.left) || newIds.has(edge.right))]
     if (rules.length + missingRules.length > 256 || constraints.length > 1000) throw new ScenarioError('instrument_extension_graph_limit')
     const expanded = { ...original, instruments, rules, constraints, missingRules,
-      publicInstruments: [...(original.publicInstruments ?? original.instruments.filter((row) => row.id.startsWith('polymarket:'))), ...(added.publicInstruments ?? [])],
+      publicInstruments: [...(original.publicInstruments ?? original.instruments.filter((row) => (row.id.startsWith('polymarket:') || row.id.startsWith('kalshi:')))), ...(added.publicInstruments ?? [])],
       instrumentAliases: { ...original.instrumentAliases, ...added.instrumentAliases },
       reservedRules: [...new Map([...(added.reservedRules ?? []), ...(original.reservedRules ?? [])].map((row) => [row.id, row])).values()],
       settlementGraphLimited: original.settlementGraphLimited === true || added.settlementGraphLimited === true,
@@ -331,7 +507,7 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
       catalog: [...new Set([...current.source.catalog, ...current.baseline.instruments.filter((row) => z.uuid().safeParse(row.id).success)
         .map((row) => row.id)])] }
     const candidate = await capture(portfolioId, updatedSource, current.baseline.publicInstruments
-      ?? current.baseline.instruments.filter((row) => row.id.startsWith('polymarket:')))
+      ?? current.baseline.instruments.filter((row) => (row.id.startsWith('polymarket:') || row.id.startsWith('kalshi:'))))
     const currentIds = new Set(candidate.instruments.map((row) => row.id))
     for (const instrument of current.baseline.instruments) {
       if (!currentIds.has(instrument.id) && instrument.id.startsWith('holding:')) {
@@ -346,7 +522,8 @@ export function registerScenarioRoutes(app: FastifyInstance, db: Database,
       const replacement = candidate.holdings.find((row) => row.bucket === old.bucket
         && (row.originalInstrument ?? row.instrument) === (old.originalInstrument ?? old.instrument))
       const reason = replacement && replacement.instrument !== old.instrument ? 'instrument_association_changed'
-        : !replacement && operation.kind === 'exit' ? 'holding_already_closed' : null
+        : !replacement && old.quantityObservation ? 'holding_no_longer_observed'
+          : !replacement && operation.kind === 'exit' ? 'holding_already_closed' : null
       return reason ? [{ operationIndex, bucket: operation.bucket, instrument: operation.instrument, reason }] : []
     })
     const token = digest([current.id, current.revision, candidate, changes])

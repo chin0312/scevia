@@ -1,3 +1,8 @@
+import { registerDemoRoutes } from '../demo/workspace.js'
+import { PolymarketAdapter } from '../providers/polymarket/adapter.js'
+import { PolymarketCollateralReader } from '../providers/polymarket/collateral.js'
+import type { KalshiTransport } from '../providers/kalshi/client.js'
+import type { KalshiMarketDataService } from '../providers/kalshi/market-data.js'
 import { ScenarioError } from '../scenarios/engine.js'
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify'
 import cors from '@fastify/cors'
@@ -27,7 +32,8 @@ import {
   users,
 } from '../db/schema.js'
 import { ProviderAdapterError } from '../providers/adapter.js'
-import { ProviderRegistry, providerRegistry } from '../providers/registry.js'
+import { createKalshiLive } from '../providers/kalshi/live.js'
+import { ProviderRegistry, createProviderRegistry } from '../providers/registry.js'
 import { PolymarketMarketDataService, PublicMarketError } from '../providers/polymarket/market-data.js'
 import { IngestionError, SyncAlreadyRunningError } from '../ingestion/errors.js'
 import { IngestionService } from '../ingestion/sync.js'
@@ -39,6 +45,8 @@ export interface AppOptions {
   database: Database
   registry?: ProviderRegistry
   marketData?: PolymarketMarketDataService
+  kalshiMarketData?: KalshiMarketDataService
+  kalshiTransport?: KalshiTransport
 }
 
 interface PageQuery {
@@ -306,7 +314,11 @@ function errorBody(requestId: string, code: string, message: string) {
 }
 
 export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
-  const registry = options.registry ?? providerRegistry
+  const kalshiLive = createKalshiLive(options.config, options.database, options.kalshiTransport)
+  const polygonRpc = options.config.nodeEnv === 'development' && ['127.0.0.1', '::1'].includes(options.config.host)
+    && options.config.polymarketLiveEnabled ? options.config.polymarketPolygonRpc : undefined
+  const registry = options.registry ?? createProviderRegistry(kalshiLive?.adapter,
+    polygonRpc ? new PolymarketAdapter(undefined, new PolymarketCollateralReader(polygonRpc)) : undefined)
   const ingestion = new IngestionService(options.database, registry)
   const liveAllowed = options.config.polymarketLiveEnabled === true
   const marketData = options.marketData ?? new PolymarketMarketDataService()
@@ -402,6 +414,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
                 type: 'object',
                 properties: {
                   providerCode: { type: 'string' },
+                  liveAccess: { type: 'string' },
+                  accountAccess: { type: 'string' },
                   displayName: { type: 'string' },
                   adapterKind: { type: 'string' },
                   accountKinds: { type: 'array', items: { type: 'string' } },
@@ -428,7 +442,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         },
       },
     },
-  }, async () => ({ items: registry.listCapabilities() }))
+  }, async () => ({ items: registry.listCapabilities().map((item) => ({ ...item,
+    accountAccess: item.providerCode === 'kalshi' ? kalshiLive?.accountId ? 'credential_verification_required' : 'disabled' : undefined,
+    liveAccess: item.providerCode === 'kalshi' ? kalshiLive ? 'authorized' : 'disabled' : item.providerCode === 'polymarket' && liveAllowed ? 'enabled' : 'unavailable' })) }))
 
   app.get<{ Querystring: { q: string; limit: number; page: number } }>('/v1/market-data/search', {
     config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
@@ -520,6 +536,67 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     }
   })
 
+  // Kalshi remains unavailable in production and in the default development server.
+  const kalshiMarketData = options.config.nodeEnv === 'test' ? options.kalshiMarketData : kalshiLive?.marketData
+  app.get<{ Querystring: { marketTicker?: string; eventTicker?: string; cursor?: string } }>('/v1/market-catalog/kalshi', {
+    schema: { tags: ['public market data'], querystring: { type: 'object', additionalProperties: false, properties: {
+      marketTicker: { type: 'string', pattern: '^[A-Z0-9][A-Z0-9_.-]{0,127}$' },
+      eventTicker: { type: 'string', pattern: '^[A-Z0-9][A-Z0-9_.-]{0,127}$' }, cursor: { type: 'string', maxLength: 4000 },
+    } } },
+  }, async (request, reply) => {
+    if (!kalshiMarketData) return reply.code(503).send(errorBody(request.id, 'kalshi_live_disabled', 'Kalshi live access is disabled.'))
+    const { marketTicker, eventTicker, cursor } = request.query
+    try {
+      if (marketTicker) return { provider: 'kalshi', items: [await kalshiMarketData.lookup(marketTicker, request.raw.signal)], nextCursor: null, partial: false }
+      return await kalshiMarketData.list(eventTicker, cursor, request.raw.signal)
+    } catch { return reply.code(502).send(errorBody(request.id, 'kalshi_catalog_unavailable', 'Kalshi market evidence is unavailable.')) }
+  })
+  app.get<{ Querystring: { q: string; lifecycle?: string; cursor?: string; limit?: number } }>('/v1/market-catalog/kalshi/search', {
+    schema: { tags: ['public market data'], querystring: { type: 'object', required: ['q'], additionalProperties: false,
+      properties: { q: { type: 'string', minLength: 2, maxLength: 80 },
+        lifecycle: { enum: ['open', 'closed', 'resolved', 'unknown'] }, cursor: { type: 'string', maxLength: 160 },
+        limit: { type: 'integer', minimum: 1, maximum: 50 } } } },
+  }, async (request, reply) => {
+    if (!kalshiMarketData) return reply.code(503).send(errorBody(request.id, 'kalshi_live_disabled', 'Kalshi live access is disabled.'))
+    const { q, lifecycle, cursor, limit = 20 } = request.query
+    const namespace = options.config.kalshi?.environment === 'demo' ? 'demo' : 'production'
+    const rows = await options.database.select({ marketTicker: markets.externalId, title: markets.title, lifecycle: markets.lifecycle,
+      eventTicker: events.externalId, expectedResolutionAt: events.resolvesAt }).from(markets).innerJoin(events, eq(markets.eventId, events.id))
+      .where(and(eq(markets.providerCode, 'kalshi'), sql`${markets.externalId} not like 'simulation:%'`,
+        namespace === 'demo' ? sql`${markets.externalId} like 'demo:%'` : sql`${markets.externalId} not like 'demo:%'`,
+        lifecycle ? eq(markets.lifecycle, lifecycle) : undefined,
+        cursor ? sql`${markets.externalId} > ${cursor}` : undefined,
+        sql`(strpos(lower(${markets.title}), lower(${q.trim()})) > 0 OR strpos(lower(${events.name}), lower(${q.trim()})) > 0
+          OR strpos(lower(${markets.externalId}), lower(${q.trim()})) > 0)`))
+      .orderBy(markets.externalId).limit(limit + 1)
+    const items = rows.slice(0, limit)
+    return { provider: 'kalshi', scope: 'locally_captured_catalog', items, quoteAvailability: 'lookup_required',
+      nextCursor: rows.length > limit ? items.at(-1)!.marketTicker : null }
+  })
+  app.get<{ Querystring: { marketTicker: string; side: 'yes' | 'no'; from: number; through: number; minutes: number } }>('/v1/market-catalog/kalshi/history', {
+    schema: { tags: ['public market data'], querystring: { type: 'object', required: ['marketTicker', 'side', 'from', 'through', 'minutes'],
+      additionalProperties: false, properties: { marketTicker: { type: 'string', pattern: '^[A-Z0-9][A-Z0-9_.-]{0,127}$' },
+        side: { enum: ['yes', 'no'] }, from: { type: 'integer' }, through: { type: 'integer' }, minutes: { type: 'integer', enum: [1, 60, 1440] } } } },
+  }, async (request, reply) => {
+    if (!kalshiMarketData) return reply.code(503).send(errorBody(request.id, 'kalshi_live_disabled', 'Kalshi live access is disabled.'))
+    try { return await kalshiMarketData.historicalPrices(request.query, request.raw.signal) }
+    catch (error) {
+      if (error instanceof ProviderAdapterError && error.code === 'kalshi_history_range_invalid') return reply.code(422).send(errorBody(request.id, error.code, 'Invalid archival range.'))
+      return reply.code(502).send(errorBody(request.id, 'kalshi_history_unavailable', 'Kalshi archive evidence is unavailable.'))
+    }
+  })
+  app.post<{ Body: { url: string } }>('/v1/market-catalog/kalshi/resolve', {
+    schema: { tags: ['public market data'], body: { type: 'object', required: ['url'], additionalProperties: false,
+      properties: { url: { type: 'string', minLength: 1, maxLength: 2048 } } } },
+  }, async (request, reply) => {
+    if (!kalshiMarketData) return reply.code(503).send(errorBody(request.id, 'kalshi_live_disabled', 'Kalshi live access is disabled.'))
+    try { return await kalshiMarketData.resolve(request.body.url, request.raw.signal) }
+    catch (error) {
+      if (error instanceof ProviderAdapterError && error.code === 'kalshi_invalid_market_link') return reply.code(400).send(errorBody(request.id, error.code, 'Unsupported Kalshi link.'))
+      return reply.code(502).send(errorBody(request.id, 'kalshi_catalog_unavailable', 'Kalshi market evidence is unavailable.'))
+    }
+  })
+
   await app.register(async (privateApi) => {
     privateApi.addHook('preHandler', async (request, reply) => {
       if (options.config.nodeEnv === 'production' || !options.config.devAuthToken || !options.config.devPrincipalId) {
@@ -531,10 +608,18 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       request.principalId = options.config.devPrincipalId
     })
 
-    registerAccountingRoutes(privateApi, options.database, liveAllowed || options.marketData ? async (url) => {
-      try { return await marketData.resolve(url) }
+    registerDemoRoutes(privateApi, options.database, options.config.demoDataset)
+    registerAccountingRoutes(privateApi, options.database, liveAllowed || options.marketData || kalshiMarketData ? async (url, type, assetId) => {
+      try {
+        if (type === 'kalshi_outcome') {
+          if (!kalshiMarketData) throw new ScenarioError('kalshi_live_disabled')
+          return await kalshiMarketData.resolve(url, AbortSignal.timeout(8000), assetId)
+        }
+        if (!liveAllowed && !options.marketData) throw new ScenarioError('provider_live_disabled')
+        return await marketData.resolve(url)
+      }
       catch (error) {
-        if (error instanceof PublicMarketError) throw new ScenarioError(error.code)
+        if (error instanceof PublicMarketError || error instanceof ProviderAdapterError) throw new ScenarioError(error.code)
         throw error
       }
     } : undefined)
@@ -553,6 +638,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
                 name: { type: 'string' },
                 createdAt: { type: 'string', format: 'date-time' },
                 providerAccountCount: { type: 'integer' },
+                mode: { enum: ['actual', 'demo', 'fixture'] },
               } } },
             },
           },
@@ -563,11 +649,14 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         id: portfolios.id,
         name: portfolios.name,
         createdAt: portfolios.createdAt,
+        demoKind: sql<string | null>`${portfolios.demo}->'dataset'->>'evidenceKind'`,
       }).from(portfolios).where(eq(portfolios.ownerId, request.principalId!)).orderBy(portfolios.createdAt)
-      const items = await Promise.all(rows.map(async (portfolio) => {
-        const [accountCount] = await options.database.select({ count: sql<number>`count(*)::int` })
+      const items = await Promise.all(rows.map(async ({ demoKind, ...portfolio }) => {
+        const [accountCount] = await options.database.select({ count: sql<number>`count(*)::int`,
+          fixtures: sql<boolean>`coalesce(bool_or(${providerAccounts.kind} = 'fixture'), false)` })
           .from(providerAccounts).where(eq(providerAccounts.portfolioId, portfolio.id))
-        return { ...portfolio, providerAccountCount: accountCount?.count ?? 0 }
+        return { ...portfolio, providerAccountCount: accountCount?.count ?? 0,
+          mode: demoKind === 'fixture' || accountCount?.fixtures ? 'fixture' : demoKind ? 'demo' : 'actual' }
       }))
       return { items }
     })
@@ -642,6 +731,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       async (request, reply) => {
         const portfolio = await getOwnedPortfolio(options.database, request.params.portfolioId, request.principalId!)
         if (!portfolio) return reply.code(404).send(errorBody(request.id, 'not_found', 'The requested resource was not found.'))
+        if (portfolio.isDemo) return reply.code(422).send(errorBody(request.id, 'demo_connection_forbidden', 'Demo workspaces only use simulated accounts.'))
         try {
           registry.get('polymarket')
         } catch (error) {
@@ -1386,11 +1476,17 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       const account = await getOwnedProviderAccount(options.database, request.params.accountId, request.principalId!)
       if (!account) return reply.code(404).send(errorBody(request.id, 'not_found', 'The requested resource was not found.'))
       try {
-        if (account.providerCode === 'polymarket' && !liveAllowed && !options.registry) {
+        if ((account.providerCode === 'polymarket' && !liveAllowed && !options.registry)
+          || (account.providerCode === 'kalshi' && account.id !== kalshiLive?.accountId
+            && !(options.registry && options.config.nodeEnv === 'test'))) {
           return reply.code(422).send(errorBody(request.id, 'provider_live_disabled', 'Live account synchronization is disabled.'))
         }
         const result = await ingestion.syncProviderAccount(account.id, request.query.scope)
         if (result.status === 'failed') {
+          const errors = new Set(result.streams.map((stream) => stream.errorCode))
+          const kalshiSetupError = account.providerCode === 'kalshi' && ['kalshi_read_scope_unverified', 'kalshi_account_scope_unverified',
+            'kalshi_account_binding_mismatch', 'kalshi_credential_unavailable', 'kalshi_credential_source_mismatch'].find((code) => errors.has(code))
+          if (kalshiSetupError) return reply.code(422).send(errorBody(request.id, kalshiSetupError, 'Check the local Kalshi credential and account binding.'))
           return reply.code(502).send(errorBody(request.id, 'sync_failed', 'All synchronization streams failed.'))
         }
         return reply.code(200).send(result)
@@ -1416,7 +1512,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 }
 
 async function getOwnedPortfolio(database: Database, portfolioId: string, ownerId: string) {
-  const [portfolio] = await database.select({ id: portfolios.id, name: portfolios.name })
+  const [portfolio] = await database.select({ id: portfolios.id, name: portfolios.name, isDemo: sql<boolean>`${portfolios.demo} is not null` })
     .from(portfolios)
     .where(and(eq(portfolios.id, portfolioId), eq(portfolios.ownerId, ownerId)))
     .limit(1)

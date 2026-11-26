@@ -11,6 +11,15 @@ const starting = (cash = '100'): ScenarioBaseline => ({
 const empty: ScenarioInput = { operations: [], funding: [], marks: [], rules: [], constraints: [], outcomes: [] }
 
 describe('scenario financial references', () => {
+  it('rounds one supported fractional Kalshi execution to a centicent', () => {
+    const baseline = starting()
+    baseline.instruments[0]!.feeSchedule = { version: 'kalshi-centicent-quadratic-v1', rate: '0.07', makerRate: '0.0175',
+      source: 'kalshi_event_override', retrievedAt: baseline.asOf, denomination: 'USD' }
+    const operation = { instrument: 'yes', bucket: 'a', kind: 'buy' as const, amount: '2.75', price: '0.43' }
+    expect(evaluate(baseline, { ...empty, operations: [{ ...operation, fee: { mode: 'provider', role: 'taker' } }] }).operations[0]?.feeAmount).toBe('0.0472')
+    expect(evaluate(baseline, { ...empty, operations: [{ ...operation, fee: { mode: 'provider', role: 'maker' } }] }).operations[0]?.feeAmount).toBe('0.0118')
+  })
+
   it('reconciles the 98.30 value bridge using weighted average basis', () => {
     const baseline = starting('40')
     baseline.mode = 'actual'

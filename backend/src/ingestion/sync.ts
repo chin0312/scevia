@@ -208,6 +208,7 @@ export class IngestionService {
         await this.renewAccountLease(accountCheckpointId, leaseToken)
         const page = await this.fetchWithRetry({
           adapter,
+          providerAccountId: account.id,
           externalAccountId: account.externalAccountId,
           stream,
           cursor,
@@ -273,6 +274,7 @@ export class IngestionService {
     const finishedAt = new Date().toISOString()
     await this.finishStream({
       providerAccountId: account.id,
+      stageKalshiPositions: account.providerCode === 'kalshi',
       accountCheckpointId,
       streamCheckpointId,
       leaseToken,
@@ -392,6 +394,7 @@ export class IngestionService {
 
   private async fetchWithRetry(input: {
     adapter: ProviderAdapter
+    providerAccountId: string
     externalAccountId: string
     stream: ProviderSyncStream
     cursor: string | null
@@ -409,6 +412,7 @@ export class IngestionService {
         })
         const response = await Promise.race([
           input.adapter.fetchPage({
+            providerAccountId: input.providerAccountId,
             externalAccountId: input.externalAccountId,
             streamName: input.stream.name,
             cursor: input.cursor,
@@ -438,6 +442,7 @@ export class IngestionService {
 
   private async finishStream(input: {
     providerAccountId: string
+    stageKalshiPositions: boolean
     accountCheckpointId: string
     streamCheckpointId: string
     leaseToken: string
@@ -475,6 +480,7 @@ export class IngestionService {
           runId: input.runId,
           stream: input.stream,
           reports: input.reports,
+          stageKalshiPositions: input.stageKalshiPositions,
           finishedAt: new Date(input.finishedAt),
         })
       }

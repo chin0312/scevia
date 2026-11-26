@@ -8,7 +8,10 @@ const zero = () => new D(0)
 const sum = (values: Decimal[]) => values.reduce((total, value) => total.plus(value), zero())
 const add = (left: Decimal | null, right: Decimal | null) => left === null || right === null ? null : left.plus(right)
 export const methodology = 'weighted-average-scenario-v1'
-export interface FundingBucket { id: string; venue: string; account: string; cash: string | null; pending: string | null; inventoryComplete?: boolean; inventoryAt?: string | null; tradingVenue?: string }
+export interface FundingBucket { id: string; venue: string; account: string; cash: string | null; pending: string | null; inventoryComplete?: boolean; inventoryAt?: string | null; tradingVenue?: string; cashObservation?: { sourceRecordId: string; asOf: string } }
+export type KalshiScenarioFeeSchedule = { version: 'kalshi-centicent-quadratic-v1'; rate: string; makerRate: string; retrievedAt: string;
+  source: 'kalshi_series' | 'kalshi_event_override'; denomination: 'USD' }
+
 export interface ScenarioInstrument {
   id: string; mark: string | null; markAt?: string | null; market?: string; event?: string; resolvesAt?: string | null
   venue?: string; provider?: string; nativeMarket?: string; nativeInstrument?: string; settlementAsset?: string | null; outcome?: string | null; providerMarket?: string; lifecycle?: string
@@ -16,10 +19,11 @@ export interface ScenarioInstrument {
   nativeOutcomeIndex?: number
   nativeIdType?: 'position_id' | 'clob_token_id'
   markSource?: 'scoped_holding_consensus' | 'public_retrieval_at_cutoff' | 'assumed_current_quote' | 'declared_local'
+  quoteProvenance?: string; establishedPayoutUnit?: string
   latestPrice?: string | null; latestPriceAt?: string | null
-  feeSchedule?: { version: 'polymarket-price-variance-v1'; rate: string; retrievedAt: string; source: 'gamma_market'; denomination: 'USDC' }
+  feeSchedule?: { version: 'polymarket-price-variance-v1'; rate: string; retrievedAt: string; source: 'gamma_market'; denomination: 'USDC' } | KalshiScenarioFeeSchedule
 }
-export interface ScenarioHolding { bucket: string; instrument: string; quantity: string; basis: string | null; quantityKnown?: boolean; mark?: string | null; markAt?: string | null; originalInstrument?: string }
+export interface ScenarioHolding { bucket: string; instrument: string; quantity: string; basis: string | null; quantityKnown?: boolean; mark?: string | null; markAt?: string | null; originalInstrument?: string; quantityObservation?: { sourceRecordId: string; asOf: string } }
 export interface ScenarioBaseline {
   methodology: typeof methodology; mode: 'actual' | 'scratch'; asset: string; asOf: string
   buckets: FundingBucket[]; instruments: ScenarioInstrument[]; holdings: ScenarioHolding[]
@@ -56,6 +60,9 @@ export class ScenarioError extends Error {
 }
 
 export function validateInstrumentIdentities(instruments: ScenarioInstrument[]) {
+  const kalshiEnvironments = new Set(instruments.filter((row) => row.provider === 'kalshi' && row.nativeMarket)
+    .map((row) => row.nativeMarket!.startsWith('demo:')))
+  if (kalshiEnvironments.size > 1) throw new ScenarioError('kalshi_scenario_environment_mismatch')
   const nativeIdentities = new Set<string>()
   for (const row of instruments) {
     if (!row.provider || !row.nativeMarket || !row.nativeInstrument) continue
@@ -63,6 +70,12 @@ export function validateInstrumentIdentities(instruments: ScenarioInstrument[]) 
     if (nativeIdentities.has(id)) throw new ScenarioError('duplicate_native_instrument')
     nativeIdentities.add(id)
   }
+}
+
+function kalshiEstimatedFee(notional: Decimal, quantity: Decimal, price: Decimal, rate: string) {
+  if (new D(rate).isZero() || quantity.isZero()) return zero()
+  const fee = quantity.mul(rate).mul(price).mul(new D(1).minus(price))
+  return notional.plus(fee).toDecimalPlaces(4, Decimal.ROUND_CEIL).minus(notional)
 }
 
 export function scopedReference(observations: Array<{ scope: string; price: string; asOf: string }>) {
@@ -102,7 +115,8 @@ function evaluateInternal(baseline: ScenarioBaseline, changes: ScenarioInput, op
   const verifiedMaxima = new Map(baseline.rules.flatMap((rule) =>
     [rule.yes, rule.no].map((id) => [id, new D(rule.unitPayout ?? '1')] as const)))
   const recordedMaximum = (id: string) => verifiedMaxima.get(id)
-    ?? (instruments.get(id)?.provider === 'polymarket' ? new D(1) : null)
+    ?? (instruments.get(id)?.establishedPayoutUnit ? new D(instruments.get(id)!.establishedPayoutUnit!)
+      : instruments.get(id)?.provider === 'polymarket' ? new D(1) : null)
   const holdingMark = (row: { instrument: string; mark?: string | null }) => {
     const value = amount(row.mark === undefined ? instruments.get(row.instrument)?.mark ?? null : row.mark)
     const max = recordedMaximum(row.instrument)
@@ -212,7 +226,9 @@ function evaluateInternal(baseline: ScenarioBaseline, changes: ScenarioInput, op
     if (instrument.settlementAsset && instrument.settlementAsset !== baseline.asset) throw new ScenarioError('instrument_asset_mismatch', index)
     const schedule = instrument.feeSchedule
     const providerFee = op.fee.mode === 'provider' && schedule?.denomination === baseline.asset && price.lte(1)
-      ? op.fee.role === 'maker' ? zero() : delta.abs().mul(schedule.rate).mul(price).mul(new D(1).minus(price)).toDecimalPlaces(5, Decimal.ROUND_HALF_UP)
+      ? schedule.version === 'kalshi-centicent-quadratic-v1'
+        ? kalshiEstimatedFee(notional, delta.abs(), price, op.fee.role === 'maker' ? schedule.makerRate : schedule.rate)
+        : op.fee.role === 'maker' ? zero() : delta.abs().mul(schedule.rate).mul(price).mul(new D(1).minus(price)).toDecimalPlaces(5, Decimal.ROUND_HALF_UP)
       : null
     const fee = delta.isZero() || op.fee.mode === 'excluded' ? zero()
       : op.fee.mode === 'fixed' ? new D(op.fee.value)
@@ -252,6 +268,7 @@ function evaluateInternal(baseline: ScenarioBaseline, changes: ScenarioInput, op
     const ending = add(available?.plus(bucket.added).minus(bucket.withdrawn).plus(bucket.sales).minus(bucket.buys) ?? null, bucket.fees?.neg() ?? null)
     return { bucket: bucket.id, venue: bucket.venue, account: bucket.account, asset: baseline.asset,
       actualOrScratchStartingCash: hypotheticalBuckets.has(bucket.id) ? null : fixed(bucket.cash),
+      cashObservation: bucket.cashObservation ?? null,
       hypotheticalStartingCapital: hypotheticalBuckets.get(bucket.id)?.startingCapital ?? null,
       additionalCapital: fixed(bucket.added.minus(hypotheticalBuckets.get(bucket.id)?.startingCapital ?? 0)), assumedStartingCash: fixed(bucket.assumed), addedCapital: fixed(bucket.added), withdrawnCapital: fixed(bucket.withdrawn),
       grossSales: fixed(bucket.sales), purchases: fixed(bucket.buys), fees: fixed(bucket.fees), endingCash: fixed(ending),
@@ -419,6 +436,7 @@ function evaluateInternal(baseline: ScenarioBaseline, changes: ScenarioInput, op
       const reference = overrides.get(row.instrument) ?? holdingMark(row)
       const value = row.quantityKnown === false ? null : row.quantity.isZero() ? zero() : reference?.mul(row.quantity) ?? null
       return { ...row, quantity: row.quantity.toFixed(), basis: fixed(row.basis), mark: fixed(reference),
+        quantityObservation: before?.quantityObservation ?? null,
         initialQuantity: before?.quantity ?? '0', initialBasis: before ? before.basis : '0',
         initialValue: fixed(initialValue), initialMark: fixed(originalReference),
         value: fixed(value), unrealized: fixed(add(value, row.basis?.neg() ?? null)), resolvesAt: instruments.get(row.instrument)?.resolvesAt ?? null }

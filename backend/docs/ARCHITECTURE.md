@@ -143,3 +143,5 @@ Phase 4 exposes separate revisions for selected accounting evidence, provider co
 Phase 5 stores portfolio-owned scenario inputs with immutable normalized baselines and optimistic revisions. Its pure simulator applies hypothetical trades outside the actual ledger. Reviewed and conditional exposure reuse the Phase 4 settlement solver. See [Scenario calculation and persistence](SCENARIOS.md).
 
 Scenario hardening separates instrument identity from conditional payout authority. Scenario-only funding buckets and resolved operation changes remain revisioned inputs. Baseline preview tokens pin the exact frozen evidence returned to the client.
+
+Phase 6 extends the registry and ingestion pipeline with the restricted Kalshi adapter. It reuses canonical records, source revisions, snapshot publication, ownership, accounting replay and the component settlement solver. [Kalshi integration](KALSHI.md)

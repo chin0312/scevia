@@ -80,3 +80,27 @@ All live assignments below are conditional on permission and an approved test sa
 | Public search and link resolution | Gamma search and explicit supported venue URL resolution | A managed catalog is a fallback only if it preserves venue-native IDs and link semantics. Share cache across authorized requests. |
 | Market fee schedules | Venue market-specific schedule | Allow user assumptions for simulation. Keep actual historical fees and rebate eligibility separate. |
 | Reference and historical prices | CLOB midpoint and venue price history | Managed candles are fallback observations with their own timestamps and aggregation. Midpoints are references and carry no execution guarantee. |
+
+Kalshi account and market contracts are validated using synthetic input. Live permission, populated validation and approved processing are release dependencies. [Kalshi authorization and acquisition](KALSHI.md)
+
+## Phase 6 source capability and validation
+
+| Source | Implemented evidence | Financial coverage and acceptance |
+|---|---|---|
+| Kalshi | Authorization-gated, loopback development GET transport. Exact local account binding, restricted API key, current and archive cursors, supported fills and reported fees, provider cash, signed net inventory, indicative supported book marks, public catalog and archived observations. | Synthetic integration covers authorization isolation, signed fractional inventory, price persistence and observed valuation. Cash activity and settlement allocation need account-attributable evidence. Historical continuity, complete current inventory, native fee schedules and populated statement reconciliation remain unverified. |
+| Polymarket | Existing explicitly authorized wallet-scoped Data API, Gamma and CLOB public reads. Observations retain endpoint and source identities, with ambiguous trades and activity eligible for reconciliation review. | Synthetic integration covers retrieval and reconciliation boundaries. Missing inventory, complete historical fills, actual cash, fees and collateral identity across protocol generations need independent evidence. Stored historical USDC-coded API units do not establish on-chain token identity. |
+| CSV | User-supplied financial import and review, explicit Kalshi activity mapping, optional `fieldUnits` overrides for price, amount and fee, source linking and explicit confirmation. | Usable with approved, owned exports and affirmative opening/coverage evidence where required. Real format detection, statement-grade settlement reconciliation and broad API/CSV overlap validation remain pending. |
+
+The multi-provider technical path is under review. Only approved populated accounts or permitted user records and an independent financial comparison can satisfy Phase 6B. Unified frontend integration, production authentication and retention are separate. See [Kalshi setup and checks](KALSHI.md#authorized-local-setup-and-verification) and the [Polymarket local validation workflow](POLYMARKET.md).
+
+| Follow-up source path | Evidence available | Remaining acceptance |
+|---|---|---|
+| Kalshi positions and settlement | Staged signed net refresh with explicit opposite-leg zeros, source revision checks and per-credential binding. Eligible single-leg finalized settlements post linked entitlement and payment. Finalized member cash candidates require individual account confirmation. | Credential replacement requires a separate source. Independent authorization and statement matching, broader settlement models, late archive corrections and populated workload measurement remain open. |
+| Polymarket Polygon collateral | Optional finalized block hash observation of the documented pUSD contract for the exact registered wallet. | RPC permission, wallet match and populated acceptance are required. Historical fee, transfer and fill identity still need receipt-level reconciliation. |
+| Explicit CSV | Exact instrument mapping stays within the selected Kalshi environment. User-owned CSV supports the existing Phase 3 preview, review and replacement process. | Stable native export schemas and broad settlement overlap remain unverified. |
+
+| Integration follow-up | Available evidence | Remaining acceptance |
+|---|---|---|
+| Demo Portfolio | Owner-scoped replay from versioned approved captures, with bounded authorized public-mark refresh, cutoff-qualified historical marks and explicit hypothetical transactions | Supply a permitted capture and verify replay, exposure and saved scenario results against it. No production guest access or synthetic fallback. |
+| Kalshi | Timestamp-conflict provenance, local title lookup and explicit settlement/redemption CSV mapping | Broader settlement confirmations, genuine additional settlement fees, unsupported fee schedules, representative venue exports and live statement reconciliation. |
+| Polymarket | User-targeted canonical finalized pUSD transfer receipt evidence | Coverage of history, fills, rebates, fees, transfers and settlements needs independent attribution and populated validation. |
