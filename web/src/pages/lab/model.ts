@@ -1,5 +1,5 @@
 /* Scenario Lab helpers shared by its sections: examples, metric rows, per-scenario evaluation, null-safe changes. */
-import { POS_BY_ID, accountOf, groupTitles, instrumentOfPosition, positionFor, scenarioMetrics, simulate, sourceRelations, withConstraints, type Adjustment, type Constraint, type Holding, type Outcome, type ScenarioMetrics, type Simulation } from '../../lib/finance'
+import { groupTitles, scenarioMetrics, withConstraints, type Adjustment, type Finance, type Constraint, type Holding, type Outcome, type ScenarioMetrics, type Simulation } from '../../lib/finance'
 import { DEFAULT_FEES, type FeeAssumption } from '../../lib/fees'
 import type { Relation } from '../../data/types'
 import type { Scenario } from '../../lib/scenarios'
@@ -8,11 +8,13 @@ import { PLATFORM_NAME } from '../../data/labels'
 export const COLORS = ['var(--color-accent-solid)', 'var(--color-data-1)', 'var(--color-data-3)', 'var(--color-data-4)', 'var(--color-data-5)', 'var(--color-data-6)']
 
 /** Optional starting points. Never added to the workspace unless the user picks one. */
-const held = (id: string, to: number, price: number): Adjustment => ({ id, to, price, instrument: instrumentOfPosition(POS_BY_ID[id]) })
+/** Examples refer to holdings of the workspace they're opened in; one whose holdings are missing isn't offered. */
+const held = (F: Finance, id: string, to: number, price: number): Adjustment | null => (F.POS_BY_ID[id] ? { id, to, price, instrument: F.instrumentOfPosition(F.POS_BY_ID[id]) } : null)
+const all = (xs: (Adjustment | null)[]) => (xs.every(Boolean) ? (xs as Adjustment[]) : null)
 export const EXAMPLES = [
-  { name: 'Trim crypto, add to Fed', adjs: () => [held('btc', 4000, 0.29), held('fedk', 6200, 0.65), held('chf', 0, 0.12)] },
-  { name: 'Exit sports longshots', adjs: () => [held('cel', 0, 0.26), held('chf', 0, 0.12)] },
-  { name: 'Hedge the shutdown', adjs: () => [held('shut', 3500, 0.47)] },
+  { name: 'Trim crypto, add to Fed', adjs: (F: Finance) => all([held(F, 'btc', 4000, 0.29), held(F, 'fedk', 6200, 0.65), held(F, 'chf', 0, 0.12)]) },
+  { name: 'Exit sports longshots', adjs: (F: Finance) => all([held(F, 'cel', 0, 0.26), held(F, 'chf', 0, 0.12)]) },
+  { name: 'Hedge the shutdown', adjs: (F: Finance) => all([held(F, 'shut', 3500, 0.47)]) },
 ]
 
 /** Everything Scenario Lab shows for one scenario. */
@@ -24,24 +26,28 @@ export interface Evaluation {
 }
 /** Evaluations are cached per scenario object: editing one scenario re-evaluates only that one (scenarios are
  *  immutable values, so an unchanged scenario keeps its object and its cached result). */
-const cache = new WeakMap<Scenario, Evaluation>()
-export function evaluate(s: Scenario): Evaluation {
+const caches = new WeakMap<Finance, WeakMap<Scenario, Evaluation>>()
+export function evaluate(s: Scenario, F: Finance): Evaluation {
+  const cache = caches.get(F) ?? new WeakMap<Scenario, Evaluation>(); caches.set(F, cache)
   const hit = cache.get(s)
   if (hit) return hit
   const fees = s.assumptions.fees ?? DEFAULT_FEES, constraints = s.assumptions.constraints ?? []
-  const rels = withConstraints(sourceRelations(), constraints), opts = { fees, baseline: s.baseline, funding: s.funding }
-  const start = simulate([], opts), sim = simulate(s.adjs, opts)
+  const rels = withConstraints(F.sourceRelations(), constraints), opts = { fees, baseline: s.baseline, funding: s.funding }
+  const start = F.simulate([], opts), sim = F.simulate(s.adjs, opts)
   const e = { start, sim, B: scenarioMetrics(start, rels), A: scenarioMetrics(sim, rels), rels, constraints, fees, funding: (s.funding.pm ?? 0) + (s.funding.ks ?? 0) }
   cache.set(s, e)
   return e
 }
-let actualCache: Evaluation | null = null
+const actualCache = new WeakMap<Finance, Evaluation>()
 /** The actual portfolio: source facts and source relationships only (no hypothetical constraints). */
-export function evaluateActual(): Evaluation {
-  if (actualCache) return actualCache
-  const rels = sourceRelations(), sim = simulate([], {})
+export function evaluateActual(F: Finance): Evaluation {
+  const hit = actualCache.get(F)
+  if (hit) return hit
+  const rels = F.sourceRelations(), sim = F.simulate([], {})
   const m = scenarioMetrics(sim, rels)
-  return (actualCache = { start: sim, sim, A: m, B: m, rels, constraints: [], fees: DEFAULT_FEES, funding: 0 })
+  const e = { start: sim, sim, A: m, B: m, rels, constraints: [], fees: DEFAULT_FEES, funding: 0 }
+  actualCache.set(F, e)
+  return e
 }
 
 /** a − b, or null when either side is unavailable (never coerced to zero). */
@@ -73,8 +79,8 @@ export function rowValue(r: Row, m: ScenarioMetrics, sim: Simulation): number | 
 }
 
 /** Display info for an adjustment, whether it is an actual holding or a new instrument. */
-export function describe(a: Adjustment) {
-  const p = POS_BY_ID[a.id], i = a.instrument
+export function describe(a: Adjustment, F: Finance) {
+  const p = F.POS_BY_ID[a.id], i = a.instrument
   return {
     title: i?.marketTitle ?? p?.market ?? a.id,
     eventTitle: i?.eventTitle ?? '',
@@ -85,7 +91,7 @@ export function describe(a: Adjustment) {
     resolves: i?.resolves ?? p?.resolves ?? '',
     sample: (i?.source ?? 'sample') === 'sample',
     /** The account holding it, or null for a new instrument (funded from the scenario's cash on its venue). */
-    account: p ? accountOf(p.accountId) ?? null : null,
+    account: p ? F.accountOf(p.accountId) ?? null : null,
   }
 }
 /** How a position's target is entered. All three describe the same position; see lib/finance.ts `targetShares`. */
@@ -110,4 +116,3 @@ export function judge(r: Row, a: number | null, b: number | null): { d: number |
   if (d == null || Math.abs(d) < 0.5 || r.tone === 'neutral') return { d, good: null }
   return { d, good: r.tone === 'up' ? d > 0 : d < 0 }
 }
-export { positionFor }

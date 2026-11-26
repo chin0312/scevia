@@ -84,16 +84,17 @@ The backend is authoritative for historical valuation; the frontend presents its
 
 ### Historical Replay (Scenario Lab)
 
-A retrospective hypothetical portfolio over a past period (`web/src/lib/replay.ts`):
+A retrospective hypothetical portfolio over a past period (`web/src/lib/replay.ts`, tests in `lib/intelligence.test.ts`). The Phase 8 backend replay engine will own final results; this evaluator validates inputs and presents what follows exactly from the stated assumptions and the recorded evidence.
 
-- **Lifecycle.** No entry before a market's listing date or on/after the date trading closed (or it resolved). An exit must fall after the entry, inside the period and before trading closed. The period ends on or before the data date.
-- **Sizing.** Shares, an amount at the assumed execution price, or a % of that account's starting capital, rounded down to the 0.01 share step.
-- **Prices and fees.** Entry and exit use the execution prices the user states. Fees use `estimateFee()` with the replay's fee assumption; an unknown fee leaves the affected figures unavailable.
-- **Settlement.** A held position settles at its recorded resolution on its recorded date (1 or 0 per share).
-- **Valuation.** An open holding at the end is valued from recorded observations with LOCF; without one it is unavailable.
-- **Native assets and funding.** Capital stays in its account and native asset. A shortfall (purchases beyond available cash at that time) is reported per account. Totals are given per denomination. A combined total exists only when every part is valued, and it is labelled indicative (USDC/PUSD treated as equal to USD).
-- **Hindsight.** Markets are selected knowing how they resolved, so a replay is hindsight analysis. It is neither the user's actual performance nor a point-in-time strategy backtest, and it is labelled as such.
-- **Comparison.** Every difference in setup is listed (period, markets, dates, sizes, capital, execution prices, fees, evidence). Absolute P&L is compared only when capital per denomination matches; return only when every replay is complete.
+- **Trading window.** Opening (`listedAt`) and trading close (`closesAt`) govern execution: no entry before opening, no entry or discretionary exit after close. Expected resolution is a schedule hint; verified resolution is evidence. A later resolution never extends trading (closed Nov 20, resolved Nov 23 → an entry or sale on Nov 21 is invalid; holding to settlement settles on Nov 23). With a timestamped close, a same-day trade before it is valid. An unrecorded close is a caveat ("assumes it was still trading"), never replaced by the expected resolution; after a verified resolution nothing trades. Older saved replays that stored the resolution as the close are restored with the close unknown.
+- **Virtual funding.** Capital is simulated per bucket (venue + native asset: USD, USDC or PUSD), independent of real accounts and freely editable. Funds never move between buckets and nothing is borrowed. A shortfall (a purchase above the bucket's simulated cash at that time) makes the replay an **unfunded what-if**: values are shown as such, returns are not calculated, and *Add …* raises that bucket's capital by the shortfall. If a fee before a purchase is unknown, the funding can't be assessed (**funding unknown**).
+- **Sizing.** Shares, an amount at the assumed execution price, or a % of that bucket's starting capital, rounded down to the 0.01 share step.
+- **Prices and fees.** Entry and exit use the execution prices the user states; fees use `estimateFee()` with the replay's fee assumption. An **unknown fee is never zero**: cash after it is known only partially (`knownCash`, `cashComplete: false`), so the ending value, fees, return and every later value-over-time point are unavailable or partial. An explicitly excluded fee is a valid zero.
+- **Settlement.** A held position settles at the verified resolution time (1 or 0 per share) as hypothetical cash in its bucket.
+- **Valuation.** Open holdings use recorded observations with LOCF. Positions in the same instrument are aggregated, so each instrument is valued once. The chart shows the supported segment (from the first date after which every date can be valued) and says where it starts; a series with no such segment is unavailable.
+- **Native first.** Results are per denomination (ending value, net investment gain, return, realized P&L, fees). A combined USD total needs a reporting rate for each non-USD asset, frozen with the replay; USD-only replays need none. Rates never move funds.
+- **Hindsight.** Every replay is retrospective selection (`hindsight: true`), resolved markets or not. It is neither actual performance nor a point-in-time strategy backtest.
+- **Comparison.** Each difference is listed (period, markets, dates, sizes, capital, native assets and rates, execution prices, fees, funding status, evidence). Returns are compared only with the same period, assets and rates, and fee method, all funded and complete; absolute amounts additionally need the same capital. A normalized chart (index 100 at the start) needs a complete value history over the same period for every replay.
 
 ## Periods
 

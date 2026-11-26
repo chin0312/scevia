@@ -17,6 +17,9 @@ export interface StreamStatus {
   checkedAt: string | null
   /** One short sentence: what the state is based on. */
   detail: string
+  /** Who classified the state: the source/backend (authoritative, with its measured cadence) or this frontend's
+   *  development defaults (`AGE_LIMITS`), which are not production guarantees. */
+  classifiedBy?: 'source' | 'development-default'
 }
 
 export const STREAM_LABEL: Record<StreamId, string> = {
@@ -32,18 +35,23 @@ export const STATE_TONE: Record<StreamState, 'ok' | 'info' | 'warn' | 'bad' | 'm
   import_only: 'info', cached_snapshot: 'info', fixture: 'muted',
 }
 
-/** Age thresholds (minutes) for classifying a refreshed stream. Market data ages faster than account data. */
+/** Development defaults (minutes) for classifying a stream when the source gives no classification. They are not
+ *  production guarantees: the backend reports each stream's state from its measured cadence and that wins. */
 export const AGE_LIMITS: Record<'market' | 'account', { recent: number; delayed: number }> = {
   market: { recent: 5, delayed: 60 },
   account: { recent: 60, delayed: 24 * 60 },
 }
 
-/** Classify a refreshed stream by the age of its newest observation. Unknown time is unavailable, never recent. */
+/** Tolerated clock difference between the source and this device before a future time is treated as invalid. */
+export const CLOCK_SKEW_MIN = 2
+/** Classify a stream by the age of its observation (the source time, not when it was retrieved). Unknown, invalid or
+ *  future times (beyond the skew tolerance) are unavailable, never recent. */
 export function classifyAge(asOf: string | null, now: number, kind: 'market' | 'account'): 'recent' | 'delayed' | 'stale' | 'unavailable' {
   if (!asOf) return 'unavailable'
   const t = Date.parse(asOf)
   if (!Number.isFinite(t)) return 'unavailable'
   const mins = (now - t) / 60000
+  if (mins < -CLOCK_SKEW_MIN) return 'unavailable'
   if (mins < 0) return 'recent'
   return mins <= AGE_LIMITS[kind].recent ? 'recent' : mins <= AGE_LIMITS[kind].delayed ? 'delayed' : 'stale'
 }

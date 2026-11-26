@@ -15,9 +15,8 @@
  *  - Portfolio value   cash + Σ shares × mark.   Identity: value − net deposits = net P&L.
  *  - Settlement payoff a contract pays $1 per share if its side wins, $0 otherwise.
  */
-import { CASH_FLOWS, CLOSED_TRADES, EVENTS, HISTORY_START, LAST_VISIT, OPEN_POSITIONS, PORTFOLIO, TODAY } from '../data/portfolio'
 import { DEFAULT_FEES, estimateFee, type FeeAssumption, type FeeSchedule, type FeeStatus } from './fees'
-import type { AccountRef, Category, ClosedTrade, DataSource, OpenPosition, Platform, RelClass, Relation, RiskEvent, Side } from '../data/types'
+import type { PortfolioData, AccountRef, Category, ClosedTrade, DataSource, OpenPosition, Platform, RelClass, Relation, RiskEvent, Side } from '../data/types'
 export type { RelClass, Relation }
 export type { RelProvenance } from '../data/types'
 
@@ -30,50 +29,15 @@ export const addDays = (iso: string, d: number) => new Date(dayMs(iso) + d * 864
 export const fmtDate = (iso: string, opts: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' }) =>
   new Date(dayMs(iso)).toLocaleDateString('en-US', { ...opts, timeZone: 'UTC' })
 
-/* ───────────── Sources & coverage ───────────── */
-export const sourceOf = (p: Platform): DataSource => PORTFOLIO.sources[p] ?? { label: p === 'pm' ? 'Polymarket' : 'Kalshi', asOf: TODAY, stale: false }
-/** What a source's numbers are based on: open positions, fills, settlements, and how many fees are estimates. */
-export function coverage(p: Platform) {
-  const open = OPEN_POSITIONS.filter((x) => x.platform === p), closed = CLOSED_TRADES.filter((t) => t.platform === p)
-  return {
-    open: open.length,
-    fills: open.reduce((a, x) => a + x.fills.length, 0) + closed.reduce((a, t) => a + (t.outcome === 'Closed early' ? 2 : 1), 0),
-    settlements: closed.filter((t) => t.outcome !== 'Closed early').length,
-    feeEstimates: closed.filter((t) => !t.feeKnown).length,
-  }
-}
-
-/* ───────────── Accounts ───────────── */
-/** Financial accounts in the portfolio. An account belongs to one venue and can be fed by several acquisition
- *  sources (API sync, CSV import, manual records). A venue is not an account, and a source is not a venue. */
-export const ACCOUNTS: AccountRef[] = PORTFOLIO.accounts
-export const accountOf = (id: string) => ACCOUNTS.find((a) => a.id === id)
-export const accountsOn = (venue: Platform) => ACCOUNTS.filter((a) => a.venue === venue)
-
 /* ───────────── Positions ───────────── */
 export interface Position extends OpenPosition {
   shares: number; avg: number; cost: number; fees: number; value: number; upl: number
   ifWin: number; ifLose: number; days: number; opened: string
 }
-/** Weighted-average cost with acquisition fees in the basis (backend convention). */
-export function derivePosition(p: OpenPosition): Position {
-  const shares = sum(p.fills, (f) => f.shares), fees = sum(p.fills, (f) => f.fee), cost = sum(p.fills, (f) => f.shares * f.price) + fees
-  const value = shares * p.mark
-  return {
-    ...p, shares, cost, avg: cost / shares, fees, value, upl: value - cost,
-    ifWin: shares - cost, ifLose: -cost, days: daysBetween(TODAY, p.resolves), opened: p.fills[0].date,
-  }
-}
-export const POSITIONS: Position[] = OPEN_POSITIONS.map(derivePosition)
-export const POS_BY_ID: Record<string, Position> = Object.fromEntries(POSITIONS.map((p) => [p.id, p]))
-export const positionsFor = (f: PlatformFilter) => POSITIONS.filter((p) => inPlatform(f, p.platform))
-
 /* ───────────── Closed trades ───────────── */
 export const tradeGross = (t: ClosedTrade) => t.shares * (t.exit - t.entry)
 export const tradeNet = (t: ClosedTrade) => tradeGross(t) - t.fees
 export const isResolved = (t: ClosedTrade) => t.outcome !== 'Closed early'
-export const tradesIn = (f: PlatformFilter, start = HISTORY_START, end = TODAY) =>
-  CLOSED_TRADES.filter((t) => inPlatform(f, t.platform) && t.closed > start && t.closed <= end)
 // note: `start` is exclusive so consecutive periods never double count a trade.
 
 /* ───────────── Account at a date ───────────── */
@@ -82,24 +46,6 @@ export interface Account {
   unrealized: number; openFees: number; realized: number; closedFees: number; fees: number; netPnl: number
   wins: number; resolved: number; closedCount: number; openCount: number; feeEstimates: number
 }
-export function account(f: PlatformFilter = 'all'): Account {
-  const flows = CASH_FLOWS.filter((c) => inPlatform(f, c.platform) && c.date <= TODAY)
-  const closed = CLOSED_TRADES.filter((t) => inPlatform(f, t.platform) && t.closed <= TODAY)
-  const pos = positionsFor(f)
-  const netDeposits = sum(flows, (c) => c.amount)
-  const realized = sum(closed, tradeNet), closedFees = sum(closed, (t) => t.fees)
-  const committed = sum(pos, (p) => p.cost), openFees = sum(pos, (p) => p.fees)
-  const positionsValue = sum(pos, (p) => p.value), unrealized = positionsValue - committed
-  // committed already includes fees on open fills (cost basis), so they are subtracted once.
-  const cash = netDeposits + realized - committed
-  const resolved = closed.filter(isResolved)
-  return {
-    netDeposits, cash, positionsValue, totalValue: cash + positionsValue, committed, unrealized, openFees, realized, closedFees,
-    fees: closedFees + openFees, netPnl: realized + unrealized, wins: resolved.filter((t) => t.outcome === 'Won').length,
-    resolved: resolved.length, closedCount: closed.length, openCount: pos.length, feeEstimates: closed.filter((t) => !t.feeKnown).length,
-  }
-}
-
 /* ───────────── History (weekly marks) ─────────────
    Open positions' marks move from first fill price → mark at last visit → today's mark, with deterministic
    noise that is zero at the anchors. Closed trades move from entry → exit. History is built per position,
@@ -110,69 +56,13 @@ function pathPrice(id: string, from: string, p0: number, to: string, p1: number,
   const wobble = Math.sin((hash(id) % 628) / 100 + x * 9) * 0.06 * Math.sin(Math.PI * x)
   return Math.min(0.99, Math.max(0.01, p0 + (p1 - p0) * x + wobble))
 }
-export function markAt(p: OpenPosition, date: string) {
-  if (date >= TODAY) return p.mark
-  if (date >= LAST_VISIT) return pathPrice(`${p.id}b`, LAST_VISIT, p.markAtLastVisit, TODAY, p.mark, date)
-  return pathPrice(p.id, p.fills[0].date, p.fills[0].price, LAST_VISIT, p.markAtLastVisit, date)
-}
-
-/** Cumulative net P&L up to and including `date` (same formula as `account` at TODAY). */
-export function netPnlAt(f: PlatformFilter, date: string) {
-  let v = 0
-  for (const t of CLOSED_TRADES) {
-    if (!inPlatform(f, t.platform) || t.opened > date) continue
-    if (t.closed <= date) v += tradeNet(t)
-    else v += t.shares * (pathPrice(t.id, t.opened, t.entry, t.closed, t.exit, date) - t.entry)
-  }
-  for (const p of OPEN_POSITIONS) {
-    if (!inPlatform(f, p.platform)) continue
-    const m = markAt(p, date)
-    for (const fl of p.fills) if (fl.date <= date) v += fl.shares * (m - fl.price) - fl.fee
-  }
-  return v
-}
-export const depositsAt = (f: PlatformFilter, date: string) => sum(CASH_FLOWS.filter((c) => inPlatform(f, c.platform) && c.date <= date), (c) => c.amount)
-
 export interface SeriesPoint { date: string; deposits: number; netPnl: number; value: number }
-export function series(f: PlatformFilter, start = HISTORY_START, end = TODAY): SeriesPoint[] {
-  const dates: string[] = []
-  for (let d = start; d < end; d = addDays(d, 7)) dates.push(d)
-  dates.push(end)
-  return dates.map((date) => { const deposits = depositsAt(f, date), netPnl = netPnlAt(f, date); return { date, deposits, netPnl, value: deposits + netPnl } })
-}
-
 /* ───────────── Periods ───────────── */
 export const PERIODS = ['1W', '1M', '3M', '6M', 'YTD', '1Y', 'All'] as const
 export type Period = (typeof PERIODS)[number]
 export interface Range { start: string; end: string }
 const DAYS: Partial<Record<Period, number>> = { '1W': 7, '1M': 30, '3M': 91, '6M': 182, '1Y': 365 }
 const fmtLong = (d: string) => fmtDate(d, { month: 'short', day: 'numeric', year: 'numeric' })
-const startOf = (p: Period, end: string) => p === 'YTD' ? `${Number(end.slice(0, 4)) - 1}-12-31` : p === 'All' ? HISTORY_START : addDays(end, -(DAYS[p] ?? 0))
-/** A preset period is available only when the history covers its whole span ("All" always is). */
-export const periodAvailable = (p: Period) => p === 'All' || startOf(p, TODAY) >= addDays(HISTORY_START, -1)
-/** A preset period, or a custom range (dates are period boundaries: changes after `start`, up to and including `end`). */
-export function periodRange(p: Period | Range): Range & { label: string; prior: Range | null } {
-  if (typeof p !== 'string') {
-    const len = daysBetween(p.start, p.end), prior0 = { start: addDays(p.start, -len), end: p.start }
-    return { ...p, label: `${fmtLong(addDays(p.start, 1))} – ${fmtLong(p.end)}`, prior: prior0.start < addDays(HISTORY_START, -1) ? null : prior0 }
-  }
-  const end = TODAY
-  const start = startOf(p, end)
-  // Prior period: the same calendar span one year earlier for YTD, otherwise the window of equal length just before.
-  const prior0 = p === 'YTD' ? { start: `${Number(end.slice(0, 4)) - 2}-12-31`, end: `${Number(end.slice(0, 4)) - 1}${end.slice(4)}` } : { start: addDays(start, -daysBetween(start, end)), end: start }
-  const prior = p === 'All' || prior0.start < addDays(HISTORY_START, -1) ? null : prior0
-  return { start, end, label: `${fmtLong(addDays(start, 1))} – ${fmtLong(end)}`, prior }
-}
-/** Validate a custom range against the history: start before end, both inside [history start, data date]. */
-export function customRangeIssue(r: Range): string | null {
-  const ok = (d: string) => /^\d{4}-\d{2}-\d{2}$/.test(d) && Number.isFinite(Date.parse(d))
-  if (!ok(r.start) || !ok(r.end)) return 'Enter both dates.'
-  if (r.start >= r.end) return 'The end date must be after the start date.'
-  if (r.start < HISTORY_START) return `History starts on ${fmtLong(HISTORY_START)}.`
-  if (r.end > TODAY) return `Data runs to ${fmtLong(TODAY)}.`
-  return null
-}
-
 export interface PeriodStats {
   /** netPnl = realized + unrealizedChange. Fees on fills of open positions are inside unrealizedChange (they are part
    *  of cost basis); openFillFees reports how much of it they are.
@@ -183,34 +73,6 @@ export interface PeriodStats {
   profitFactor: number | null; months: { month: string; realized: number }[]
   drawdown: { amount: number; from: string; to: string; recoveredOn: string | null } | null
 }
-export function periodStats(f: PlatformFilter, r: Range): PeriodStats {
-  const trades = tradesIn(f, r.start, r.end)
-  const realized = sum(trades, tradeNet)
-  const netPnl = netPnlAt(f, r.end) - netPnlAt(f, r.start)
-  const openFillFees = sum(OPEN_POSITIONS.filter((p) => inPlatform(f, p.platform)).flatMap((p) => p.fills), (fl) => (fl.date > r.start && fl.date <= r.end ? fl.fee : 0))
-  const res = trades.filter(isResolved), wins = res.filter((t) => t.outcome === 'Won')
-  const posNet = trades.filter((t) => tradeNet(t) > 0), negNet = trades.filter((t) => tradeNet(t) < 0)
-  const grossWin = sum(posNet, tradeNet), grossLoss = -sum(negNet, tradeNet)
-  const monthKeys: string[] = []
-  for (let d = r.start; d <= r.end; d = addDays(d, 1)) { const m = d.slice(0, 7); if (d > r.start && !monthKeys.includes(m)) monthKeys.push(m) }
-  const months = monthKeys.map((m) => ({ month: m, realized: sum(trades.filter((t) => t.closed.startsWith(m)), tradeNet) }))
-  // drawdown on the weekly cumulative net P&L inside the period
-  const pts = series(f, r.start, r.end)
-  let peak = pts[0], dd: PeriodStats['drawdown'] = null
-  for (const p of pts) {
-    if (p.netPnl > peak.netPnl) peak = p
-    const draw = peak.netPnl - p.netPnl
-    if (draw > (dd?.amount ?? 0.5)) dd = { amount: draw, from: peak.date, to: p.date, recoveredOn: null }
-  }
-  if (dd) { const target = pts.find((p) => p.date > dd!.to && p.netPnl >= dd!.amount + pts.find((q) => q.date === dd!.to)!.netPnl); dd.recoveredOn = target?.date ?? null }
-  return {
-    netPnl, realized, unrealizedChange: netPnl - realized, openFillFees, fees: sum(trades, (t) => t.fees) + openFillFees, trades,
-    wins: wins.length, losses: res.length - wins.length, resolved: res.length, winRate: res.length ? wins.length / res.length : null,
-    avgWin: posNet.length ? grossWin / posNet.length : null, avgLoss: negNet.length ? grossLoss / negNet.length : null,
-    profitFactor: grossLoss > 0 ? grossWin / grossLoss : null, months, drawdown: dd,
-  }
-}
-
 export function attribution(trades: ClosedTrade[], by: 'category' | 'platform') {
   const m = new Map<string, { net: number; n: number }>()
   for (const t of trades) { const k = by === 'category' ? t.category : t.platform; const g = m.get(k) ?? { net: 0, n: 0 }; g.net += tradeNet(t); g.n += 1; m.set(k, g) }
@@ -257,9 +119,6 @@ const EDGE_LABEL: Record<Category, true> = { Economics: true, Climate: true, Cry
 
 /* ───────────── Events & relationships ───────────── */
 export type Outcome = 'YES' | 'NO'
-/** Relationships from the portfolio's sources: verified facts and descriptive annotations. Risk uses these only;
- *  scenarios may add their own hypothetical constraints on top (see `withConstraints`). */
-export const sourceRelations = (): Relation[] => PORTFOLIO.relations
 /** Only verified facts and a scenario's own hypothetical assumptions can remove joint outcomes. Annotations never do. */
 export const constrains = (r: Relation) => (r.cls === 'mutex' || r.cls === 'equivalent') && r.provenance !== 'annotation'
 const samePair = (r: { a: string; b: string }, a: string, b: string) => (r.a === a && r.b === b) || (r.a === b && r.b === a)
@@ -368,9 +227,6 @@ export interface Holding {
   /** True for an instrument that isn't in the starting portfolio (a hypothetical new position). */
   isNew?: boolean
 }
-const eventName = (id: string) => EVENTS.find((e) => e.id === id)?.name ?? id
-export const baseHoldings = (): Record<string, Holding> =>
-  Object.fromEntries(POSITIONS.map((p) => [p.id, { id: p.id, eventId: p.eventId, platform: p.platform, side: p.side, shares: p.shares, cost: p.cost, mark: p.mark, category: p.category, title: p.market, eventTitle: eventName(p.eventId), marketId: p.marketId, resolves: p.resolves, accountId: p.accountId, fee: p.feeSchedule }]))
 const payout = (h: Holding, o: Outcome) => (h.side === o ? h.shares : 0)
 /** P&L of an event's holdings vs. their cost basis if the event resolves `o` (excludes fees already paid). */
 export const eventPnl = (hs: Holding[], eventId: string, o: Outcome) => sum(hs.filter((h) => h.eventId === eventId), (h) => payout(h, o) - h.cost)
@@ -403,13 +259,6 @@ export function eventExposureOf(event: RiskEvent, ps: Position[], totalCost: num
     days: ps[0].days, resolves: ps[0].resolves, share: totalCost ? cost / totalCost : 0,
   }
 }
-export function exposures(f: PlatformFilter = 'all'): EventExposure[] {
-  const pos = positionsFor(f), total = sum(pos, (p) => p.cost)
-  return EVENTS.map((event) => {
-    const ps = pos.filter((p) => p.eventId === event.id)
-    return ps.length ? eventExposureOf(event, ps, total) : null
-  }).filter((x): x is EventExposure => x !== null).sort((a, b) => b.cost - a.cost)
-}
 /** How to name an outcome for an exposure: relative to the user's side when single-sided, plain YES/NO when mixed. */
 export const outcomeLabel = (e: Pick<EventExposure, 'side'>, o: Outcome) => (e.side === 'Mixed' ? `If ${o}` : `If ${o} (${o === e.side ? 'for you' : 'against you'})`)
 
@@ -417,14 +266,6 @@ export const outcomeLabel = (e: Pick<EventExposure, 'side'>, o: Outcome) => (e.s
 export function settlementRange(hs: Holding[], rels: Relation[]): OutcomeRange | null {
   const ids = [...new Set(hs.filter((h) => h.shares > 0).map((h) => h.eventId))]
   return outcomeRange(ids, rels, (o) => sum(ids, (id) => eventPnl(hs, id, o[id])))
-}
-
-/** Settlement range for a subset of events (e.g. a table filter), or null when the subset is empty.
- *  Relationships still apply inside the subset. Portfolio-level figures must use `settlementRange` on all holdings. */
-export function settlementRangeFor(eventIds: string[], rels: Relation[]) {
-  const ids = new Set(eventIds)
-  const hs = Object.values(baseHoldings()).filter((h) => ids.has(h.eventId))
-  return hs.length ? settlementRange(hs, rels) : null
 }
 
 /* ───────────── Scenario simulation ───────────── */
@@ -441,21 +282,6 @@ export interface InstrumentRef {
   fee?: FeeSchedule | null
 }
 export const instrumentKey = (i: Pick<InstrumentRef, 'provider' | 'marketId' | 'outcome'>) => `${i.provider}:${i.marketId}:${i.outcome}`
-/** Instrument reference for a position the user actually holds (so it can also be used from scratch). */
-export const instrumentOfPosition = (p: Position): InstrumentRef => ({
-  provider: p.platform, eventId: p.eventId, eventTitle: eventName(p.eventId), marketId: p.marketId, marketTitle: p.market, outcome: p.side,
-  category: p.category, resolves: p.resolves, refPrice: p.mark, refAsOf: sourceOf(p.platform).asOf, source: 'sample', fee: p.feeSchedule,
-})
-/** Every actual holding of exactly this instrument (same provider, market and outcome), one per account. Sharing an
- *  event and a side is not enough: different markets are different contracts. */
-export const holdingsOfInstrument = (i: Pick<InstrumentRef, 'provider' | 'marketId' | 'outcome'>, ps: Position[] = POSITIONS) =>
-  ps.filter((p) => p.platform === i.provider && p.marketId === i.marketId && p.side === i.outcome)
-/** The single actual holding of an instrument, or undefined when none or several accounts hold it. With several,
- *  the caller must ask which account is meant; it never silently picks the first. */
-export const positionFor = (i: Pick<InstrumentRef, 'provider' | 'marketId' | 'outcome'>, ps: Position[] = POSITIONS) => {
-  const hs = holdingsOfInstrument(i, ps)
-  return hs.length === 1 ? hs[0] : undefined
-}
 /** A hypothetical change: hold `to` shares of an instrument, trading at the assumed `price`.
  *  `id` is the actual position id when the instrument is held, otherwise its instrument key.
  *  null `to` / `price` mean "not entered yet": the row is excluded from results and blocks Save. */
@@ -490,12 +316,6 @@ export function validateQty(v: number | null) {
   return null
 }
 export const MAX_WEIGHT_PCT = 100
-/** Starting value at reference marks (cash + positions), or null when a mark is missing. Denominator of `weight`. */
-export function startingValue(baseline: Baseline = 'portfolio', funding: Partial<Record<Platform, number>> = {}) {
-  const { holdings, cash } = startingPoint(baseline, funding)
-  const hs = Object.values(holdings)
-  return hs.some((h) => h.mark == null) ? null : cash.pm + cash.ks + sum(hs, (h) => h.shares * h.mark!)
-}
 /** Target shares of an adjustment: typed shares, or derived from an amount or weight at the assumed price. */
 export function targetShares(a: Adjustment, startValue: number | null): { to: number | null; error: string | null } {
   if (!a.size) return { to: a.to, error: null }
@@ -509,13 +329,6 @@ export function targetShares(a: Adjustment, startValue: number | null): { to: nu
   return { to: Math.min(MAX_SHARES, floorQty(amount / a.price)), error: null }
 }
 export const validFunding = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= MAX_FUNDING
-/** Starting holdings and cash for a baseline, plus any added capital. */
-export function startingPoint(baseline: Baseline = 'portfolio', funding: Partial<Record<Platform, number>> = {}) {
-  const holdings: Record<string, Holding> = baseline === 'scratch' ? {} : baseHoldings()
-  const cash: Record<Platform, number> = baseline === 'scratch' ? { pm: 0, ks: 0 } : { pm: account('pm').cash, ks: account('ks').cash }
-  for (const p of ['pm', 'ks'] as Platform[]) if (validFunding(funding[p])) cash[p] += funding[p]!
-  return { holdings, cash }
-}
 export interface Simulation {
   holdings: Record<string, Holding>; cash: Record<Platform, number>
   /** Realized P&L locked in by hypothetical sales (after their fees). Purchases never create realized P&L. */
@@ -544,56 +357,6 @@ export function validatePrice(v: number) {
   if (v < MIN_PRICE || v > MAX_PRICE) return 'Price must be between $0.01 and $0.99'
   return null
 }
-export function simulate(adjs: Adjustment[], opts: SimOptions): Simulation {
-  const { holdings, cash } = startingPoint(opts.baseline, opts.funding)
-  const startValue = startingValue(opts.baseline, opts.funding)
-  const targets: Record<string, number> = {}, trades: Record<string, { qty: number; price: number }> = {}
-  let realized = 0, fees = 0
-  const feeMode = opts.fees ?? DEFAULT_FEES
-  const errors: Record<string, string> = {}, realizedBy: Record<string, number> = {}, feesBy: Record<string, number> = {}
-  const feeStatusBy: Record<string, FeeStatus> = {}, feesUnavailable: string[] = []
-  for (const a of adjs) {
-    const t = targetShares(a, startValue)
-    if (t.error) { errors[a.id] = t.error; continue }
-    const qtyErr = validateQty(t.to)
-    if (qtyErr) { errors[a.id] = qtyErr; continue }
-    if (a.price == null) { errors[a.id] = 'Enter an assumed price'; continue }
-    const priceErr = validatePrice(a.price)
-    if (priceErr) { errors[a.id] = priceErr; continue }
-    let h = holdings[a.id]
-    if (!h) {
-      // Not in the starting portfolio: a hypothetical new holding from zero, valued at its reference price.
-      const i = a.instrument
-      if (!i) { errors[a.id] = 'Not in this starting portfolio'; continue }
-      h = holdings[a.id] = { id: a.id, eventId: i.eventId, platform: i.provider, side: i.outcome, shares: 0, cost: 0, mark: i.refPrice, category: i.category, title: i.marketTitle, eventTitle: i.eventTitle, marketId: i.marketId, resolves: i.resolves, accountId: null, fee: i.fee ?? null, isNew: true }
-    }
-    const to = t.to!
-    targets[a.id] = to
-    const d = to - h.shares
-    if (Math.abs(d) < 1e-9) continue
-    trades[a.id] = { qty: d, price: a.price }
-    const notional = Math.abs(d) * a.price
-    const est = estimateFee(d, a.price, h.fee, feeMode)
-    // An unavailable fee is never treated as zero silently: it is flagged, and affected figures are labelled pre-fee.
-    const fee = est.amount ?? 0
-    feeStatusBy[a.id] = est.status
-    if (est.amount == null) feesUnavailable.push(a.id)
-    fees += fee; feesBy[a.id] = fee
-    // Buy fees enter cost basis (weighted average incl. acquisition fees); sale fees reduce proceeds.
-    if (d > 0) { h.cost += notional + fee; cash[h.platform] -= notional + fee }
-    else {
-      const q = -d, avg = h.cost / h.shares, r = q * (a.price - avg) - fee
-      realized += r; realizedBy[a.id] = r
-      h.cost -= q * avg; cash[h.platform] += notional - fee
-    }
-    h.shares = to
-    if (to === 0) h.cost = 0
-  }
-  const gap = (v: number) => (v < -0.005 ? -v : 0)
-  const shortfall: Record<Platform, number> = { pm: gap(cash.pm), ks: gap(cash.ks) }
-  return { holdings, cash, realized, fees, errors, shortfall, realizedBy, feesBy, feeStatusBy, feesUnavailable, targets, trades, startValue }
-}
-
 export interface ScenarioMetrics {
   /** positionsValue / totalValue are null when a held instrument has no reference price. */
   cash: number; positionsValue: number | null; totalValue: number | null; committed: number; realized: number; fees: number
@@ -671,43 +434,11 @@ export interface AllocationSegment {
   share: number
   positions: { p: Position; shareOfSegment: number; shareOfOpen: number }[]
 }
-/** Open-position market value grouped by category or platform. Basis: shares × mark; cash is not included. */
-export function allocation(f: PlatformFilter, by: 'category' | 'platform') {
-  const pos = positionsFor(f), total = sum(pos, (p) => p.value)
-  const groups = new Map<string, Position[]>()
-  for (const p of pos) { const k = by === 'category' ? p.category : p.platform; groups.set(k, [...(groups.get(k) ?? []), p]) }
-  const segments: AllocationSegment[] = [...groups.entries()].map(([key, ps]) => {
-    const value = sum(ps, (p) => p.value)
-    return {
-      key, value, share: total ? value / total : 0,
-      positions: [...ps].sort((a, b) => b.value - a.value).map((p) => ({ p, shareOfSegment: value ? p.value / value : 0, shareOfOpen: total ? p.value / total : 0 })),
-    }
-  }).sort((a, b) => b.value - a.value)
-  return { total, segments }
-}
-
-/** Relationships that involve an event (including equivalent contracts merged into it). */
-export function eventRelations(id: string, rels: Relation[]) {
-  return rels.filter((r) => r.a === id || r.b === id).map((r) => ({ other: EVENTS.find((e) => e.id === (r.a === id ? r.b : r.a))!, cls: r.cls, provenance: r.provenance, note: r.note })).filter((x) => x.other)
-}
-
 /* ───────────── Scenario analysis (Scenario Lab › Analyze) ───────────── */
 /** How the value at reference marks moves from the start to the scenario. Purchases and sales move value between
  *  cash and holdings, so only the gap between the assumed price and the mark, and fees, change it. Added capital is
  *  contributed capital, never a gain. Null when a mark is missing (value unavailable). */
 export interface ValueBridge { before: number; added: number; execution: number; fees: number; after: number; feesUnavailable: number }
-export function valueBridge(start: Simulation, sim: Simulation, added: number): ValueBridge | null {
-  const before = scenarioMetrics(start, []).totalValue, after = scenarioMetrics(sim, []).totalValue
-  if (before == null || after == null) return null
-  let execution = 0
-  for (const [id, t] of Object.entries(sim.trades)) {
-    const m = sim.holdings[id]?.mark
-    if (m == null) return null
-    execution += t.qty * (m - t.price)
-  }
-  return { before: before - added, added, execution, fees: sim.fees, after, feesUnavailable: sim.feesUnavailable.length }
-}
-
 /** Per event: capital committed, value at mark and settlement P&L in each outcome (opposing holdings netted). */
 export interface EventProfile { id: string; title: string; resolves: string; cost: number; value: number | null; pnl: Record<Outcome, number>; worst: number; mixed: boolean; ids: string[] }
 /** Display name of a settlement group: its event title, or the market title when another group in the same
@@ -732,3 +463,282 @@ export function eventProfiles(sim: Simulation): EventProfile[] {
     }
   })
 }
+
+/* ───────────── Portfolio-bound calculations ─────────────
+   Everything that reads a portfolio is created per portfolio by `createFinance(data)`. Pages get the instance for the
+   selected workspace through `useFinance()` (lib/financeContext.tsx); nothing reads a global portfolio. The bundled
+   fixture instance lives in lib/fixtureFinance.ts and is used only by the fixture workspace service and tests. */
+export function createFinance(P: PortfolioData) {
+  const PORTFOLIO = P, TODAY = P.asOf, HISTORY_START = P.historyStart, LAST_VISIT = P.lastVisit
+  const CASH_FLOWS = P.cashFlows, OPEN_POSITIONS = P.openPositions, CLOSED_TRADES = P.closedTrades, EVENTS = P.events
+  /* ───────────── Sources & coverage ───────────── */
+  const sourceOf = (p: Platform): DataSource => PORTFOLIO.sources[p] ?? { label: p === 'pm' ? 'Polymarket' : 'Kalshi', asOf: TODAY, stale: false }
+  /** What a source's numbers are based on: open positions, fills, settlements, and how many fees are estimates. */
+  function coverage(p: Platform) {
+    const open = OPEN_POSITIONS.filter((x) => x.platform === p), closed = CLOSED_TRADES.filter((t) => t.platform === p)
+    return {
+      open: open.length,
+      fills: open.reduce((a, x) => a + x.fills.length, 0) + closed.reduce((a, t) => a + (t.outcome === 'Closed early' ? 2 : 1), 0),
+      settlements: closed.filter((t) => t.outcome !== 'Closed early').length,
+      feeEstimates: closed.filter((t) => !t.feeKnown).length,
+    }
+  }
+
+  /* ───────────── Accounts ───────────── */
+  /** Financial accounts in the portfolio. An account belongs to one venue and can be fed by several acquisition
+   *  sources (API sync, CSV import, manual records). A venue is not an account, and a source is not a venue. */
+  const ACCOUNTS: AccountRef[] = PORTFOLIO.accounts
+  const accountOf = (id: string) => ACCOUNTS.find((a) => a.id === id)
+  const accountsOn = (venue: Platform) => ACCOUNTS.filter((a) => a.venue === venue)
+
+  /** Weighted-average cost with acquisition fees in the basis (backend convention). */
+  function derivePosition(p: OpenPosition): Position {
+    const shares = sum(p.fills, (f) => f.shares), fees = sum(p.fills, (f) => f.fee), cost = sum(p.fills, (f) => f.shares * f.price) + fees
+    const value = shares * p.mark
+    return {
+      ...p, shares, cost, avg: cost / shares, fees, value, upl: value - cost,
+      ifWin: shares - cost, ifLose: -cost, days: daysBetween(TODAY, p.resolves), opened: p.fills[0].date,
+    }
+  }
+  const POSITIONS: Position[] = OPEN_POSITIONS.map(derivePosition)
+  const POS_BY_ID: Record<string, Position> = Object.fromEntries(POSITIONS.map((p) => [p.id, p]))
+  const positionsFor = (f: PlatformFilter) => POSITIONS.filter((p) => inPlatform(f, p.platform))
+
+  const tradesIn = (f: PlatformFilter, start = HISTORY_START, end = TODAY) =>
+    CLOSED_TRADES.filter((t) => inPlatform(f, t.platform) && t.closed > start && t.closed <= end)
+  function account(f: PlatformFilter = 'all'): Account {
+    const flows = CASH_FLOWS.filter((c) => inPlatform(f, c.platform) && c.date <= TODAY)
+    const closed = CLOSED_TRADES.filter((t) => inPlatform(f, t.platform) && t.closed <= TODAY)
+    const pos = positionsFor(f)
+    const netDeposits = sum(flows, (c) => c.amount)
+    const realized = sum(closed, tradeNet), closedFees = sum(closed, (t) => t.fees)
+    const committed = sum(pos, (p) => p.cost), openFees = sum(pos, (p) => p.fees)
+    const positionsValue = sum(pos, (p) => p.value), unrealized = positionsValue - committed
+    // committed already includes fees on open fills (cost basis), so they are subtracted once.
+    const cash = netDeposits + realized - committed
+    const resolved = closed.filter(isResolved)
+    return {
+      netDeposits, cash, positionsValue, totalValue: cash + positionsValue, committed, unrealized, openFees, realized, closedFees,
+      fees: closedFees + openFees, netPnl: realized + unrealized, wins: resolved.filter((t) => t.outcome === 'Won').length,
+      resolved: resolved.length, closedCount: closed.length, openCount: pos.length, feeEstimates: closed.filter((t) => !t.feeKnown).length,
+    }
+  }
+
+  function markAt(p: OpenPosition, date: string) {
+    if (date >= TODAY) return p.mark
+    if (date >= LAST_VISIT) return pathPrice(`${p.id}b`, LAST_VISIT, p.markAtLastVisit, TODAY, p.mark, date)
+    return pathPrice(p.id, p.fills[0].date, p.fills[0].price, LAST_VISIT, p.markAtLastVisit, date)
+  }
+
+  /** Cumulative net P&L up to and including `date` (same formula as `account` at TODAY). */
+  function netPnlAt(f: PlatformFilter, date: string) {
+    let v = 0
+    for (const t of CLOSED_TRADES) {
+      if (!inPlatform(f, t.platform) || t.opened > date) continue
+      if (t.closed <= date) v += tradeNet(t)
+      else v += t.shares * (pathPrice(t.id, t.opened, t.entry, t.closed, t.exit, date) - t.entry)
+    }
+    for (const p of OPEN_POSITIONS) {
+      if (!inPlatform(f, p.platform)) continue
+      const m = markAt(p, date)
+      for (const fl of p.fills) if (fl.date <= date) v += fl.shares * (m - fl.price) - fl.fee
+    }
+    return v
+  }
+  const depositsAt = (f: PlatformFilter, date: string) => sum(CASH_FLOWS.filter((c) => inPlatform(f, c.platform) && c.date <= date), (c) => c.amount)
+
+  function series(f: PlatformFilter, start = HISTORY_START, end = TODAY): SeriesPoint[] {
+    const dates: string[] = []
+    for (let d = start; d < end; d = addDays(d, 7)) dates.push(d)
+    dates.push(end)
+    return dates.map((date) => { const deposits = depositsAt(f, date), netPnl = netPnlAt(f, date); return { date, deposits, netPnl, value: deposits + netPnl } })
+  }
+
+  const startOf = (p: Period, end: string) => p === 'YTD' ? `${Number(end.slice(0, 4)) - 1}-12-31` : p === 'All' ? HISTORY_START : addDays(end, -(DAYS[p] ?? 0))
+  /** A preset period is available only when the history covers its whole span ("All" always is). */
+  const periodAvailable = (p: Period) => p === 'All' || startOf(p, TODAY) >= addDays(HISTORY_START, -1)
+  /** A preset period, or a custom range (dates are period boundaries: changes after `start`, up to and including `end`). */
+  function periodRange(p: Period | Range): Range & { label: string; prior: Range | null } {
+    if (typeof p !== 'string') {
+      const len = daysBetween(p.start, p.end), prior0 = { start: addDays(p.start, -len), end: p.start }
+      return { ...p, label: `${fmtLong(addDays(p.start, 1))} – ${fmtLong(p.end)}`, prior: prior0.start < addDays(HISTORY_START, -1) ? null : prior0 }
+    }
+    const end = TODAY
+    const start = startOf(p, end)
+    // Prior period: the same calendar span one year earlier for YTD, otherwise the window of equal length just before.
+    const prior0 = p === 'YTD' ? { start: `${Number(end.slice(0, 4)) - 2}-12-31`, end: `${Number(end.slice(0, 4)) - 1}${end.slice(4)}` } : { start: addDays(start, -daysBetween(start, end)), end: start }
+    const prior = p === 'All' || prior0.start < addDays(HISTORY_START, -1) ? null : prior0
+    return { start, end, label: `${fmtLong(addDays(start, 1))} – ${fmtLong(end)}`, prior }
+  }
+  /** Validate a custom range against the history: start before end, both inside [history start, data date]. */
+  function customRangeIssue(r: Range): string | null {
+    const ok = (d: string) => /^\d{4}-\d{2}-\d{2}$/.test(d) && Number.isFinite(Date.parse(d))
+    if (!ok(r.start) || !ok(r.end)) return 'Enter both dates.'
+    if (r.start >= r.end) return 'The end date must be after the start date.'
+    if (r.start < HISTORY_START) return `History starts on ${fmtLong(HISTORY_START)}.`
+    if (r.end > TODAY) return `Data runs to ${fmtLong(TODAY)}.`
+    return null
+  }
+
+  function periodStats(f: PlatformFilter, r: Range): PeriodStats {
+    const trades = tradesIn(f, r.start, r.end)
+    const realized = sum(trades, tradeNet)
+    const netPnl = netPnlAt(f, r.end) - netPnlAt(f, r.start)
+    const openFillFees = sum(OPEN_POSITIONS.filter((p) => inPlatform(f, p.platform)).flatMap((p) => p.fills), (fl) => (fl.date > r.start && fl.date <= r.end ? fl.fee : 0))
+    const res = trades.filter(isResolved), wins = res.filter((t) => t.outcome === 'Won')
+    const posNet = trades.filter((t) => tradeNet(t) > 0), negNet = trades.filter((t) => tradeNet(t) < 0)
+    const grossWin = sum(posNet, tradeNet), grossLoss = -sum(negNet, tradeNet)
+    const monthKeys: string[] = []
+    for (let d = r.start; d <= r.end; d = addDays(d, 1)) { const m = d.slice(0, 7); if (d > r.start && !monthKeys.includes(m)) monthKeys.push(m) }
+    const months = monthKeys.map((m) => ({ month: m, realized: sum(trades.filter((t) => t.closed.startsWith(m)), tradeNet) }))
+    // drawdown on the weekly cumulative net P&L inside the period
+    const pts = series(f, r.start, r.end)
+    let peak = pts[0], dd: PeriodStats['drawdown'] = null
+    for (const p of pts) {
+      if (p.netPnl > peak.netPnl) peak = p
+      const draw = peak.netPnl - p.netPnl
+      if (draw > (dd?.amount ?? 0.5)) dd = { amount: draw, from: peak.date, to: p.date, recoveredOn: null }
+    }
+    if (dd) { const target = pts.find((p) => p.date > dd!.to && p.netPnl >= dd!.amount + pts.find((q) => q.date === dd!.to)!.netPnl); dd.recoveredOn = target?.date ?? null }
+    return {
+      netPnl, realized, unrealizedChange: netPnl - realized, openFillFees, fees: sum(trades, (t) => t.fees) + openFillFees, trades,
+      wins: wins.length, losses: res.length - wins.length, resolved: res.length, winRate: res.length ? wins.length / res.length : null,
+      avgWin: posNet.length ? grossWin / posNet.length : null, avgLoss: negNet.length ? grossLoss / negNet.length : null,
+      profitFactor: grossLoss > 0 ? grossWin / grossLoss : null, months, drawdown: dd,
+    }
+  }
+
+  /** Relationships from the portfolio's sources: verified facts and descriptive annotations. Risk uses these only;
+   *  scenarios may add their own hypothetical constraints on top (see `withConstraints`). */
+  const sourceRelations = (): Relation[] => PORTFOLIO.relations
+  const eventName = (id: string) => EVENTS.find((e) => e.id === id)?.name ?? id
+  const baseHoldings = (): Record<string, Holding> =>
+    Object.fromEntries(POSITIONS.map((p) => [p.id, { id: p.id, eventId: p.eventId, platform: p.platform, side: p.side, shares: p.shares, cost: p.cost, mark: p.mark, category: p.category, title: p.market, eventTitle: eventName(p.eventId), marketId: p.marketId, resolves: p.resolves, accountId: p.accountId, fee: p.feeSchedule }]))
+  function exposures(f: PlatformFilter = 'all'): EventExposure[] {
+    const pos = positionsFor(f), total = sum(pos, (p) => p.cost)
+    return EVENTS.map((event) => {
+      const ps = pos.filter((p) => p.eventId === event.id)
+      return ps.length ? eventExposureOf(event, ps, total) : null
+    }).filter((x): x is EventExposure => x !== null).sort((a, b) => b.cost - a.cost)
+  }
+  /** Settlement range for a subset of events (e.g. a table filter), or null when the subset is empty.
+   *  Relationships still apply inside the subset. Portfolio-level figures must use `settlementRange` on all holdings. */
+  function settlementRangeFor(eventIds: string[], rels: Relation[]) {
+    const ids = new Set(eventIds)
+    const hs = Object.values(baseHoldings()).filter((h) => ids.has(h.eventId))
+    return hs.length ? settlementRange(hs, rels) : null
+  }
+
+  /** Instrument reference for a position the user actually holds (so it can also be used from scratch). */
+  const instrumentOfPosition = (p: Position): InstrumentRef => ({
+    provider: p.platform, eventId: p.eventId, eventTitle: eventName(p.eventId), marketId: p.marketId, marketTitle: p.market, outcome: p.side,
+    category: p.category, resolves: p.resolves, refPrice: p.mark, refAsOf: sourceOf(p.platform).asOf, source: 'sample', fee: p.feeSchedule,
+  })
+  /** Every actual holding of exactly this instrument (same provider, market and outcome), one per account. Sharing an
+   *  event and a side is not enough: different markets are different contracts. */
+  const holdingsOfInstrument = (i: Pick<InstrumentRef, 'provider' | 'marketId' | 'outcome'>, ps: Position[] = POSITIONS) =>
+    ps.filter((p) => p.platform === i.provider && p.marketId === i.marketId && p.side === i.outcome)
+  /** The single actual holding of an instrument, or undefined when none or several accounts hold it. With several,
+   *  the caller must ask which account is meant; it never silently picks the first. */
+  const positionFor = (i: Pick<InstrumentRef, 'provider' | 'marketId' | 'outcome'>, ps: Position[] = POSITIONS) => {
+    const hs = holdingsOfInstrument(i, ps)
+    return hs.length === 1 ? hs[0] : undefined
+  }
+  /** Starting value at reference marks (cash + positions), or null when a mark is missing. Denominator of `weight`. */
+  function startingValue(baseline: Baseline = 'portfolio', funding: Partial<Record<Platform, number>> = {}) {
+    const { holdings, cash } = startingPoint(baseline, funding)
+    const hs = Object.values(holdings)
+    return hs.some((h) => h.mark == null) ? null : cash.pm + cash.ks + sum(hs, (h) => h.shares * h.mark!)
+  }
+  /** Starting holdings and cash for a baseline, plus any added capital. */
+  function startingPoint(baseline: Baseline = 'portfolio', funding: Partial<Record<Platform, number>> = {}) {
+    const holdings: Record<string, Holding> = baseline === 'scratch' ? {} : baseHoldings()
+    const cash: Record<Platform, number> = baseline === 'scratch' ? { pm: 0, ks: 0 } : { pm: account('pm').cash, ks: account('ks').cash }
+    for (const p of ['pm', 'ks'] as Platform[]) if (validFunding(funding[p])) cash[p] += funding[p]!
+    return { holdings, cash }
+  }
+  function simulate(adjs: Adjustment[], opts: SimOptions): Simulation {
+    const { holdings, cash } = startingPoint(opts.baseline, opts.funding)
+    const startValue = startingValue(opts.baseline, opts.funding)
+    const targets: Record<string, number> = {}, trades: Record<string, { qty: number; price: number }> = {}
+    let realized = 0, fees = 0
+    const feeMode = opts.fees ?? DEFAULT_FEES
+    const errors: Record<string, string> = {}, realizedBy: Record<string, number> = {}, feesBy: Record<string, number> = {}
+    const feeStatusBy: Record<string, FeeStatus> = {}, feesUnavailable: string[] = []
+    for (const a of adjs) {
+      const t = targetShares(a, startValue)
+      if (t.error) { errors[a.id] = t.error; continue }
+      const qtyErr = validateQty(t.to)
+      if (qtyErr) { errors[a.id] = qtyErr; continue }
+      if (a.price == null) { errors[a.id] = 'Enter an assumed price'; continue }
+      const priceErr = validatePrice(a.price)
+      if (priceErr) { errors[a.id] = priceErr; continue }
+      let h = holdings[a.id]
+      if (!h) {
+        // Not in the starting portfolio: a hypothetical new holding from zero, valued at its reference price.
+        const i = a.instrument
+        if (!i) { errors[a.id] = 'Not in this starting portfolio'; continue }
+        h = holdings[a.id] = { id: a.id, eventId: i.eventId, platform: i.provider, side: i.outcome, shares: 0, cost: 0, mark: i.refPrice, category: i.category, title: i.marketTitle, eventTitle: i.eventTitle, marketId: i.marketId, resolves: i.resolves, accountId: null, fee: i.fee ?? null, isNew: true }
+      }
+      const to = t.to!
+      targets[a.id] = to
+      const d = to - h.shares
+      if (Math.abs(d) < 1e-9) continue
+      trades[a.id] = { qty: d, price: a.price }
+      const notional = Math.abs(d) * a.price
+      const est = estimateFee(d, a.price, h.fee, feeMode)
+      // An unavailable fee is never treated as zero silently: it is flagged, and affected figures are labelled pre-fee.
+      const fee = est.amount ?? 0
+      feeStatusBy[a.id] = est.status
+      if (est.amount == null) feesUnavailable.push(a.id)
+      fees += fee; feesBy[a.id] = fee
+      // Buy fees enter cost basis (weighted average incl. acquisition fees); sale fees reduce proceeds.
+      if (d > 0) { h.cost += notional + fee; cash[h.platform] -= notional + fee }
+      else {
+        const q = -d, avg = h.cost / h.shares, r = q * (a.price - avg) - fee
+        realized += r; realizedBy[a.id] = r
+        h.cost -= q * avg; cash[h.platform] += notional - fee
+      }
+      h.shares = to
+      if (to === 0) h.cost = 0
+    }
+    const gap = (v: number) => (v < -0.005 ? -v : 0)
+    const shortfall: Record<Platform, number> = { pm: gap(cash.pm), ks: gap(cash.ks) }
+    return { holdings, cash, realized, fees, errors, shortfall, realizedBy, feesBy, feeStatusBy, feesUnavailable, targets, trades, startValue }
+  }
+
+  /** Open-position market value grouped by category or platform. Basis: shares × mark; cash is not included. */
+  function allocation(f: PlatformFilter, by: 'category' | 'platform') {
+    const pos = positionsFor(f), total = sum(pos, (p) => p.value)
+    const groups = new Map<string, Position[]>()
+    for (const p of pos) { const k = by === 'category' ? p.category : p.platform; groups.set(k, [...(groups.get(k) ?? []), p]) }
+    const segments: AllocationSegment[] = [...groups.entries()].map(([key, ps]) => {
+      const value = sum(ps, (p) => p.value)
+      return {
+        key, value, share: total ? value / total : 0,
+        positions: [...ps].sort((a, b) => b.value - a.value).map((p) => ({ p, shareOfSegment: value ? p.value / value : 0, shareOfOpen: total ? p.value / total : 0 })),
+      }
+    }).sort((a, b) => b.value - a.value)
+    return { total, segments }
+  }
+
+  /** Relationships that involve an event (including equivalent contracts merged into it). */
+  function eventRelations(id: string, rels: Relation[]) {
+    return rels.filter((r) => r.a === id || r.b === id).map((r) => ({ other: EVENTS.find((e) => e.id === (r.a === id ? r.b : r.a))!, cls: r.cls, provenance: r.provenance, note: r.note })).filter((x) => x.other)
+  }
+
+  function valueBridge(start: Simulation, sim: Simulation, added: number): ValueBridge | null {
+    const before = scenarioMetrics(start, []).totalValue, after = scenarioMetrics(sim, []).totalValue
+    if (before == null || after == null) return null
+    let execution = 0
+    for (const [id, t] of Object.entries(sim.trades)) {
+      const m = sim.holdings[id]?.mark
+      if (m == null) return null
+      execution += t.qty * (m - t.price)
+    }
+    return { before: before - added, added, execution, fees: sim.fees, after, feesUnavailable: sim.feesUnavailable.length }
+  }
+
+  return { PORTFOLIO, TODAY, HISTORY_START, LAST_VISIT, CASH_FLOWS, OPEN_POSITIONS, CLOSED_TRADES, EVENTS, sourceOf, coverage, ACCOUNTS, accountOf, accountsOn, derivePosition, POSITIONS, POS_BY_ID, positionsFor, tradesIn, account, markAt, netPnlAt, depositsAt, series, periodAvailable, periodRange, customRangeIssue, periodStats, sourceRelations, baseHoldings, exposures, settlementRangeFor, instrumentOfPosition, holdingsOfInstrument, positionFor, startingValue, startingPoint, simulate, allocation, eventRelations, valueBridge }
+}
+export type Finance = ReturnType<typeof createFinance>

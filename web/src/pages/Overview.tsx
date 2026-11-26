@@ -10,14 +10,15 @@ import { useDetails } from '../components/details'
 import { handoffPath } from '../lib/handoff'
 import { SectionRail, scrollToSection, useHashScroll, type RailSection } from '../components/shell'
 import { Button, Callout, Card, CardHeader, Chip, Delta, HeroFigure, Legend, PageHead, Pills, PlatformBadge, Seg, SideChip, Tabs, Tile, cx } from '../components/ui'
-import { CLOSED_TRADES, LAST_VISIT, TODAY } from '../data/portfolio'
 import { CATEGORIES, CAT_COLOR, PLATFORM_NAME } from '../data/labels'
 import type { Category, Platform } from '../data/types'
-import { PERIODS, account, accountOf, accountsOn, allocation, coverage, sourceOf, exposures, fmtDate, netPnlAt, periodRange, positionsFor, series, tradeNet, type Period, type PlatformFilter, type Position } from '../lib/finance'
+import { PERIODS, fmtDate, tradeNet, type Period, type PlatformFilter, type Position } from '../lib/finance'
 import { fmt, fmtNative, fmtPx, int, kfmt, pct, sfmt } from '../lib/format'
 import { useActiveWorkspace } from '../lib/workspaceContext'
 import { STATE_LABEL } from '../lib/freshness'
 import { accountName } from '../lib/useWorkspace'
+import { useFinance } from '../lib/financeContext'
+import { ReportingNote, WorkspaceLabel } from '../components/Workspace'
 
 const RAIL: RailSection[] = [
   { id: 'summary', label: 'Summary', icon: 'home' },
@@ -33,14 +34,17 @@ const toFilter = (l: PlatformLabel): PlatformFilter => (l === 'Polymarket' ? 'pm
 type SortKey = 'market' | 'shares' | 'cost' | 'value' | 'upl' | 'days'
 
 export default function Overview() {
+  const { CLOSED_TRADES, LAST_VISIT, TODAY, account, accountOf, accountsOn, allocation, coverage, sourceOf, exposures, netPnlAt, periodAvailable, periodRange, positionsFor, series } = useFinance()
   useHashScroll()
   const nav = useNavigate()
   const connect = useConnect()
   const { settings } = useSettings()
-  const ws = useActiveWorkspace().snapshot
+  const ws = useActiveWorkspace().snapshot, wsName = ws.summary.name, wsMode = ws.summary.mode
   const px = (v: number) => fmtPx(v, settings.priceDisplay)
   const [plat, setPlat] = useState<PlatformLabel>(settings.defaultScope === 'pm' ? 'Polymarket' : settings.defaultScope === 'ks' ? 'Kalshi' : 'All')
-  const [period, setPeriod] = useState<Period>(settings.defaultPeriod)
+  const [chosen, setPeriod] = useState<Period>(settings.defaultPeriod)
+  // A period the workspace's history doesn't cover is never charted (no points before the history starts).
+  const period: Period = periodAvailable(chosen) ? chosen : 'All'
   const [chartTab, setChartTab] = useState<'Value' | 'Net P&L'>('Value')
   const [holdTab, setHoldTab] = useState<'Open positions' | 'Resolved' | 'Activity'>('Open positions')
   const [sel, setSel] = useState<Selection>(null)
@@ -123,7 +127,7 @@ export default function Overview() {
       <SectionRail title="Overview" sections={RAIL}>
         <div className="rail-card">
           <b>Data sources</b>
-          {(['pm', 'ks'] as Platform[]).map((p) => (
+          {(['pm', 'ks'] as Platform[]).filter((p) => accountsOn(p).length).map((p) => (
             <div className="row" key={p}><PlatformBadge p={p} />{PLATFORM_NAME[p]}<span className={cx(sourceOf(p).stale && 'stale')}>{fmtDate(sourceOf(p).asOf)}</span></div>
           ))}
           <button type="button" className="link" style={{ textAlign: 'left' }} onClick={() => connect()}>Manage data sources</button>
@@ -138,7 +142,7 @@ export default function Overview() {
           <div className="card hero-card">
             <div className="card-h">
               <Tabs label="Chart" options={['Value', 'Net P&L'] as const} value={chartTab} onChange={setChartTab} />
-              <Seg label="Period" options={PERIODS} value={period} onChange={setPeriod} />
+              <Seg label="Period" options={PERIODS} value={period} onChange={setPeriod} disabled={(o) => (periodAvailable(o) ? null : 'Your history doesn’t cover this period')} />
             </div>
             <div className="card-b">
               <div className="hero-top">
@@ -152,8 +156,8 @@ export default function Overview() {
                   {chartTab === 'Value' && <div className="asof" aria-label="Valuation basis">
                     <span>Valued at marks as of <b>{fmtDate(TODAY, { month: 'short', day: 'numeric', year: 'numeric' })}</b> · reconstructed from records</span>
                     <span>Market data: <b>{STATE_LABEL[ws.streams.find((x) => x.id === 'market')?.state ?? 'unavailable']}</b></span>
-                    {(['pm', 'ks'] as Platform[]).filter((p) => f === 'all' || f === p).map((p) => { const src = sourceOf(p), d = accountsOn(p)[0]?.denomination ?? 'USD'; return <span key={p}>{PLATFORM_NAME[p]} <b>{fmtNative(account(p).totalValue, d)}</b>{src.stale ? <span className="stale"> · records as of {fmtDate(src.asOf)}</span> : ''}</span> })}
-                    {f === 'all' && <span>Total is indicative: it adds USDC and USD as equal in value.</span>}
+                    {(['pm', 'ks'] as Platform[]).filter((p) => (f === 'all' || f === p) && accountsOn(p).length).map((p) => { const src = sourceOf(p), d = accountsOn(p)[0]?.denomination ?? 'USD'; return <span key={p}>{PLATFORM_NAME[p]} <b>{fmtNative(account(p).totalValue, d)}</b>{src.stale ? <span className="stale"> · records as of {fmtDate(src.asOf)}</span> : ''}</span> })}
+                    <ReportingNote denominations={(['pm', 'ks'] as Platform[]).filter((p) => f === 'all' || f === p).flatMap((p) => accountsOn(p).map((a) => a.denomination))} />
                   </div>}
                 </div>
                 {chartTab === 'Value' && <div style={{ marginTop: 'var(--space-6)' }}><Legend items={[{ label: 'Portfolio value', color: 'var(--color-gain-fg)', kind: 'ln' }, { label: 'Net deposits', kind: 'dash' }]} /></div>}
@@ -253,7 +257,7 @@ export default function Overview() {
           <Card id="coverage">
             <CardHeader title="Data coverage" sub="What these numbers are based on" />
             <div className="card-b">
-              <p className="t3" style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--space-2)' }}>Sample portfolio. No account is connected.</p>
+              <p className="t3" style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--space-2)' }}>{wsName}{wsMode === 'fixture' ? '. No account is connected.' : ''}</p>
               {(['pm', 'ks'] as Platform[]).filter((p) => f === 'all' || p === f).map((p) => {
                 const c = coverage(p), src = sourceOf(p)
                 return <div className="cov" key={p}><PlatformBadge p={p} /><span>{accountsOn(p).map((a) => accountName(a.id)).join(', ')} · {c.fills} fills · {c.settlements} settlements</span><span className={src.stale ? 'stale' : 't3'} title={src.stale ? 'Older than 24 hours' : undefined}>as of {fmtDate(src.asOf)}{src.stale ? ' · stale' : ''}</span></div>
@@ -335,7 +339,7 @@ export default function Overview() {
           )}
         </Card>
 
-        <div className="footer-note"><span>Scevia is read-only. It never places trades or holds funds. Figures are for analysis, not investment advice.</span><span>Sample portfolio · fictional data</span></div>
+        <div className="footer-note"><span>Scevia is read-only. It never places trades or holds funds. Figures are for analysis, not investment advice.</span><span><WorkspaceLabel /></span></div>
       </main>
 
       {feeReview && (

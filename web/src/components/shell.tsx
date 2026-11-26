@@ -4,13 +4,15 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { PLATFORM_NAME } from '../data/labels'
-import { POSITIONS, exposures, fmtDate } from '../lib/finance'
+import { fmtDate } from '../lib/finance'
 import { qty } from '../lib/format'
 import { TYPE_LABEL } from '../lib/records'
 import { SettingsProvider, useSettings, type SettingsTab } from '../lib/settings'
-import { readStored } from '../lib/storage'
-import { WorkspaceProvider, useActiveWorkspace } from '../lib/workspaceContext'
-import { accountName, useWorkspaceSnapshot } from '../lib/useWorkspace'
+import { SAMPLE_WORKSPACE_ID, readStored, scopedKey } from '../lib/storage'
+import { WorkspaceProvider, hasData, useActiveWorkspace } from '../lib/workspaceContext'
+import { FinanceProvider } from '../lib/financeContext'
+import { devService } from '../data/devWorkspaces'
+import { accountName, emptyRecords, initialWorkspace, notifyRecords, setActiveRecords, useWorkspaceSnapshot } from '../lib/useWorkspace'
 import { AccountMenu, PrivacyDialog } from './Account'
 import { DetailProvider, useDetails, type Detail } from './details'
 import { HelpCentre, type HelpTab } from './Help'
@@ -20,6 +22,7 @@ import { Layer, Menu, ToastProvider } from './overlays'
 import { SettingsModal } from './Settings'
 import { DataStatus, PORTFOLIO_SECTIONS, PortfolioSelector, WorkspaceGate } from './Workspace'
 import { cx } from './ui'
+import { useFinanceCtx } from '../lib/financeContext'
 
 const AREAS = [
   { to: '/overview', label: 'Overview' },
@@ -83,7 +86,9 @@ function CommandPalette({ onClose, open }: { onClose: () => void; open: Overlays
   const { open: openSettings } = useSettings()
   const ws = useWorkspaceSnapshot()
   // Portfolio content (accounts, positions, events, records, scenarios) is searched only in the portfolio it belongs to.
-  const isSample = useActiveWorkspace().snapshot.summary.mode === 'fixture'
+  // Portfolio content comes from the selected workspace only.
+  const { F, hasPortfolio, workspaceId } = useFinanceCtx()
+  const { POSITIONS, exposures } = F
   const [q, setQ] = useState('')
   const [i, setI] = useState(0)
   const [more, setMore] = useState<string | null>(null)
@@ -92,9 +97,9 @@ function CommandPalette({ onClose, open }: { onClose: () => void; open: Overlays
     const to = (path: string) => () => { onClose(); nav(path) }
     const det = (d: Detail) => () => { onClose(); details.open(d) }
     const run = (f: () => void) => () => { onClose(); f() }
-    const scenarios = readStored<{ key: string; name: string; baseline?: string; adjs?: unknown[] }[]>('scevia-scenarios-v4', [], (v) => (Array.isArray(v) ? (v as { key: string; name: string }[]).filter((x) => x && typeof x.key === 'string' && typeof x.name === 'string') : null))
-    const replays = readStored<{ key: string; name: string; start?: string; end?: string }[]>('scevia-replays-v1', [], (v) => (Array.isArray(v) ? (v as { key: string; name: string }[]).filter((x) => x && typeof x.key === 'string' && typeof x.name === 'string') : null))
-    const content: Item[] = isSample ? [
+    const scenarios = readStored<{ key: string; name: string; baseline?: string; adjs?: unknown[] }[]>(scopedKey('scevia-scenarios-v4', workspaceId), [], (v) => (Array.isArray(v) ? (v as { key: string; name: string }[]).filter((x) => x && typeof x.key === 'string' && typeof x.name === 'string') : null))
+    const replays = readStored<{ key: string; name: string; start?: string; end?: string }[]>(scopedKey('scevia-replays-v1', workspaceId), [], (v) => (Array.isArray(v) ? (v as { key: string; name: string }[]).filter((x) => x && typeof x.key === 'string' && typeof x.name === 'string') : null))
+    const content: Item[] = hasPortfolio ? [
       ...ws.accounts.map((a) => ({ id: `acct:${a.id}`, group: 'Accounts', label: a.label, sub: `${PLATFORM_NAME[a.venue]} · ${a.kind}${a.inAnalytics ? '' : ' · records only'}`, icon: 'db' as IconName, keys: `${PLATFORM_NAME[a.venue]} ${a.connection ?? ''} account wallet`.toLowerCase(), go: to(`/portfolio/transactions?account=${encodeURIComponent(a.id)}`) })),
       ...POSITIONS.map((p) => ({ id: `pos:${p.id}`, group: 'Positions', label: p.market, sub: `${p.side} · ${qty(p.shares)} shares · ${PLATFORM_NAME[p.platform]} · ${accountName(p.accountId)}`, icon: 'layers' as IconName, keys: `${p.category} ${p.eventId} ${p.side}`.toLowerCase(), go: det({ kind: 'position', id: p.id }) })),
       ...exposures().map((x) => ({ id: `evt:${x.event.id}`, group: 'Events', label: x.event.name, sub: `${x.positions.length} contract${x.positions.length > 1 ? 's' : ''} · resolves ${fmtDate(x.resolves)}`, icon: 'target' as IconName, keys: `${x.event.short} ${x.event.category}`.toLowerCase(), go: det({ kind: 'event', id: x.event.id }) })),
@@ -126,7 +131,7 @@ function CommandPalette({ onClose, open }: { onClose: () => void; open: Overlays
       const shown = more === g ? inG : inG.slice(0, PER_GROUP)
       return shown.map((r, k) => ({ ...r.x, more: k === shown.length - 1 ? inG.length - shown.length : 0 }))
     })
-  }, [q, more, ws, nav, details, onClose, openSettings, open, isSample])
+  }, [q, more, ws, nav, details, onClose, openSettings, open, F, hasPortfolio, workspaceId])
   const sel = Math.min(i, items.length - 1)
   const activeId = items[sel] ? `${listId}-${sel}` : undefined
   return (
@@ -163,8 +168,23 @@ function CommandPalette({ onClose, open }: { onClose: () => void; open: Overlays
 /* The workspace provider sits inside Settings so the automatic-refresh preference applies. */
 function WorkspaceFromSettings({ children }: { children: ReactNode }) {
   const { settings } = useSettings()
-  return <WorkspaceProvider autoRefreshMin={settings.autoRefresh}>{children}</WorkspaceProvider>
+  return <WorkspaceProvider autoRefreshMin={settings.autoRefresh} service={devService()}><ActiveFinance>{children}</ActiveFinance></WorkspaceProvider>
 }
+/* Binds the read model to the selected workspace. A workspace without data (loading, unavailable, failed) gets an
+   empty portfolio, never another workspace's data. Detail panels are reset when the workspace changes. */
+function ActiveFinance({ children }: { children: ReactNode }) {
+  const { snapshot: s } = useActiveWorkspace()
+  const id = s.summary.id, data = hasData(s) ? s.data : null
+  // Records follow the selected workspace: its own seed, the sample records for the Sample portfolio, else empty
+  // records with the workspace's accounts. Set before children render; subscribers are told after commit.
+  // While a workspace has no data it has no records either (never the previous workspace's).
+  const changed = setActiveRecords(data ? id : `${id}#none`, () => !data ? emptyRecords() : s.recordsSeed?.() ?? (id === SAMPLE_WORKSPACE_ID ? initialWorkspace() : { ...emptyRecords(), accounts: (data?.accounts ?? []).map((a) => ({ id: a.id, venue: a.venue, label: a.label, kind: a.kind, sources: a.sources, openingDeclared: false, inAnalytics: true, lastObserved: null })) }))
+  useEffect(() => { notifyRecords() }, [id, changed])
+  return <FinanceProvider data={data} workspaceId={s.summary.id} revision={`${s.financialRevision}|${s.marketRevision}`}><DetailProvider key={s.summary.id}>{children}</DetailProvider></FinanceProvider>
+}
+
+/** Pages remount when the workspace changes, so no filter, selection or open panel carries over between portfolios. */
+function WorkspaceOutlet() { return <Outlet key={useActiveWorkspace().snapshot.summary.id} /> }
 
 export function AppLayout() {
   const [palette, setPalette] = useState(false)
@@ -180,16 +200,14 @@ export function AppLayout() {
   return (
     <ToastProvider>
       <SettingsProvider onOpen={setSettingsTab}>
-        <DetailProvider>
         <WorkspaceFromSettings>
         <TopNav open={open} />
-        <WorkspaceGate><Outlet /></WorkspaceGate>
+        <WorkspaceGate><WorkspaceOutlet /></WorkspaceGate>
         {palette && <CommandPalette onClose={() => setPalette(false)} open={open} />}
         {help && <HelpCentre tab={help} onClose={() => setHelp(null)} />}
         {privacy && <PrivacyDialog onClose={() => setPrivacy(false)} />}
         {settingsTab && <SettingsModal tab={settingsTab} onClose={() => setSettingsTab(null)} />}
         </WorkspaceFromSettings>
-        </DetailProvider>
       </SettingsProvider>
     </ToastProvider>
   )

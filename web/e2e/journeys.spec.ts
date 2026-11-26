@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { POS_BY_ID, account, allocation, exposures, periodRange, periodStats, positionsFor } from '../src/lib/finance'
+import { POS_BY_ID, account, allocation, exposures, periodRange, periodStats, positionsFor } from '../src/lib/fixtureFinance'
 import { fmt, sfmt } from '../src/lib/format'
 
 const fresh = async (page: Page, path: string) => {

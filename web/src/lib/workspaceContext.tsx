@@ -13,13 +13,13 @@ interface Ctx {
   list: WorkspaceSummary[]
   snapshot: WorkspaceSnapshot
   select: (id: string) => void
-  refresh: () => Promise<{ changed: boolean } | null>
+  refresh: () => Promise<{ changed: boolean; failed?: boolean } | null>
   /** Result of the last refresh in this tab, for "Checked · no new data". */
-  lastRefresh: { at: string; changed: boolean } | null
+  lastRefresh: { at: string; changed: boolean; failed?: boolean } | null
 }
 
 const placeholder = (s: WorkspaceSummary): WorkspaceSnapshot => ({
-  summary: s, status: 'loading', reason: null, financialRevision: null, marketRevision: null, valuationAsOf: null, historyStart: null, accounts: [], streams: [], checkedAt: null,
+  summary: s, status: 'loading', reason: null, financialRevision: null, marketRevision: null, valuationAsOf: null, historyStart: null, accounts: [], streams: [], checkedAt: null, data: null,
 })
 
 const WorkspaceCtx = createContext<Ctx | null>(null)
@@ -66,13 +66,14 @@ export function WorkspaceProvider({ children, service: given, autoRefreshMin = 0
     try {
       const r = await service.refresh(cur)
       if (req.current !== n) return null
-      setSnapshot(r.snapshot)
+      setSnapshot({ ...r.snapshot, reason: null })
       const res = { at: r.snapshot.checkedAt ?? new Date().toISOString(), changed: r.changed }
       setLastRefresh(res)
       return { changed: r.changed }
     } catch {
-      if (req.current === n) setSnapshot({ ...cur, reason: 'refresh_failed' })
-      return null
+      // The last usable data stays, marked as not refreshed; it is never presented as newly synchronized.
+      if (req.current === n) { setSnapshot({ ...cur, reason: 'refresh_failed' }); setLastRefresh({ at: new Date().toISOString(), changed: false, failed: true }) }
+      return { changed: false, failed: true }
     }
   }, [service])
 

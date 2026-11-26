@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { SAMPLE_MARKET_CATALOG, SAMPLE_MARKET_EVENTS } from '../data/sampleMarkets'
-import { POS_BY_ID, account, baseHoldings, eventPnl, holdingsAllocation, sourceRelations, scenarioMetrics, simulate, type Adjustment, type InstrumentRef } from './finance'
+import { eventPnl, holdingsAllocation, scenarioMetrics, type Adjustment, type InstrumentRef } from './finance'
+import { POS_BY_ID, account, baseHoldings, sourceRelations, simulate } from './fixtureFinance'
 import { instrumentFrom, parseMarketLink } from './markets'
 import * as SC from './scenarios'
 import { DEFAULT_FEES } from './fees'

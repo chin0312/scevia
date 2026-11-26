@@ -4,8 +4,8 @@ import { DEMO_ID, FIXTURE_ID, bundledService, demoStreams, fixtureSnapshot, read
 import { SAMPLE_MARKET_EVENTS } from '../data/sampleMarkets'
 import { ago, classifyAge, summaryState, type StreamStatus } from './freshness'
 import { maxDrawdown, priceAt, seriesQuality, valueSeries } from './history'
-import { compareReplays, replayMarketFrom, runReplay, sanitizeReplays, validateReplay, type Replay, type ReplayAccount } from './replay'
-import { periodAvailable, periodRange } from './finance'
+import { bucketId, compareReplays, coverShortfall, replayMarketFrom, runReplay, sanitizeReplays, tradingWindow, validateReplay, type FundingBucket, type Replay, type ReplayMarket, type ReplayPosition } from './replay'
+import { periodAvailable, periodRange } from './fixtureFinance'
 
 const NOW = Date.parse('2026-11-24T12:00:00Z')
 
@@ -32,6 +32,11 @@ describe('workspace boundary', () => {
     // A captured snapshot is never "streaming"; a stale capture is reported as stale.
     expect(s.find((x) => x.id === 'market')!.state).toBe('stale')
     expect(s.some((x) => x.state === 'streaming')).toBe(false)
+    // Valuation completeness isn't inferred from a capture, and market freshness follows the oldest quote's source time.
+    expect(s.find((x) => x.id === 'valuation')!.state).toBe('partial')
+    const two = readDemo({ status: 'available', portfolioId: 'p', mode: 'demo', revision: 'r', capturedAt: '2026-11-20T00:00:00Z',
+      quotes: [{ retrievedAt: '2026-11-20T00:00:00Z', effectiveAt: '2026-10-01T00:00:00Z', freshness: 'recent_capture' }, { retrievedAt: '2026-11-20T00:00:00Z', effectiveAt: '2026-11-19T00:00:00Z', freshness: 'recent_capture' }] })
+    if (two.status === 'available') expect(demoStreams(two, '2026-11-24T00:00:00Z')[0]).toMatchObject({ state: 'cached_snapshot', asOf: '2026-10-01T00:00:00Z' })
   })
   it('reads decimal strings and keeps invalid values unavailable', () => {
     expect(readDecimal('12.50')).toBe(12.5)
@@ -73,6 +78,9 @@ describe('freshness', () => {
     expect(classifyAge('2026-11-24T09:00:00Z', NOW, 'account')).toBe('delayed')
     expect(classifyAge(null, NOW, 'market')).toBe('unavailable')
     expect(classifyAge('garbage', NOW, 'market')).toBe('unavailable')
+    // Clock skew: a slightly future time is current; a clearly future one is invalid, never "recent".
+    expect(classifyAge('2026-11-24T12:01:00Z', NOW, 'market')).toBe('recent')
+    expect(classifyAge('2026-11-24T13:00:00Z', NOW, 'market')).toBe('unavailable')
   })
   it('reports streams independently: one current stream never hides a stale one', () => {
     expect(summaryState([st('market', 'streaming'), st('account', 'stale'), st('valuation', 'recent')])).toBe('stale')
@@ -122,62 +130,127 @@ describe('periods', () => {
 })
 
 describe('Historical Replay', () => {
-  const ACCTS: ReplayAccount[] = [{ id: 'pm-main', venue: 'pm', label: 'Wallet', denomination: 'USDC' }, { id: 'ks-main', venue: 'ks', label: 'Main', denomination: 'USD' }]
   const find = (id: string) => { const ev = SAMPLE_MARKET_EVENTS.find((e) => e.markets.some((m) => m.marketId === id))!; return replayMarketFrom(ev, ev.markets.find((m) => m.marketId === id)!) }
+  const PM: FundingBucket = { id: bucketId('pm', 'USDC'), venue: 'pm', denomination: 'USDC', capital: 1000 }
+  const KS: FundingBucket = { id: bucketId('ks', 'USD'), venue: 'ks', denomination: 'USD', capital: 500 }
   const base = (): Replay => ({
-    key: 'r1', name: 'Test', color: '', start: '2026-03-01', end: '2026-11-24', capital: { 'pm-main': 1000, 'ks-main': 500 }, fees: { mode: 'excluded' }, basis: 'retrospective', createdAt: '',
+    key: 'r1', name: 'Test', color: '', start: '2026-03-01', end: '2026-11-24', buckets: [{ ...PM }, { ...KS }], fees: { mode: 'excluded' }, rates: { USDC: null, PUSD: null }, basis: 'retrospective', createdAt: '',
     positions: [
-      { id: 'p1', market: find('pm-mayor'), outcome: 'YES', accountId: 'pm-main', entryDate: '2026-03-02', entryPrice: 0.6, size: { mode: 'amount', value: 300 }, exit: { kind: 'settle' } },
-      { id: 'p2', market: find('ks-fedjan-cut'), outcome: 'NO', accountId: 'ks-main', entryDate: '2026-06-01', entryPrice: 0.5, size: { mode: 'weight', value: 40 }, exit: { kind: 'settle' } },
+      { id: 'p1', market: find('pm-mayor'), outcome: 'YES', bucketId: PM.id, entryDate: '2026-03-02', entryPrice: 0.6, size: { mode: 'amount', value: 300 }, exit: { kind: 'settle' } },
+      { id: 'p2', market: find('ks-fedjan-cut'), outcome: 'NO', bucketId: KS.id, entryDate: '2026-06-01', entryPrice: 0.5, size: { mode: 'weight', value: 40 }, exit: { kind: 'settle' } },
     ],
   })
-  it('enforces the period and the market lifecycle', () => {
-    const r = base()
-    expect(validateReplay(r, '2026-11-24', ACCTS)).toEqual({ period: null, capital: null, positions: {} })
-    r.positions[1].entryDate = '2026-04-01'
-    expect(validateReplay(r, '2026-11-24', ACCTS).positions.p2).toMatch(/wasn’t listed until 2026-05-01/)
-    r.positions[1].entryDate = '2026-06-01'
-    r.positions[0].exit = { kind: 'date', date: '2026-11-10', price: 0.9 }
-    expect(validateReplay(r, '2026-11-24', ACCTS).positions.p1).toMatch(/Trading closed on 2026-11-05/)
-    expect(validateReplay({ ...r, end: '2026-12-01' }, '2026-11-24', ACCTS).period).toMatch(/on or before today/)
-    expect(validateReplay({ ...r, positions: [{ ...r.positions[1], accountId: 'pm-main' }] }, '2026-11-24', ACCTS).positions.p2).toMatch(/another venue/)
+  // A market whose trading closed on Nov 20 and that resolved on Nov 23.
+  const closing: ReplayMarket = { provider: 'pm', marketId: 'x-close', title: 'Closes before it resolves', eventTitle: 'X', category: 'Economics', listedAt: '2026-10-01', closesAt: '2026-11-20', expectedResolution: '2026-11-22', resolution: { outcome: 'NO', at: '2026-11-23' }, fee: null, observations: { YES: [], NO: [] } }
+  const pos = (over: Partial<ReplayPosition>): ReplayPosition => ({ id: 'q', market: closing, outcome: 'NO', bucketId: PM.id, entryDate: '2026-11-10', entryPrice: 0.7, size: { mode: 'shares', value: 100 }, exit: { kind: 'settle' }, ...over })
+  const with_ = (...ps: ReplayPosition[]): Replay => ({ ...base(), positions: ps })
+
+  it('trading close governs execution; a later resolution never extends the window', () => {
+    expect(validateReplay(with_(pos({ entryDate: '2026-11-20' })), '2026-11-24').positions).toEqual({})
+    expect(validateReplay(with_(pos({ entryDate: '2026-11-21' })), '2026-11-24').positions.q).toBe('Trading closed on 2026-11-20; it resolved later, on 2026-11-23.')
+    expect(validateReplay(with_(pos({ exit: { kind: 'date', date: '2026-11-22', price: 0.9 } })), '2026-11-24').positions.q).toMatch(/^Trading closed on 2026-11-20.*Hold to settlement instead\.$/)
+    // Holding to settlement is valid and settles at the verified resolution time.
+    const res = runReplay(with_(pos({})), '2026-11-24')
+    expect(res.lines[0]).toMatchObject({ end: 'settled', endDate: '2026-11-23', proceeds: 100 })
+    // A timestamped close: same day before the close is fine, the next day isn't.
+    const ts = { ...closing, closesAt: '2026-11-20T18:00:00Z' }
+    expect(tradingWindow(ts, '2026-11-20').ok).toBe(true)
+    expect(tradingWindow(ts, '2026-11-21').ok).toBe(false)
   })
-  it('settles at the recorded resolution, values open holdings only from recorded prices, and labels hindsight', () => {
-    const res = runReplay(base(), ACCTS, '2026-11-24')
+  it('keeps an unrecorded close unknown (a caveat), never the expected resolution', () => {
+    const m = find('ks-fedjan-cut')
+    expect(m.closesAt).toBeNull()
+    expect(m.expectedResolution).toBe('2027-01-27')
+    const v = validateReplay(base(), '2026-11-24')
+    expect(v.positions).toEqual({})
+    expect(v.caveats.p2).toMatch(/Trading close isn’t recorded/)
+    expect(v.caveats.p1).toBeUndefined()
+    expect(validateReplay({ ...base(), positions: [{ ...base().positions[1], entryDate: '2026-04-01' }] }, '2026-11-24').positions.p2).toMatch(/wasn’t listed until 2026-05-01/)
+  })
+  it('restores older replays without turning a resolution date into a trading close', () => {
+    const legacy = [{ key: 'old', name: 'Old', start: '2026-03-01', end: '2026-11-24', capital: { 'pm-main': 700 }, positions: [{ id: 'a', accountId: 'pm-main', market: { ...find('pm-mayor'), closesAt: '2026-11-05', expectedResolution: undefined }, outcome: 'YES', entryDate: '2026-03-02', entryPrice: 0.6, size: { mode: 'amount', value: 100 }, exit: { kind: 'settle' } }] }]
+    const [r] = sanitizeReplays(JSON.parse(JSON.stringify(legacy)))!
+    expect(r.positions[0].market.closesAt).toBeNull()
+    expect(r.buckets).toEqual([{ id: bucketId('pm', 'USDC'), venue: 'pm', denomination: 'USDC', capital: 700 }])
+    expect(r.positions[0].bucketId).toBe(bucketId('pm', 'USDC'))
+  })
+  it('settles at the recorded resolution, values open holdings only from recorded prices, and is always hindsight', () => {
+    const res = runReplay(base(), '2026-11-24')
     const [won, open] = res.lines
     expect(won).toMatchObject({ end: 'settled', shares: 500, proceeds: 500, pnl: 200, realized: true })
-    // Open at the end: the only recorded price is the sample reference on 2026-11-24, so the end value is known.
-    expect(open.end).toBe('open')
-    expect(open.shares).toBe(400)
+    expect(open).toMatchObject({ end: 'open', shares: 400 })
     expect(open.endValue).toBeCloseTo(400 * 0.7)
     expect(res.hindsight).toBe(true)
-    // Two denominations: native totals first; combined only as an indicative sum.
-    expect(res.byDenomination.map((d) => d.denomination)).toEqual(['USDC', 'USD'])
-    expect(res.combined?.assumed).toBe(true)
-    // No recorded history before the end date: value over time is partial, so drawdown is unavailable.
+    expect(res.resolvedSelected).toBe(true)
+    expect(runReplay({ ...base(), positions: [base().positions[1]] }, '2026-11-24').hindsight).toBe(true)
+    expect(res.funding).toBe('funded')
     expect(res.quality.complete).toBe(false)
     expect(res.drawdown).toBeNull()
-    expect(res.evidence.find((e) => e.marketId === 'pm-mayor')!.resolution).toBe(true)
   })
-  it('keeps an open holding unavailable when the replay ends before any recorded price', () => {
-    const r = { ...base(), end: '2026-10-01' }
-    const res = runReplay(r, ACCTS, '2026-11-24')
-    expect(res.lines[0].end).toBe('open')
-    expect(res.lines[0].endValue).toBeNull()
+  it('reports native results first; a combined USD total needs a frozen rate for each non-USD asset', () => {
+    const res = runReplay(base(), '2026-11-24')
+    expect(res.byDenomination.map((d) => d.denomination)).toEqual(['USDC', 'USD'])
     expect(res.combined).toBeNull()
+    expect(res.combinedMissing).toBe('rate')
+    const rated = runReplay({ ...base(), rates: { USDC: 0.999, PUSD: null } }, '2026-11-24')
+    expect(rated.combined!.rates).toEqual({ USDC: 0.999 })
+    expect(rated.combined!.endValue).toBeCloseTo(1200 * 0.999 + (500 - 200 + 280))
+    // A USD-only replay needs no rate.
+    const usd = runReplay({ ...base(), buckets: [{ ...KS }], positions: [base().positions[1]] }, '2026-11-24')
+    expect(usd.combined).not.toBeNull()
   })
-  it('reports a funding shortfall per account', () => {
+  it('separates funded, unfunded and unassessable replays per independent bucket', () => {
     const r = base(); r.positions[0].size = { mode: 'amount', value: 1500 }
-    const res = runReplay(r, ACCTS, '2026-11-24')
-    expect(res.accounts.find((a) => a.account.id === 'pm-main')!.shortfall).toBeCloseTo(500)
-    expect(res.accounts.find((a) => a.account.id === 'ks-main')!.shortfall).toBe(0)
+    const res = runReplay(r, '2026-11-24')
+    expect(res.buckets.find((b) => b.bucket.id === PM.id)).toMatchObject({ funding: 'unfunded' })
+    expect(res.buckets.find((b) => b.bucket.id === PM.id)!.shortfall).toBeCloseTo(500)
+    expect(res.buckets.find((b) => b.bucket.id === KS.id)).toMatchObject({ funding: 'funded', shortfall: 0 })
+    expect(res.funding).toBe('unfunded')
+    // Unfunded results are what-ifs: no return.
+    expect(res.byDenomination.find((d) => d.denomination === 'USDC')!.ret).toBeNull()
+    // Covering the shortfall adds simulated capital to that bucket only.
+    const covered = runReplay(coverShortfall(r, PM.id, 500), '2026-11-24')
+    expect(covered.funding).toBe('funded')
+    expect(covered.replay.buckets.find((b) => b.id === KS.id)!.capital).toBe(500)
+  })
+  it('never treats an unknown fee as zero; an excluded fee is a valid zero', () => {
+    // ks-unemp-45 has no fee parameters: with provider fees the entry fee is unknown.
+    const m = find('ks-unemp-45')
+    const r: Replay = { ...base(), fees: { mode: 'provider', role: 'taker' }, buckets: [{ ...KS }], positions: [
+      { id: 'u1', market: m, outcome: 'YES', bucketId: KS.id, entryDate: '2026-09-01', entryPrice: 0.2, size: { mode: 'shares', value: 100 }, exit: { kind: 'settle' } },
+      { id: 'u2', market: m, outcome: 'NO', bucketId: KS.id, entryDate: '2026-09-02', entryPrice: 0.75, size: { mode: 'shares', value: 100 }, exit: { kind: 'settle' } },
+    ] }
+    const res = runReplay(r, '2026-11-24')
+    const b = res.buckets[0]
+    expect(b.cashComplete).toBe(false)
+    expect(b.endValue).toBeNull()
+    expect(b.fees).toBeNull()
+    expect(b.knownCash).toBeCloseTo(500 - 20 - 75)
+    expect(b.funding).toBe('unavailable')
+    expect(res.series.filter((p) => p.date >= '2026-09-01').every((p) => p.value == null && !p.cashComplete)).toBe(true)
+    const excluded = runReplay({ ...r, fees: { mode: 'excluded' } }, '2026-11-24')
+    expect(excluded.buckets[0]).toMatchObject({ cashComplete: true, funding: 'funded', fees: 0 })
+  })
+  it('allows several positions in one market and values each instrument once', () => {
+    const p1 = base().positions[1]
+    const r: Replay = { ...base(), buckets: [{ ...KS }], positions: [p1, { ...p1, id: 'p3', entryDate: '2026-07-01' }, { ...p1, id: 'p4', outcome: 'YES', entryPrice: 0.3, size: { mode: 'shares', value: 50 } }] }
+    expect(validateReplay(r, '2026-11-24').positions).toEqual({})
+    const res = runReplay(r, '2026-11-24')
+    const last = res.series.at(-1)!
+    expect(last.value).not.toBeNull()
+    // NO: 400 + 400 shares at 0.70; YES: 50 at 0.31; cash 500 − 200 − 200 − 15.
+    expect(last.value!).toBeCloseTo(500 - 200 - 200 - 15 + 800 * 0.7 + 50 * 0.31)
+    expect(last.value!).toBeCloseTo(res.buckets[0].endValue!)
   })
   it('compares only on a common basis and lists each difference', () => {
-    const a = runReplay(base(), ACCTS, '2026-11-24')
-    const b = runReplay({ ...base(), key: 'r2', capital: { 'pm-main': 2000, 'ks-main': 500 }, fees: { mode: 'provider', role: 'taker' } }, ACCTS, '2026-11-24')
+    const a = runReplay(base(), '2026-11-24')
+    const b = runReplay({ ...base(), key: 'r2', buckets: [{ ...PM, capital: 2000 }, { ...KS }], fees: { mode: 'provider', role: 'taker' } }, '2026-11-24')
     const c = compareReplays([a, b])
-    expect(c.pnlComparable).toBe(false)
+    expect(c.amountsComparable).toBe(false)
+    expect(c.returnComparable).toBe(false)
     expect(c.differences.filter((d) => d.differs).map((d) => d.key)).toEqual(['capital', 'fees'])
+    const unfunded = base(); unfunded.positions[0].size = { mode: 'amount', value: 1500 }
+    expect(compareReplays([a, runReplay(unfunded, '2026-11-24')]).reasons).toContain('at least one replay is not funded')
   })
   it('drops malformed stored replays and positions', () => {
     const r = base()

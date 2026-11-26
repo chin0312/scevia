@@ -11,6 +11,7 @@ import { Button, Card, CardHeader, Chip, PlatformBadge, Seg, SideChip, cx } from
 import { PLATFORM_NAME } from '../../data/labels'
 import type { Platform } from '../../data/types'
 import { fmtDate, type Adjustment, type Holding, type Simulation } from '../../lib/finance'
+import { useFinance } from '../../lib/financeContext'
 import { fmt, pct, qty, sfmt } from '../../lib/format'
 import { fmtPrice, parseMoney, parsePct, parsePrice, parseShares, type Parsed } from '../../lib/inputs'
 import { SIZE_LABEL, describe, type Evaluation, type SizeMode } from './model'
@@ -38,7 +39,8 @@ export function PositionRow({ a, start, after, sim, error, mode, selected, onSel
   sim: Simulation; mode: SizeMode; selected: boolean; onSelect: (on: boolean) => void
   onChange: (a: Adjustment) => void; onRemove: () => void
 }) {
-  const d = describe(a)
+  const F = useFinance()
+  const d = describe(a, F)
   const from = start?.shares ?? 0
   const target = sim.targets[a.id] ?? (a.size ? null : a.to)
   const priceOk = a.price != null && Number.isFinite(a.price)
@@ -127,6 +129,7 @@ export function PositionsCard({ E, adjs, baseline, mode, onMode, onAdjs, onAdd, 
   E: Evaluation; adjs: Adjustment[]; baseline: 'portfolio' | 'scratch'; mode: SizeMode; onMode: (m: SizeMode) => void
   onAdjs: (fn: (a: Adjustment[]) => Adjustment[]) => void; onAdd: () => void; onBulk: (msg: string, prev: Adjustment[]) => void
 }) {
+  const F = useFinance()
   const { start, sim: S } = E
   const [sel, setSel] = useState<Set<string>>(new Set())
   const live = new Set(adjs.map((a) => a.id)), picked = [...sel].filter((id) => live.has(id))
@@ -138,7 +141,7 @@ export function PositionsCard({ E, adjs, baseline, mode, onMode, onAdjs, onAdd, 
     setSel(new Set()); onBulk(label, prev)
   }
   const heldPicked = picked.filter((id) => start.holdings[id])
-  const refOf = (a: Adjustment) => describe(a).refPrice
+  const refOf = (a: Adjustment) => describe(a, F).refPrice
   return (
     <Card id="positions" flush>
       <CardHeader pad title={`Positions${adjs.length ? ` · ${adjs.length}` : ''}`} sub={baseline === 'scratch' ? 'Everything here is bought from zero with this scenario’s capital' : 'Only positions you change are listed; the rest of your portfolio stays as it is'}
@@ -179,7 +182,7 @@ export function PositionsCard({ E, adjs, baseline, mode, onMode, onAdjs, onAdd, 
 const Line = ({ l, v, tone, sub }: { l: ReactNode; v: ReactNode; tone?: string; sub?: boolean }) => <div className={cx('bs-line', sub && 'sub')}><span>{l}</span><span className={cx('r', tone)}>{v}</span></div>
 
 /** Live cash and value summary beside the positions. Each figure has one definition, shared with Analyze. */
-export function BuildSummary({ E, onAnalyze }: { E: Evaluation; onAnalyze: () => void }) {
+export function BuildSummary({ E, onAnalyze, onCover }: { E: Evaluation; onAnalyze: () => void; onCover?: (p: Platform, amount: number) => void }) {
   const { start, sim: S, A, B } = E
   const plats = (['pm', 'ks'] as Platform[]).filter((p) => start.cash[p] !== 0 || S.cash[p] !== 0 || Object.values(S.holdings).some((h) => h.platform === p))
   const buys = Object.values(S.trades).reduce((s, t) => s + (t.qty > 0 ? t.qty * t.price : 0), 0)
@@ -196,7 +199,8 @@ export function BuildSummary({ E, onAnalyze }: { E: Evaluation; onAnalyze: () =>
         <Line l={<>Est. fees{A.feesUnavailable ? <span className="stale"> + {A.feesUnavailable} unavailable</span> : null}</>} v={A.fees ? `−${fmt(A.fees, 2)}` : '$0'} />
         <Line l={<b>Cash after trades</b>} v={<b>{fmt(A.cash, 2)}</b>} tone={A.cash < -0.005 ? 'loss' : undefined} />
         {plats.length > 1 && plats.map((p) => <Line key={p} sub l={PLATFORM_NAME[p]} v={fmt(S.cash[p], 2)} tone={S.cash[p] < -0.005 ? 'loss' : undefined} />)}
-        {A.shortfall > 0 && <div className="bs-warn" role="status"><Icon name="alert" size={14} /><span><b>Needs {fmt(A.shortfall, 2)} more</b> on {plats.filter((p) => S.shortfall[p] > 0).map((p) => PLATFORM_NAME[p]).join(' and ')}. Shown as if funded; cash isn’t moved between venues. Add capital to fund it.</span></div>}
+        {A.shortfall > 0 && <div className="bs-warn" role="status"><Icon name="alert" size={14} /><span><b>Funding shortfall.</b> Needs {fmt(A.shortfall, 2)} more on {plats.filter((p) => S.shortfall[p] > 0).map((p) => PLATFORM_NAME[p]).join(' and ')}. Shown as if funded; cash isn’t moved between venues and nothing is borrowed.
+          {onCover && <span className="row" style={{ flexWrap: 'wrap', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }}>{plats.filter((p) => S.shortfall[p] > 0).map((p) => <Button key={p} size="sm" onClick={() => onCover(p, Math.ceil(S.shortfall[p]))}>Add {fmt(Math.ceil(S.shortfall[p]))} virtual capital on {PLATFORM_NAME[p]}</Button>)}</span>}</span></div>}
         <div className="bs-sep" />
         <Line l={<>Value at reference marks <InfoTip text="Cash + positions × reference price. A trade at your assumed price changes it only by the gap to the mark and fees." /></>} v={A.totalValue == null ? 'Unavailable' : fmt(A.totalValue)} />
         <Line sub l="change from start" v={dv == null ? 'n/a' : Math.abs(dv) < 0.5 ? '—' : sfmt(dv)} tone={dv == null || Math.abs(dv) < 0.5 ? undefined : dv > 0 ? 'gain' : 'loss'} />

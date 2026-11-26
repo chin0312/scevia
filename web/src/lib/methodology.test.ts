@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { sampleFeeSchedule } from '../data/sampleFees'
-import { POSITIONS, POS_BY_ID, account, constrains, findRelation, instrumentKey, isFeasible, jointOutcomes, MAX_JOINT_EVENTS, outcomeRange, positionFor, rangeIssue, scenarioMetrics, simulate, sourceRelations, withConstraints, type Relation } from './finance'
+import { constrains, findRelation, instrumentKey, isFeasible, jointOutcomes, MAX_JOINT_EVENTS, outcomeRange, rangeIssue, scenarioMetrics, withConstraints, type Relation } from './finance'
+import { POSITIONS, POS_BY_ID, account, positionFor, simulate, sourceRelations } from './fixtureFinance'
 import { DEFAULT_FEES, estimateFee, readFeeAssumption } from './fees'
 import { fmtPrice, parseMoney, parsePct, parsePrice, parseShares } from './inputs'
 import { ROWS, judge } from '../pages/lab/model'

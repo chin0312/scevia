@@ -73,3 +73,9 @@ export function clearGroup(g: DataGroup): { ok: boolean; removed: number } {
   try { keys.forEach((k) => s.removeItem(k)) } catch { return { ok: false, removed: 0 } }
   return { ok: groupKeys(g).length === 0, removed: keys.length }
 }
+
+/** Storage key for data a workspace owns (scenarios, replays, records, notification state): `base@workspaceId`.
+ *  The development Sample portfolio keeps the original unsuffixed keys, so its existing tab data stays readable.
+ *  Global preferences (settings, view choices) are not scoped. */
+export const SAMPLE_WORKSPACE_ID = 'sample'
+export const scopedKey = (base: string, workspaceId: string) => (workspaceId === SAMPLE_WORKSPACE_ID ? base : `${base}@${workspaceId}`)

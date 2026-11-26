@@ -4,10 +4,9 @@
    never creates copies and read state survives navigation and reloads. */
 import type { Detail } from '../components/details'
 import type { IconName } from '../components/Icon'
-import { CLOSED_TRADES, LAST_VISIT, TODAY } from '../data/portfolio'
 import { PLATFORM_NAME } from '../data/labels'
 import type { Platform } from '../data/types'
-import { POSITIONS, account, daysBetween, exposures, fmtDate, sourceOf, tradeNet } from './finance'
+import { daysBetween, fmtDate, tradeNet, type Finance } from './finance'
 import { fmt, pct, sfmt } from './format'
 import type { ManagedRecord } from './records'
 import { statusOf } from './records'
@@ -27,11 +26,13 @@ export interface Notif {
   /** What it is about: an event, a position, an account or the portfolio. */
   scope: 'event' | 'position' | 'account' | 'portfolio'
   detail?: Detail; to?: string
-  /** 'sample' = derived from the sample portfolio; 'local' = from something you did in this tab. */
+  /** 'sample' = derived from the selected portfolio's data; 'local' = from something you did in this tab. */
   origin: 'sample' | 'local'
 }
 
-export function deriveNotifications(s: Settings, records: ManagedRecord[], local: LocalEvent[], batchIds?: Set<string>): Notif[] {
+/** Notifications of one workspace, derived from that workspace's own read model (`F`) and its local events. */
+export function deriveNotifications(F: Finance, s: Settings, records: ManagedRecord[], local: LocalEvent[], batchIds?: Set<string>): Notif[] {
+  const { POSITIONS, account, exposures, sourceOf, CLOSED_TRADES, LAST_VISIT, TODAY } = F
   const out: Notif[] = [], A = s.alerts
   const exps = exposures('all'), total = exps.reduce((a, e) => a + e.cost, 0)
   // One alert per event (not per contract): the same Fed decision on two venues is one resolution.

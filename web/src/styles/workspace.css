@@ -91,3 +91,12 @@
 .period-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-4); margin-bottom: var(--space-4); }
 .start-grid.three .start-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .start-grid.three .start-facts dd { white-space: normal; }
+.rp-note { display: flex; align-items: center; gap: var(--space-2); margin: 0 0 var(--space-3); font-size: var(--font-size-xs); }
+.rp-buckets { display: grid; gap: var(--space-3); }
+.rp-bucket { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-3) var(--space-4); padding: var(--space-3); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-md); }
+.rp-bucket > .row:first-child { min-width: 160px; align-self: center; }
+.rp-bucket b.tnum { font-size: var(--font-size-sm); color: var(--color-text-primary); font-weight: var(--font-weight-medium); }
+.rp-short { display: flex; align-items: center; gap: var(--space-2); }
+.rp-rates { margin-top: var(--space-3); }
+.rp-rates summary { cursor: pointer; font-size: var(--font-size-sm); color: var(--color-text-secondary); }
+.rp-rates summary:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }

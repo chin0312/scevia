@@ -7,14 +7,14 @@ import { InfoTip } from '../../components/overlays'
 import { Button, Card, CardHeader, Chip, PlatformBadge, Seg, SideChip, cx } from '../../components/ui'
 import { CAT_COLOR, PLATFORM_NAME } from '../../data/labels'
 import type { Category, Platform } from '../../data/types'
-import { TODAY } from '../../data/portfolio'
-import { MAX_JOINT_EVENTS, daysBetween, eventProfiles, fmtDate, holdingsAllocation, valueBridge, type AllocationBy, type EventProfile, type Holding } from '../../lib/finance'
+import { MAX_JOINT_EVENTS, daysBetween, eventProfiles, fmtDate, holdingsAllocation, type AllocationBy, type EventProfile, type Holding } from '../../lib/finance'
 import { fmt, pct, qty, sfmt } from '../../lib/format'
 import { fmtPrice } from '../../lib/inputs'
 import { PairBars, RangeRows, StackBars, Waterfall, type StackSeg } from './charts'
 import { Dumbbell, OutcomeMatrix } from './Impact'
 import type { Evaluation } from './model'
 import { accountName } from '../../lib/useWorkspace'
+import { useFinance } from '../../lib/financeContext'
 
 const DATA = ['var(--color-data-1)', 'var(--color-data-2)', 'var(--color-data-3)', 'var(--color-data-4)', 'var(--color-data-5)', 'var(--color-data-6)']
 const PLAT_COLOR: Record<Platform, string> = { pm: 'var(--color-data-1)', ks: 'var(--color-data-3)' }
@@ -22,6 +22,7 @@ const CASH_COLOR = 'var(--color-border-strong)'
 const BY: Record<'Category' | 'Platform' | 'Event', AllocationBy> = { Category: 'category', Platform: 'platform', Event: 'event' }
 
 export function AnalyzeView({ E, onEdit }: { E: Evaluation; onEdit: (id: string) => void }) {
+  const { valueBridge } = useFinance()
   const { start, sim: S, A, B } = E
   const [focus, setFocus] = useState<{ by: AllocationBy; key: string; label: string } | null>(null)
   const bridge = useMemo(() => valueBridge(start, S, E.funding), [start, S, E.funding])
@@ -192,6 +193,7 @@ function Exposure({ E, onFocus }: { E: Evaluation; onFocus: (e: EventProfile | n
 
 /* ── Resolution timeline ─────────────────────────────────── */
 function Timeline({ E }: { E: Evaluation }) {
+  const { TODAY } = useFinance()
   const after = eventProfiles(E.sim), before = eventProfiles(E.start)
   const ids = [...new Set([...after, ...before].map((e) => e.id))]
   const rows = ids.map((id) => ({ id, a: after.find((e) => e.id === id) ?? null, b: before.find((e) => e.id === id) ?? null }))

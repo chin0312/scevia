@@ -2,15 +2,16 @@
    cover is disabled with the reason; a custom range is validated against the history before it applies. On phones
    the presets collapse into one select. */
 import { useId, useState } from 'react'
-import { HISTORY_START, TODAY } from '../data/portfolio'
-import { PERIODS, customRangeIssue, fmtDate, periodAvailable, type Period, type Range } from '../lib/finance'
+import { PERIODS, fmtDate, type Period, type Range } from '../lib/finance'
 import { Button, cx } from './ui'
+import { useFinance } from '../lib/financeContext'
 
 export type PeriodValue = Period | Range
 export const isCustom = (v: PeriodValue): v is Range => typeof v !== 'string'
 export const periodName = (v: PeriodValue) => (isCustom(v) ? 'Custom' : v)
 
 export function PeriodControl({ value, onChange }: { value: PeriodValue; onChange: (v: PeriodValue) => void }) {
+  const { HISTORY_START, TODAY, customRangeIssue, periodAvailable } = useFinance()
   const [editing, setEditing] = useState(isCustom(value))
   const [start, setStart] = useState(isCustom(value) ? value.start : HISTORY_START)
   const [end, setEnd] = useState(isCustom(value) ? value.end : TODAY)

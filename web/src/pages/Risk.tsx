@@ -7,12 +7,13 @@ import { handoffPath } from '../lib/handoff'
 import { Modal, useToast } from '../components/overlays'
 import { SectionRail, useHashScroll, type RailSection } from '../components/shell'
 import { Button, Callout, Card, CardHeader, Chip, Legend, PageHead, PlatformBadge, Seg, Tabs, Tile, cx } from '../components/ui'
-import { TODAY } from '../data/portfolio'
 import { CATEGORIES, CAT_COLOR, PLATFORM_NAME } from '../data/labels'
 import { PROVENANCE_TEXT, REL_TEXT, type RelClass } from '../data/relations'
-import { account, addDays, baseHoldings, exposures, fmtDate, positionsFor, outcomeLabel, settlementRange, settlementRangeFor, sourceRelations, type EventExposure } from '../lib/finance'
+import { addDays, fmtDate, outcomeLabel, settlementRange, type EventExposure } from '../lib/finance'
 import { fmt, kfmt, pct, sfmt } from '../lib/format'
 import { useSettings } from '../lib/settings'
+import { useFinance } from '../lib/financeContext'
+import { ReportingNote, WorkspaceLabel } from '../components/Workspace'
 
 const RAIL: RailSection[] = [
   { id: 'summary', label: 'Exposure summary', icon: 'home' },
@@ -34,6 +35,7 @@ function busiestWeek(exps: EventExposure[], days = 90) {
 }
 
 export default function Risk() {
+  const { ACCOUNTS, TODAY, account, baseHoldings, exposures, positionsFor, settlementRangeFor, sourceRelations } = useFinance()
   useHashScroll()
   const nav = useNavigate()
   const toast = useToast()
@@ -123,7 +125,7 @@ export default function Risk() {
         <PageHead caption={`Risk · ${acct.openCount} positions across ${exps.length} events`} title="What you’re exposed to"
           actions={<><Seg label="Group by" options={['By event', 'By category', 'By platform'] as const} value={groupBy} onChange={setGroupBy} /><Button variant="primary" onClick={stressTest} disabled={stressIds.length === 0} title={`Choose a scenario and which of the ${stressIds.length} positions behind the payoff table to add`}><Icon name="flask" size={15} />Stress-test in Lab…</Button></>} />
 
-        <div className="asof" style={{ marginBottom: 'var(--space-3)' }}><span>Holdings and marks as of <b>{fmtDate(TODAY, { month: 'short', day: 'numeric', year: 'numeric' })}</b></span><span>Settlement ranges use reviewed relationships only; they aren’t probabilities or correlations</span></div>
+        <div className="asof" style={{ marginBottom: 'var(--space-3)' }}><span>Holdings and marks as of <b>{fmtDate(TODAY, { month: 'short', day: 'numeric', year: 'numeric' })}</b></span><span>Settlement ranges use reviewed relationships only; they aren’t probabilities or correlations</span><ReportingNote denominations={ACCOUNTS.map((a) => a.denomination)} /></div>
         {exps.length === 0 && <Callout icon="info">No open positions in the selected sources, so there is no event exposure to analyse. This is an empty portfolio, not missing data.</Callout>}
         <p className="summary">You have <b>{fmt(committed)}</b> committed across {exps.length} events. {over.length > 0
           ? <><b>{over.length === 1 ? 'One event' : `${over.length} events`}</b> ({over.map((e) => e.event.short).join(', ')}) {over.length === 1 ? 'is' : 'are'} above your <button type="button" className="link" onClick={() => setEditLimit(limit)}>{limit}% guardrail</button>.</>
@@ -252,7 +254,7 @@ export default function Risk() {
           </Card>
         </div>
 
-        <div className="footer-note"><span>Payoffs assume each contract settles at $1 or $0 as written. Scevia does not estimate how likely each outcome is.</span><span>Sample portfolio · fictional data</span></div>
+        <div className="footer-note"><span>Payoffs assume each contract settles at $1 or $0 as written. Scevia does not estimate how likely each outcome is.</span><span><WorkspaceLabel /></span></div>
       </main>
 
       {editLimit != null && (
@@ -268,6 +270,7 @@ export default function Risk() {
 }
 
 function Calendar({ exps, range, hot, setHot, onPick }: { exps: EventExposure[]; range: '90 days' | '12 months'; hot: string | null; setHot: (k: string | null) => void; onPick: (id: string) => void }) {
+  const { TODAY } = useFinance()
   const [wrap, W] = useWidth<HTMLDivElement>(560)
   const base = 150, L = 16, R = 16, days = range === '90 days' ? 90 : 420
   const x = (d: number) => L + (d / days) * (W - L - R)

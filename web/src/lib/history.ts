@@ -46,14 +46,18 @@ export interface ValuedPoint {
   /** Cash plus the holdings that could be valued. */
   known: number
   cash: number
+  /** False when a cash effect up to this date is unknown (e.g. an unknown fee): the point is then partial. */
+  cashComplete: boolean
   observed: number; carried: number; stale: number; missing: number
 }
 
 /** Value a hypothetical or reconstructed portfolio on each date from per-instrument LOCF prices.
- *  `qtyAt(key, date)` and `cashAt(date)` reflect trades, fees, cash flows and settlements up to and including `date`. */
-export function valueSeries(dates: string[], instruments: InstrumentHistory[], qtyAt: (key: string, date: string) => number, cashAt: (date: string) => number, staleDays = STALE_DAYS): ValuedPoint[] {
+ *  `qtyAt(key, date)` and `cashAt(date)` reflect trades, fees, cash flows and settlements up to and including `date`.
+ *  Each instrument must appear once (aggregate repeated positions in `qtyAt`). Unknown cash effects (an unknown fee)
+ *  make `cashAt` incomplete, and the point partial: they are never counted as zero. */
+export function valueSeries(dates: string[], instruments: InstrumentHistory[], qtyAt: (key: string, date: string) => number, cashAt: (date: string) => number | { amount: number; complete: boolean }, staleDays = STALE_DAYS): ValuedPoint[] {
   return dates.map((date) => {
-    const cash = cashAt(date)
+    const c = cashAt(date), cash = typeof c === 'number' ? c : c.amount, cashComplete = typeof c === 'number' ? true : c.complete
     let known = cash, observed = 0, carried = 0, stale = 0, missing = 0
     for (const h of instruments) {
       const q = qtyAt(h.key, date)
@@ -65,7 +69,7 @@ export function valueSeries(dates: string[], instruments: InstrumentHistory[], q
       else if (p.basis === 'carried') carried++
       else stale++
     }
-    return { date, value: missing ? null : known, known, cash, observed, carried, stale, missing }
+    return { date, value: missing || !cashComplete ? null : known, known, cash, cashComplete, observed, carried, stale, missing }
   })
 }
 

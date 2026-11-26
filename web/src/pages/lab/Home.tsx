@@ -5,24 +5,28 @@ import { useNavigate } from 'react-router-dom'
 import { Icon } from '../../components/Icon'
 import { Button, PlatformBadge, cx } from '../../components/ui'
 import { PLATFORM_NAME } from '../../data/labels'
-import { TODAY } from '../../data/portfolio'
 import type { Platform } from '../../data/types'
-import { ACCOUNTS, POSITIONS, account, fmtDate, validFunding } from '../../lib/finance'
+import { fmtDate, validFunding } from '../../lib/finance'
 import { fmt } from '../../lib/format'
 import { parseMoney } from '../../lib/inputs'
 import * as SC from '../../lib/scenarios'
 import type { Scenario } from '../../lib/scenarios'
 import { EXAMPLES, type Evaluation } from './model'
 import { accountName } from '../../lib/useWorkspace'
-import { readStored } from '../../lib/storage'
-import { sanitizeReplays } from '../../lib/replay'
+import { readStored, scopedKey } from '../../lib/storage'
+import { useFinanceCtx } from '../../lib/financeContext'
+import { DEFAULT_ASSET, sanitizeReplays } from '../../lib/replay'
+import { useFinance } from '../../lib/financeContext'
+import { useActiveWorkspace } from '../../lib/workspaceContext'
 
-export function LabHome({ scenarios, evals, onCurrent, onScratch, onOpen, onExample }: {
-  scenarios: Scenario[]; evals: Record<string, Evaluation>
+export function LabHome({ hasPortfolio, scenarios, evals, onCurrent, onScratch, onOpen, onExample }: {
+  hasPortfolio: boolean; scenarios: Scenario[]; evals: Record<string, Evaluation>
   onCurrent: () => void; onScratch: (funding: Partial<Record<Platform, number>>) => void; onOpen: (k: string) => void; onExample: (i: number) => void
 }) {
+  const F = useFinance(), { TODAY, ACCOUNTS, POSITIONS, account } = F
   const nav = useNavigate()
-  const replays = readStored('scevia-replays-v1', [], sanitizeReplays)
+  const ws = useActiveWorkspace().snapshot
+  const replays = readStored(scopedKey('scevia-replays-v1', useFinanceCtx().workspaceId), [], sanitizeReplays)
   const a = account('all'), events = new Set(POSITIONS.map((p) => p.eventId)).size
   const [cap, setCap] = useState<Record<Platform, string>>({ pm: '', ks: '' })
   const parsed = { pm: parseMoney(cap.pm), ks: parseMoney(cap.ks) }
@@ -39,24 +43,26 @@ export function LabHome({ scenarios, evals, onCurrent, onScratch, onOpen, onExam
           <div className="start-ic"><Icon name="layers" size={18} /></div>
           <h2 id="start-current">Modify your current portfolio</h2>
           <p className="t2">Start from what you hold now: resize, exit or add positions in current markets and see what changes.</p>
+          {hasPortfolio ? <>
           <dl className="start-facts">
             <div><dt>Value at marks</dt><dd>{fmt(a.totalValue)}</dd></div>
             <div><dt>Cash</dt><dd>{fmt(a.cash)}</dd></div>
             <div><dt>Positions</dt><dd>{POSITIONS.length} <small className="t3">in {events} events</small></dd></div>
           </dl>
           <div className="start-accts">{ACCOUNTS.map((x) => <span key={x.id} className="row"><PlatformBadge p={x.venue} size={16} />{PLATFORM_NAME[x.venue]} · {accountName(x.id)} · {x.denomination}</span>)}</div>
-          <small className="t3">Sample portfolio, reconstructed from records as of {fmtDate(TODAY)}. Prices are frozen when the scenario starts; cash stays in its account. Your actual holdings are never changed.</small>
-          <Button variant="primary" icon="layers" onClick={onCurrent}>Modify current portfolio</Button>
+          <small className="t3">{ws.summary.name}, reconstructed from records as of {fmtDate(TODAY)}. Prices are frozen when the scenario starts; cash stays in its account. Your actual holdings are never changed.</small>
+          </> : <p className="unavailable" role="status">{ws.summary.name} has no portfolio data {ws.status === 'loading' ? 'yet (loading)' : 'available right now'}, so there’s nothing to start from. Building from scratch and historical replays need no portfolio.</p>}
+          <Button variant="primary" icon="layers" onClick={onCurrent} disabled={!hasPortfolio}>Modify current portfolio</Button>
         </section>
         <section className="start-card" aria-labelledby="start-scratch">
           <div className="start-ic"><Icon name="plus" size={18} /></div>
           <h2 id="start-scratch">Build from scratch</h2>
-          <p className="t2">A hypothetical portfolio with capital you choose. No holdings, cash or history are inherited.</p>
-          <fieldset className="setup-f"><legend className="l">Starting capital <span className="t3">(optional, by venue)</span></legend>
+          <p className="t2">A hypothetical portfolio with virtual capital you choose. No account, holdings or real funds are needed.</p>
+          <fieldset className="setup-f"><legend className="l">Virtual starting capital <span className="t3">(optional, by venue)</span></legend>
             <div className="row" style={{ gap: 'var(--space-2)', flexWrap: 'wrap' }}>
               {(['pm', 'ks'] as Platform[]).map((p) => (
                 <label key={p} className={cx('fund', parsed[p].state === 'invalid' && 'has-error')}><PlatformBadge p={p} size={18} />
-                  <input className="num-input" inputMode="decimal" placeholder={`${PLATFORM_NAME[p]} ${ACCOUNTS.find((x) => x.venue === p)?.denomination ?? '$'}`} aria-label={`Starting capital on ${PLATFORM_NAME[p]}`} value={cap[p]} aria-invalid={parsed[p].state === 'invalid'} onChange={(e) => setCap((c) => ({ ...c, [p]: e.target.value }))} /></label>
+                  <input className="num-input" inputMode="decimal" placeholder={`${PLATFORM_NAME[p]} ${DEFAULT_ASSET[p]}`} aria-label={`Starting capital on ${PLATFORM_NAME[p]}`} value={cap[p]} aria-invalid={parsed[p].state === 'invalid'} onChange={(e) => setCap((c) => ({ ...c, [p]: e.target.value }))} /></label>
               ))}
             </div>
             <small className={cx(bad ? 'loss' : 't3')}>{bad ? 'Enter amounts such as 5000 or 5,000.50.' : 'You can add or change it later. Cash stays on its venue.'}</small>
@@ -104,12 +110,12 @@ export function LabHome({ scenarios, evals, onCurrent, onScratch, onOpen, onExam
         )}
       </section>
 
-      <section className="home-ex" aria-labelledby="ex-h">
+      {EXAMPLES.some((ex) => ex.adjs(F)) && <section className="home-ex" aria-labelledby="ex-h">
         <h3 id="ex-h" className="caps">Or explore an example</h3>
-        <div className="row" style={{ flexWrap: 'wrap' }}>{EXAMPLES.map((ex, i) => <Button key={ex.name} size="sm" variant="ghost" icon="flask" onClick={() => onExample(i)}>{ex.name}</Button>)}</div>
+        <div className="row" style={{ flexWrap: 'wrap' }}>{EXAMPLES.map((ex, i) => ex.adjs(F) && <Button key={ex.name} size="sm" variant="ghost" icon="flask" onClick={() => onExample(i)}>{ex.name}</Button>)}</div>
         <small className="t3">Examples start from your current portfolio and are only added if you open one.</small>
-      </section>
-      <div className="footer-note"><span>Scenario results show what happens under the outcomes and prices you choose. They aren’t forecasts or recommendations.</span><span>Sample portfolio · sample market data</span></div>
+      </section>}
+      <div className="footer-note"><span>Scenario results show what happens under the outcomes and prices you choose. They aren’t forecasts or recommendations.</span><span>{ws.summary.name} · sample market data</span></div>
     </div>
   )
 }

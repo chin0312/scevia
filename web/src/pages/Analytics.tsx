@@ -1,5 +1,4 @@
 import { useMemo, useRef, useState } from 'react'
-import { HISTORY_START, TODAY } from '../data/portfolio'
 import { PeriodControl, type PeriodValue } from '../components/PeriodControl'
 import { useSettings } from '../lib/settings'
 import { useWidth } from '../components/charts'
@@ -8,9 +7,11 @@ import { SectionRail, useHashScroll, type RailSection } from '../components/shel
 import { Button, Callout, Card, CardHeader, Chip, Delta, Legend, PageHead, Pills, Seg, Tabs, cx } from '../components/ui'
 import { PLATFORM_NAME } from '../data/labels'
 import type { Platform } from '../data/types'
-import { attribution, entryBuckets, fmtDate, insights, periodRange, periodStats, series, tradeNet, type PeriodStats, type PlatformFilter } from '../lib/finance'
+import { attribution, entryBuckets, fmtDate, insights, tradeNet, type PeriodStats, type PlatformFilter } from '../lib/finance'
 import { fmt, kfmt, pct, sfmt } from '../lib/format'
 import type { ClosedTrade } from '../data/types'
+import { useFinance } from '../lib/financeContext'
+import { ReportingNote, WorkspaceLabel } from '../components/Workspace'
 
 const RAIL: RailSection[] = [
   { id: 'summary', label: 'Summary', icon: 'home', children: [{ id: 'highlights', label: 'Highlights' }] },
@@ -24,6 +25,7 @@ const toFilter = (l: PlatformLabel): PlatformFilter => (l === 'Polymarket' ? 'pm
 const monthLabel = (m: string) => fmtDate(`${m}-01`, { month: 'short' })
 
 function PnlChart({ f, start, end, prior, stats, tab, onMonth }: { f: PlatformFilter; start: string; end: string; prior: { start: string; end: string } | null; stats: PeriodStats; tab: 'Net' | 'Realized' | 'By platform'; onMonth: (m: string) => void }) {
+  const { series } = useFinance()
   const [wrap, W] = useWidth<HTMLDivElement>(760)
   const H = 400, P = { l: 52, r: 12, t: 16, b: 26 }
   const base = (pts: { netPnl: number }[]) => pts.map((p) => p.netPnl - pts[0].netPnl)
@@ -81,9 +83,11 @@ function PnlChart({ f, start, end, prior, stats, tab, onMonth }: { f: PlatformFi
 }
 
 export default function Analytics() {
+  const { ACCOUNTS, HISTORY_START, TODAY, periodAvailable, periodRange, periodStats } = useFinance()
   useHashScroll()
   const [plat, setPlat] = useState<PlatformLabel>('All')
-  const [period, setPeriod] = useState<PeriodValue>(useSettings().settings.defaultPeriod)
+  const [chosen, setPeriod] = useState<PeriodValue>(useSettings().settings.defaultPeriod)
+  const period: PeriodValue = typeof chosen === 'string' && !periodAvailable(chosen) ? 'All' : chosen
   const [compareOn, setCompareOn] = useState(true)
   const [tab, setTab] = useState<'Net' | 'Realized' | 'By platform'>('Net')
   const [attrBy, setAttrBy] = useState<'Category' | 'Platform'>(useSettings().settings.defaultGrouping === 'platform' ? 'Platform' : 'Category')
@@ -134,7 +138,7 @@ export default function Analytics() {
           </>} />
 
         <div className="period-row"><PeriodControl value={period} onChange={setPeriod} />
-          <div className="asof"><span>History from <b>{fmtDate(HISTORY_START, { month: 'short', day: 'numeric', year: 'numeric' })}</b> · weekly snapshots at sample marks</span><span>The period ends at the current valuation (marks as of {fmtDate(TODAY)})</span></div></div>
+          <div className="asof"><span>History from <b>{fmtDate(HISTORY_START, { month: 'short', day: 'numeric', year: 'numeric' })}</b> · weekly snapshots at sample marks</span><span>The period ends at the current valuation (marks as of {fmtDate(TODAY)})</span><ReportingNote denominations={ACCOUNTS.map((a) => a.denomination)} /></div></div>
         <p className="summary">
           Over this period you made <b className={stats.netPnl >= 0 ? 'gain' : 'loss'}>{sfmt(stats.netPnl, 2)}</b> net{compare && prior ? <>, <b>{sfmt(stats.netPnl - prior.netPnl)}</b> vs. the prior period</> : ''}: <b>{sfmt(stats.realized)}</b> realized on {stats.trades.length} trades closed in the period, and <b>{sfmt(stats.unrealizedChange)}</b> change in unrealized P&amp;L{stats.openFillFees ? <> (after <b>{fmt(stats.openFillFees, 2)}</b> fees on new purchases)</> : ''}.
           {top && top.net > 0 && <> <a href="#attribution">{top.label}</a> made {gains > 0 ? pct((top.net / gains) * 100, 0) : '—'} of realized gains.</>}
@@ -247,7 +251,7 @@ export default function Analytics() {
           </Card>
         </div>
 
-        <div className="footer-note"><span>Analytics describe past results. They don’t predict future ones and aren’t investment advice.</span><span>Sample portfolio · fictional data</span></div>
+        <div className="footer-note"><span>Analytics describe past results. They don’t predict future ones and aren’t investment advice.</span><span><WorkspaceLabel /></span></div>
       </main>
 
     </div>

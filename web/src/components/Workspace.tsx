@@ -6,7 +6,7 @@
    - WorkspaceGate: shows loading, unavailable and error states for a workspace without figures, instead of the page.
    Switching or refreshing never changes a scenario, a record or an input. */
 import { useEffect, useState, type ReactNode } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { FIXTURE_ID, MODE_LABEL, type WorkspaceSnapshot } from '../data/workspace'
 import { PLATFORM_NAME } from '../data/labels'
 import { fmtDate } from '../lib/finance'
@@ -69,7 +69,7 @@ export function PortfolioSelector() {
           <div className="menu-sep" />
           <div className="menu-h">{s.summary.name} · accounts</div>
           {s.accounts.map((a) => (
-            <div className="menu-row acct-row" key={a.id}><span className="row"><PlatformBadge p={a.venue} size={18} /><span className="acct-name">{s.summary.mode === 'fixture' ? accountName(a.id) : a.label}</span></span><small className="t3">{PLATFORM_NAME[a.venue]} · {a.denomination}</small></div>
+            <div className="menu-row acct-row" key={a.id}><span className="row"><PlatformBadge p={a.venue} size={18} /><span className="acct-name">{accountName(a.id, s.accounts)}</span></span><small className="t3">{PLATFORM_NAME[a.venue]} · {a.denomination}</small></div>
           ))}
         </>}
         <div className="menu-sep" />
@@ -87,14 +87,16 @@ export function DataStatus() {
   const now = useNow()
   const state = s.status === 'loading' ? 'refreshing' : s.status === 'refreshing' ? 'refreshing' : s.status === 'unavailable' || s.status === 'error' ? 'unavailable' : summaryState(s.streams)
   const busy = s.status === 'loading' || s.status === 'refreshing'
+  const failed = s.reason === 'refresh_failed' && !busy
   const doRefresh = async () => {
     const r = await refresh()
-    if (r) toast(r.changed ? 'Updated with new data' : s.summary.mode === 'fixture' ? 'Checked · the sample portfolio has no new data' : 'Checked · no new data')
+    if (r?.failed) toast('Couldn’t refresh. Showing the last data, not newly checked.', 'info')
+    else if (r) toast(r.changed ? 'Updated with new data' : s.summary.mode === 'fixture' ? 'Checked · the sample portfolio has no new data' : 'Checked · no new data')
   }
   return (
     <Menu label="Data status" width={380} trigger={(t) => (
-      <button type="button" className={cx('ds-pill', `tone-${STATE_TONE[state]}`)} aria-label={`Data status: ${STATE_LABEL[state]}`} {...t}>
-        <span className={cx('ds-dot', busy && 'spin')} aria-hidden="true" /><span className="ds-text">{STATE_LABEL[state]}</span>
+      <button type="button" className={cx('ds-pill', `tone-${failed ? 'warn' : STATE_TONE[state]}`)} aria-label={`Data status: ${failed ? 'Refresh failed' : STATE_LABEL[state]}`} {...t}>
+        <span className={cx('ds-dot', busy && 'spin')} aria-hidden="true" /><span className="ds-text">{failed ? 'Refresh failed' : STATE_LABEL[state]}</span>
       </button>)}>
       {(close) => (<>
         <div className="menu-h"><span>Data status<small>{s.summary.name}{s.valuationAsOf ? ` · valued as of ${fmtDate(s.valuationAsOf.slice(0, 10), { month: 'short', day: 'numeric', year: 'numeric' })}` : ''}</small></span></div>
@@ -108,9 +110,11 @@ export function DataStatus() {
             </li>
           ))}
         </ul>
-        <div className="menu-row t3 menu-note">{s.checkedAt ? `Last checked ${ago(s.checkedAt, now)}${lastRefresh ? (lastRefresh.changed ? ' · new data' : ' · no new data') : ''}.` : 'Not checked in this tab yet.'} Refreshing keeps your filters, selections and inputs.</div>
+        {failed
+          ? <div className="menu-row menu-note" role="status"><span className="stale">The last refresh failed {ago(lastRefresh?.at ?? null, now)}.</span> <span className="t3">Showing data from the previous successful check{s.checkedAt ? ` (${ago(s.checkedAt, now)})` : ''}; it isn’t newly synchronized.</span></div>
+          : <div className="menu-row t3 menu-note">{s.checkedAt ? `Last checked ${ago(s.checkedAt, now)}${lastRefresh ? (lastRefresh.changed ? ' · new data' : ' · no new data') : ''}.` : 'Not checked in this tab yet.'} Refreshing keeps your filters, selections and inputs.</div>}
         <div className="menu-sep" />
-        <button type="button" role="menuitem" className="menu-i" disabled={busy || s.status === 'unavailable'} onClick={() => { void doRefresh() }}><Icon name="reset" />{busy ? 'Refreshing…' : 'Refresh now'}</button>
+        <button type="button" role="menuitem" className="menu-i" disabled={busy || s.status === 'unavailable'} onClick={() => { void doRefresh() }}><Icon name="reset" />{busy ? 'Refreshing…' : failed ? 'Try again' : 'Refresh now'}</button>
         <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); nav('/portfolio/coverage') }}><Icon name="shield" />Data coverage<small className="t3" style={{ marginLeft: 'auto' }}>what figures are based on</small></button>
       </>)}
     </Menu>
@@ -120,7 +124,9 @@ export function DataStatus() {
 /** Shows the page only when the selected workspace has figures; otherwise its loading, unavailable or error state. */
 export function WorkspaceGate({ children }: { children: ReactNode }) {
   const { snapshot: s, select, list } = useActiveWorkspace()
-  if (hasData(s)) return <>{children}</>
+  const { pathname } = useLocation()
+  // Scenario Lab needs no portfolio: building from scratch and historical replays use virtual capital only.
+  if (hasData(s) || pathname.startsWith('/scenario-lab')) return <>{children}</>
   if (s.status === 'loading') return <div className="page-loading" aria-busy="true" aria-label={`Loading ${s.summary.name}`}><div className="skeleton" style={{ height: 240 }} /><div className="skeleton" style={{ height: 480 }} /></div>
   const demo = s.summary.mode === 'demo'
   return (
@@ -139,4 +145,20 @@ export function WorkspaceGate({ children }: { children: ReactNode }) {
       </div>
     </main>
   )
+}
+
+/** The selected portfolio's name and data basis, for page footers ("Sample portfolio · fictional data"). */
+export function WorkspaceLabel({ suffix }: { suffix?: string }) {
+  const { snapshot: s } = useActiveWorkspace()
+  const basis = s.summary.mode === 'fixture' ? 'fictional data' : s.summary.mode === 'demo' ? 'real markets, virtual capital' : 'your records'
+  return <>{s.summary.name} · {suffix ?? basis}</>
+}
+
+/** The reporting assumption behind a combined total, shown only when the figures mix native assets. USD-only figures
+ *  need none. It is a reporting convention for the development fixture; actual conversion comes from the backend
+ *  (`/analytics/denominations`, with its own availability). It never moves funds between accounts. */
+export function ReportingNote({ denominations }: { denominations: string[] }) {
+  const others = [...new Set(denominations)].filter((d) => d !== 'USD')
+  if (!others.length || new Set(denominations).size < 2) return null
+  return <span>Combined in USD at 1 {others.join(' = 1 ')} = 1 USD (indicative reporting; funds aren’t converted)</span>
 }

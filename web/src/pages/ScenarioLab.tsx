@@ -10,14 +10,13 @@ import { Menu, Modal, useToast } from '../components/overlays'
 import { SectionRail, scrollToSection, useHashScroll, type RailSection } from '../components/shell'
 import { Button, Callout, PlatformBadge, SideChip, Tabs, cx } from '../components/ui'
 import { PLATFORM_NAME } from '../data/labels'
-import { TODAY } from '../data/portfolio'
 import type { Platform } from '../data/types'
-import { POSITIONS, POS_BY_ID, fmtDate, instrumentOfPosition, validFunding, type Adjustment, type Baseline } from '../lib/finance'
+import { fmtDate, validFunding, type Adjustment, type Baseline } from '../lib/finance'
 import { validFeePct } from '../lib/fees'
 import { int } from '../lib/format'
 import { claimHandoff, readHandoff } from '../lib/handoff'
 import * as SC from '../lib/scenarios'
-import { readStored } from '../lib/storage'
+import { readStored, scopedKey } from '../lib/storage'
 import { useSettings } from '../lib/settings'
 import { useSessionState, useStorageHealthy } from '../lib/useSessionState'
 import type { Scenario } from '../lib/scenarios'
@@ -29,6 +28,8 @@ import { LabHome } from './lab/Home'
 import { AssumptionsBar, AssumptionsDrawer, StartSetup } from './lab/Setup'
 import { COLORS, EXAMPLES, describe, evaluate, evaluateActual, type Evaluation, type SizeMode } from './lab/model'
 import { PriceCheckModal } from './lab/PriceCheck'
+import { useFinance, useFinanceCtx } from '../lib/financeContext'
+import { WorkspaceLabel } from '../components/Workspace'
 
 type View = 'Build' | 'Analyze' | 'Compare'
 const VIEWS = ['Build', 'Analyze', 'Compare'] as const
@@ -46,20 +47,22 @@ const RAILS: Record<View | 'home', RailSection[]> = {
   Compare: [{ id: 'c-pick', label: 'Scenarios', icon: 'layers' }, { id: 'c-charts', label: 'Charts', icon: 'compare' }, { id: 'c-table', label: 'Detailed table', icon: 'table' }],
 }
 const KEY = 'scevia-scenarios-v4', LEGACY_KEY = 'scevia-scenarios-v3'
-const known = (id: string) => !!POS_BY_ID[id]
 const NO_ADJ: Adjustment[] = []
 
 export default function ScenarioLab() {
+  const { F, workspaceId: wsId, hasPortfolio } = useFinanceCtx()
+  const { TODAY, POSITIONS, POS_BY_ID, instrumentOfPosition } = F
+  const known = (id: string) => !!POS_BY_ID[id]
   useHashScroll()
   const toast = useToast()
   const [params, setParams] = useSearchParams()
   // A new workspace is empty. Scenarios saved in an earlier format are migrated, never discarded.
-  const [legacy] = useState(() => readStored<Scenario[] | null>(LEGACY_KEY, null, (raw) => SC.sanitize(raw, known)?.scenarios ?? null))
-  const [scenarios, setScenarios] = useSessionState<Scenario[]>(KEY, legacy ?? [], (raw) => {
+  const [legacy] = useState(() => readStored<Scenario[] | null>(scopedKey(LEGACY_KEY, wsId), null, (raw) => SC.sanitize(raw, known)?.scenarios ?? null))
+  const [scenarios, setScenarios] = useSessionState<Scenario[]>(scopedKey(KEY, wsId), legacy ?? [], (raw) => {
     const r = SC.sanitize(raw, known)
     return r ? r.scenarios.map((x, i) => ({ ...x, color: x.color || COLORS[i % COLORS.length] })) : null
   })
-  const [storedActive, setActiveKey] = useSessionState<string>('scevia-active-v4', 'base', (v) => (typeof v === 'string' ? v : null))
+  const [storedActive, setActiveKey] = useSessionState<string>(scopedKey('scevia-active-v4', wsId), 'base', (v) => (typeof v === 'string' ? v : null))
   const [view, setView] = useSessionState<View>('scevia-lab-view', 'Build', (v) => (VIEWS.includes(v as View) ? (v as View) : null))
   const { settings } = useSettings()
   // A view preference: opens as set in Settings › Scenario Lab; each target keeps the unit it was typed in.
@@ -79,8 +82,8 @@ export default function ScenarioLab() {
   const adjs = active?.adjs ?? NO_ADJ
 
   // Evaluations are cached per scenario object (lab/model.ts): editing one scenario re-evaluates only that one.
-  const actual = useMemo(() => evaluateActual(), [])
-  const evals = useMemo(() => Object.fromEntries(scenarios.map((s) => [s.key, evaluate(s)])) as Record<string, Evaluation>, [scenarios])
+  const actual = useMemo(() => evaluateActual(F), [F])
+  const evals = useMemo(() => Object.fromEntries(scenarios.map((s) => [s.key, evaluate(s, F)])) as Record<string, Evaluation>, [scenarios, F])
   const E = active ? evals[active.key] : actual
   const errorCount = Object.keys(E.sim.errors).length
   const fundingErr = active && (['pm', 'ks'] as Platform[]).some((p) => active.funding[p] != null && !validFunding(active.funding[p]))
@@ -160,7 +163,7 @@ export default function ScenarioLab() {
   }
   const startExample = (i: number) => {
     const key = nextKey(), ex = EXAMPLES[i]
-    setScenarios((ss) => [...ss, { ...SC.fromExample(key, nextColor(), { name: ex.name, adjs: ex.adjs(), baseline: 'portfolio' }), baseAsOf: TODAY }])
+    setScenarios((ss) => [...ss, { ...SC.fromExample(key, nextColor(), { name: ex.name, adjs: ex.adjs(F) ?? [], baseline: 'portfolio' }), baseAsOf: TODAY }])
     open(key); toast(`Started from the example “${ex.name}” (not saved yet)`, 'info')
   }
   const save = () => { if (!active || blocked) return; update((s) => SC.save(s, 'this session')); toast(`Saved “${active.name}”`) }
@@ -205,7 +208,7 @@ export default function ScenarioLab() {
       <main className="lab-main">
         {!storageOk && <Callout tone="warn" icon="alert">This browser isn’t letting Scevia keep data in this tab, so scenarios will be lost when you reload or leave the page.</Callout>}
         {isHome || !active ? (
-          <LabHome scenarios={scenarios} evals={evals} onCurrent={() => create('portfolio')} onScratch={(f) => create('scratch', f)} onOpen={(k) => open(k)} onExample={startExample} />
+          <LabHome hasPortfolio={hasPortfolio} scenarios={scenarios} evals={evals} onCurrent={() => create('portfolio')} onScratch={(f) => create('scratch', f)} onOpen={(k) => open(k)} onExample={startExample} />
         ) : (<>
           <section className="page-head anchor lab-head" id="summary">
             <div style={{ minWidth: 0 }}>
@@ -237,12 +240,12 @@ export default function ScenarioLab() {
                   onBulk={(label, prev) => { setUndo({ label, prev, key: active.key }); toast(label, 'info') }} />
                 {undo && undo.key === active.key && <div className="undo-line" role="status"><span>{undo.label}.</span><button type="button" className="link" onClick={() => { setAdjs(() => undo.prev); setUndo(null) }}>Undo</button></div>}
               </div>
-              <BuildSummary E={E} onAnalyze={() => { setView('Analyze'); window.scrollTo(0, 0) }} />
+              <BuildSummary E={E} onAnalyze={() => { setView('Analyze'); window.scrollTo(0, 0) }} onCover={(p, amount) => { update((s) => SC.configure(s, { funding: { ...s.funding, [p]: (s.funding[p] ?? 0) + amount } })); toast('Virtual capital added. No real funds are involved.') }} />
             </div>
           )}
           {view === 'Analyze' && <AnalyzeView E={E} onEdit={editRow} />}
           {view === 'Compare' && <CompareView key={activeKey} scenarios={scenarios} evals={evals} actual={actual} activeKey={activeKey} onOpen={(k) => open(k, 'Compare')} />}
-          <div className="footer-note"><span>Scenario results show what happens under the outcomes and prices you choose. They aren’t forecasts or recommendations.</span><span>Sample portfolio · sample market data</span></div>
+          <div className="footer-note"><span>Scenario results show what happens under the outcomes and prices you choose. They aren’t forecasts or recommendations.</span><span><WorkspaceLabel suffix="sample market data" /></span></div>
         </>)}
       </main>
 
@@ -265,8 +268,8 @@ export default function ScenarioLab() {
           toast(`Added ${list.length} position${list.length > 1 ? 's' : ''}.${blank ? ` ${blank === list.length ? (blank > 1 ? 'Enter their targets and prices' : 'Enter a target and price') : `${blank} need${blank > 1 ? '' : 's'} a target and price`} to be included.` : ' Held positions start at their current size.'}`, 'info')
           setView('Build')
         }} />}
-      {priceCheck && active && <PriceCheckModal adjs={adjs} baseAsOf={active.baseAsOf ?? null} titleOf={(a) => `${describe(a).title} · ${describe(a).side}`} onClose={() => setPriceCheck(false)}
-        onApply={(checks) => { setAdjs((as) => SC.applyLatestRefs(as, checks)); setPriceCheck(false); toast('Reference prices updated. Assumed prices and targets are unchanged.') }} />}
+      {priceCheck && active && <PriceCheckModal adjs={adjs} baseAsOf={active.baseAsOf ?? null} titleOf={(a) => `${describe(a, F).title} · ${describe(a, F).side}`} onClose={() => setPriceCheck(false)}
+        onApply={(checks) => { setAdjs((as) => SC.applyLatestRefs(as, checks)); setPriceCheck(false); toast('Reference prices updated. Save to keep them; assumed prices and targets are unchanged.') }} />}
       {assumptions && active && <AssumptionsDrawer s={active} E={E} onChange={(patch) => update((s) => SC.configure(s, patch))} onClose={() => setAssumptions(false)} />}
       {pending && <AddToScenarioModal ids={pending.ids} from={pending.from} scenarios={scenarios} defaultTarget={active ? active.key : scenarios[0]?.key ?? 'new'} onCancel={() => setPending(null)} onConfirm={confirmAdd} />}
       {confirmDelete && active && (
@@ -283,6 +286,7 @@ export default function ScenarioLab() {
 function AddToScenarioModal({ ids, from, scenarios, defaultTarget, onCancel, onConfirm }: {
   ids: string[]; from: string | null; scenarios: Scenario[]; defaultTarget: string; onCancel: () => void; onConfirm: (target: string, ids: string[], copyQty: boolean) => void
 }) {
+  const { POS_BY_ID } = useFinance()
   const [target, setTarget] = useState(defaultTarget)
   const [copyQty, setCopyQty] = useState(false)
   const scratch = scenarios.find((x) => x.key === target)?.baseline === 'scratch'

@@ -6,13 +6,15 @@ import { Button, Card, Chip, PlatformBadge, Seg, cx } from '../../components/ui'
 import { PLATFORM_NAME } from '../../data/labels'
 import { PROVENANCE_TEXT, REL_TEXT } from '../../data/relations'
 import type { Platform } from '../../data/types'
-import { MAX_FUNDING, accountsOn, fmtDate, validFunding, type Baseline, type Constraint } from '../../lib/finance'
+import { MAX_FUNDING, fmtDate, validFunding, type Baseline, type Constraint } from '../../lib/finance'
+import { DEFAULT_ASSET } from '../../lib/replay'
 import { DEFAULT_FEES, MAX_CUSTOM_FEE_PCT, feeLabel, validFeePct, type FeeAssumption } from '../../lib/fees'
 import { fmt } from '../../lib/format'
 import { parseMoney, parsePct } from '../../lib/inputs'
 import type { Scenario } from '../../lib/scenarios'
 import { eventsIn, type Evaluation } from './model'
 import { accountName } from '../../lib/useWorkspace'
+import { useFinance } from '../../lib/financeContext'
 
 type Patch = Partial<Pick<Scenario, 'baseline' | 'funding' | 'assumptions'>>
 
@@ -34,6 +36,7 @@ export function AssumptionsBar({ s, E, onEdit, onCheckPrices }: { s: Scenario; E
 
 /** Essentials at the top of Build. */
 export function StartSetup({ s, E, onChange, onBaseline }: { s: Scenario; E: Evaluation; onChange: (p: Patch) => void; onBaseline: (b: Baseline) => void }) {
+  const { accountsOn } = useFinance()
   const heldRows = s.adjs.filter((a) => !a.instrument).length
   return (
     <Card id="setup">
@@ -42,11 +45,11 @@ export function StartSetup({ s, E, onChange, onBaseline }: { s: Scenario; E: Eva
           <Seg label="Starting portfolio" options={['Current portfolio', 'Empty portfolio'] as const} value={s.baseline === 'scratch' ? 'Empty portfolio' : 'Current portfolio'} onChange={(v) => onBaseline(v === 'Empty portfolio' ? 'scratch' : 'portfolio')} />
           <small className="t3">{s.baseline === 'scratch' ? 'No holdings, cash or history.' : `Your holdings and cash · ${fmt(E.B.totalValue ?? 0)} at marks${E.funding ? ' incl. added capital' : ''}.`}{heldRows > 0 && s.baseline === 'scratch' ? ` ${heldRows} older position${heldRows > 1 ? 's' : ''} can’t be used from scratch.` : ''}</small>
         </fieldset>
-        <fieldset className="setup-f"><legend className="l">{s.baseline === 'scratch' ? 'Starting capital' : 'Added capital'} <span className="t3">(by venue · not profit)</span></legend>
+        <fieldset className="setup-f"><legend className="l">{s.baseline === 'scratch' ? 'Virtual starting capital' : 'Additional virtual capital'} <span className="t3">(by venue · simulated, not profit)</span></legend>
           <div className="row" style={{ gap: 'var(--space-2)', flexWrap: 'wrap' }}>
             {(['pm', 'ks'] as Platform[]).map((p) => <FundingInput key={p} p={p} value={s.funding[p]} onChange={(v) => onChange({ funding: { ...s.funding, [p]: v } })} />)}
           </div>
-          <small className="t3">Contributed capital, added to {(['pm', 'ks'] as Platform[]).map((p) => `${PLATFORM_NAME[p]} · ${accountName(accountsOn(p)[0]?.id) || 'account'}`).join(' and ')}. It raises cash and the starting value, is never a gain, and isn’t moved between accounts.</small>
+          <small className="t3">Simulated capital in each venue’s virtual funding{s.baseline === 'portfolio' ? <> ({(['pm', 'ks'] as Platform[]).map((p) => `${PLATFORM_NAME[p]} · ${accountsOn(p)[0] ? accountName(accountsOn(p)[0].id, accountsOn(p)) : `virtual ${DEFAULT_ASSET[p]}`}`).join(' and ')})</> : ''}. No account or deposit is needed. It raises cash and the starting value, is never a gain, and isn’t moved between venues.</small>
         </fieldset>
       </div>
     </Card>
@@ -135,6 +138,7 @@ function Methodology({ baseline }: { baseline: Baseline }) {
 }
 
 function FundingInput({ p, value, onChange }: { p: Platform; value?: number; onChange: (v: number | undefined) => void }) {
+  const { accountsOn } = useFinance()
   const [text, setText] = useState(value == null || !Number.isFinite(value) ? '' : String(value))
   const parsed = parseMoney(text)
   useEffect(() => { const cur = parseMoney(text); if ((cur.state === 'ok' ? cur.value : undefined) !== value && !(value != null && !Number.isFinite(value))) setText(value == null ? '' : String(value)) }, [value]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -143,7 +147,7 @@ function FundingInput({ p, value, onChange }: { p: Platform; value?: number; onC
   return (
     <label className={cx('fund', invalid && 'has-error')} title={acct.length === 1 ? `${PLATFORM_NAME[p]} · ${accountName(acct[0].id)}` : undefined}><PlatformBadge p={p} size={18} />
       <span className="sr-only">Added capital on {PLATFORM_NAME[p]}</span>
-      <input className="num-input" inputMode="decimal" placeholder={`${PLATFORM_NAME[p]} $`} aria-label={`Added capital on ${PLATFORM_NAME[p]}`} aria-invalid={invalid} value={text}
+      <input className="num-input" inputMode="decimal" placeholder={`${PLATFORM_NAME[p]} ${DEFAULT_ASSET[p]}`} aria-label={`Added capital on ${PLATFORM_NAME[p]}`} aria-invalid={invalid} value={text}
         onChange={(e) => { const t = e.target.value; setText(t); const r = parseMoney(t); onChange(r.state === 'empty' ? undefined : r.state === 'ok' ? r.value : Number.NaN) }} />
       {invalid && <span role="alert" className="loss" style={{ fontSize: 'var(--font-size-xs)' }}>{parsed.state === 'invalid' ? parsed.message : `0–${fmt(MAX_FUNDING)}`}</span>}
     </label>

@@ -11,15 +11,16 @@ import { Drawer, Modal, useToast } from '../components/overlays'
 import { useHashScroll } from '../components/shell'
 import { Button, Callout, Card, CardHeader, Chip, PlatformBadge, Seg, cx } from '../components/ui'
 import { PLATFORM_NAME } from '../data/labels'
-import { HISTORY_START, TODAY } from '../data/portfolio'
 import { SAMPLE_MARKET_EVENTS } from '../data/sampleMarkets'
 import { SAMPLE_FILES, type FinRecord, type Outcome, type RecordType, type WorkspaceAccount } from '../data/sampleRecords'
 import type { Platform } from '../data/types'
-import { account, coverage, fmtDate, sourceOf } from '../lib/finance'
+import { fmtDate } from '../lib/finance'
 import { fmt, qty, sfmt } from '../lib/format'
 import { parseMoney, parsePrice, parseShares } from '../lib/inputs'
 import * as R from '../lib/records'
 import { pushLocalEvent, useWorkspace, type Workspace } from '../lib/useWorkspace'
+import { useFinance } from '../lib/financeContext'
+import { WorkspaceLabel } from '../components/Workspace'
 
 export const SECTIONS = [
   { id: 'accounts', label: 'Accounts', icon: 'db' },
@@ -69,11 +70,11 @@ export default function Portfolio() {
           <li key={s.id}><NavLink to={`/portfolio/${s.id}`} className={({ isActive }) => cx(isActive && 'on')}><Icon name={s.icon} />{s.label}
             {s.id === 'transactions' && <span className="count">{ws.records.length}</span>}{s.id === 'imports' && reviewCount > 0 && <span className="flag">{reviewCount}</span>}</NavLink></li>
         ))}</ol>
-        <div className="rail-card"><b>Sample portfolio</b>Accounts and coverage describe the portfolio behind your figures. Transactions and imports are a record-management sample.</div>
+        <div className="rail-card"><b><WorkspaceLabel /></b>Accounts and coverage describe the portfolio behind your figures. Transactions and imports are a record-management sample.</div>
       </aside>
       <main>
         <section className="page-head anchor" id="summary">
-          <div><div className="caps"><span className="accent">Portfolio</span> · Sample portfolio · {ws.accounts.length} accounts</div><h1>{title}</h1></div>
+          <div><div className="caps"><span className="accent">Portfolio</span> · <WorkspaceLabel /> · {ws.accounts.length} accounts</div><h1>{title}</h1></div>
           <div className="actions">
             <Button icon="download" onClick={() => setImporting({})}>Import CSV…</Button>
             <Button icon="plus" onClick={() => setManual('')}>Add record…</Button>
@@ -88,7 +89,7 @@ export default function Portfolio() {
         {section === 'transactions' && <Transactions ws={ws} commit={commit} />}
         {section === 'imports' && <Imports ws={ws} reviewCount={reviewCount} onImport={(file, accountId) => setImporting({ file, accountId })} />}
         {section === 'coverage' && <Coverage ws={ws} />}
-        <div className="footer-note"><span>Original records stay inspectable; decisions are reversible and never delete source data.</span><span>Sample portfolio · fictional data</span></div>
+        <div className="footer-note"><span>Original records stay inspectable; decisions are reversible and never delete source data.</span><span><WorkspaceLabel /></span></div>
       </main>
       {importing && <ImportFlow ws={ws} preset={importing} onClose={() => setImporting(null)} onDone={(label, next, review, batchId) => {
         commit(label, next); setImporting(null)
@@ -122,7 +123,7 @@ function Accounts({ ws, onRename, onImport, onManual }: { ws: Workspace; onRenam
                 <dt>Last observed</dt><dd>{a.lastObserved ? when(a.lastObserved) : 'No connection'}</dd>
                 <dt>Records</dt><dd>{rs.length}{times.length ? ` · ${when(times[0])} – ${when(times.at(-1)!)}` : ''}</dd>
                 <dt>Opening state</dt><dd className={cx(!a.openingDeclared && 'warn-fg')}>{a.openingDeclared ? 'Declared' : 'Unknown before first record'}</dd>
-                <dt>In figures</dt><dd>{a.inAnalytics ? 'Sample portfolio' : 'Records only'}</dd>
+                <dt>In figures</dt><dd>{a.inAnalytics ? 'Portfolio figures' : 'Records only'}</dd>
               </dl>
               {(review > 0 || unknown > 0) && <small className="stale">{[review ? `${review} need review` : '', unknown ? `${unknown} with unknown amounts` : ''].filter(Boolean).join(' · ')}</small>}
               <div className="row acct-actions">
@@ -528,12 +529,13 @@ function ManualRecord({ ws, preset, onClose, onAdd }: { ws: Workspace; preset: s
 
 /* ── Data coverage ────────────────────────────────────────── */
 function Coverage({ ws }: { ws: Workspace }) {
+  const { HISTORY_START, TODAY, account, coverage, sourceOf } = useFinance()
   const a = account('all')
   const est = ws.records.filter((r) => R.statusOf(r, ws.records) === 'included' && R.cashEffect(R.effective(r)) == null).length
   const review = ws.records.filter((r) => R.statusOf(r, ws.records) === 'review').length
   return (<>
     <Card id="coverage" flush>
-      <CardHeader pad title="Sample portfolio" sub={`What Overview, Analytics and Risk are based on · history from ${fmtDate(HISTORY_START, { month: 'short', day: 'numeric', year: 'numeric' })}`} />
+      <CardHeader pad title={<WorkspaceLabel />} sub={`What Overview, Analytics and Risk are based on · history from ${fmtDate(HISTORY_START, { month: 'short', day: 'numeric', year: 'numeric' })}`} />
       <div className="dt-wrap"><table className="dt">
         <thead><tr><th scope="col">Account</th><th scope="col">Source</th><th scope="col">Observed</th><th scope="col" className="r">Open positions</th><th scope="col" className="r">Fills</th><th scope="col" className="r">Settlements</th><th scope="col" className="r">Estimated fees</th><th scope="col">Opening state</th></tr></thead>
         <tbody>{ws.accounts.filter((x) => x.inAnalytics).map((x) => { const c = coverage(x.venue), s = sourceOf(x.venue); return (

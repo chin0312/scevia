@@ -7,8 +7,8 @@ _Last updated: 2026-11-25_
 ## Current state
 
 - **Frontend:** all four modules are built (Overview, Analytics, Risk, Scenario Lab). It is a dark-only design system enforced by lint.
-- **Data:** a deterministic **sample portfolio** (`web/src/data/sample.ts`), the `fixture` workspace, used for exploring and tests. There is no backend connection, no auth and no account connections. The Demo portfolio is selectable but reports itself unavailable until the backend demo (`/v1/demo`, PR #8) is connected.
-- **Workspace boundary:** `data/workspace.ts` (`WorkspaceService`, contract readers) + `lib/workspaceContext.tsx` (selected workspace, revisions, per-stream freshness, refresh). See *Workspace boundary and Phase 7 handoff* below.
+- **Data:** a deterministic **sample portfolio** (`web/src/data/sample.ts`), the development `fixture` workspace, used for exploring and tests. There is no backend connection, no auth and no account connections. The Demo portfolio is selectable but reports itself unavailable until the backend demo (`/v1/demo`, PR #8) is connected.
+- **Workspace boundary:** `data/workspace.ts` (`WorkspaceService`, contract readers) + `lib/workspaceContext.tsx` (selected workspace, revisions, per-stream freshness, refresh). See *Workspace boundary and integration handoff* below.
 - **Portfolio workspace:** `/portfolio/:section` organizes accounts, sources, transactions, imports & reconciliation and data coverage. Its records are an isolated sample of record management; they never change portfolio figures.
 - **Calculations:** one pure module (`web/src/lib/finance.ts`) with 50+ unit tests. Scenario bookkeeping is in `web/src/lib/scenarios.ts`.
 - **Persistence:** scenarios (with their fee treatment and constraints) and the guardrail are kept in `sessionStorage` (one browser tab) through `lib/storage.ts`.
@@ -191,25 +191,36 @@ The backend scenario engine becomes the authority for integrated scenario result
 | Exact vs. bounded settlement coverage; event dates as schedule hints | 16-event exact enumeration; "scheduled resolution" wording | Show the covered subset and unsupported holdings; keep schedule-hint wording and unknown dates. |
 
 
-## Workspace boundary and Phase 7 handoff (reference: PR #8 at `eaa58b0`)
+## Workspace boundary and integration handoff (PR #8 merged at `1ec5ebc`; roadmap Issue #2, Phases 7–10)
 
-The frontend now separates *which portfolio* from *how its figures are computed*. Status of each part:
+PR #8 (Phase 6) is merged; PR #7 (Phase 5) is merged. The backend's `backend/docs/PHASE7_HANDOFF.md` describes the Phase 6 contracts for product integration. In the current roadmap (Issue #2): **Phase 7** real data & continuous portfolio tracking, **Phase 8** the Historical Replay engine, **Phase 9** unified frontend-backend integration & internal QA, **Phase 10** secure release & free public Beta. This frontend is not formally integrated yet.
 
-| Area | Implemented in the frontend | Fixture-driven today | Reviewed backend contract (PR #8) | Phase 7 integration still required |
-|---|---|---|---|---|
-| Workspace identity & mode | `WorkspaceProvider` / `useActiveWorkspace()`; selector with Sample (`fixture`), Demo (`demo`), My portfolios (`actual`); selection in `scevia-workspace`; other workspaces' state untouched | Bundled service: fixture + unavailable demo, no actual portfolios | `GET/POST /v1/portfolios` (`mode: fixture \| demo \| actual`), parsed by `readPortfolioList` | API-backed `WorkspaceService`; *Create portfolio* (disabled now); per-workspace keys for scenarios and records |
-| Demo portfolio | Selectable; explicit unavailable state (`authorized_demo_dataset_unavailable`); never falls back to the fixture | Always unavailable | `GET/POST /v1/demo` (initialize, resume, `resetFromPortfolioId`), `POST /v1/demo/refresh` (revision, 409 `demo_workspace_changed`), parsed by `readDemo` / `demoStreams` | Initialize/resume/reset/refresh actions; capture cutoff as valuation date; quotes as `cached_snapshot` / `stale` |
-| Freshness | Independent streams (market, account, valuation, history, sync, sources) with explicit states; `summaryState` never says "Streaming" unless all core streams do; refresh keeps data mounted; optional periodic check (Settings › General) | Every fixture stream is "Fixed sample" or "Unavailable"; refresh records the check and reports no new data | `/coverage`, `/sync-runs`, `POST /provider-accounts/{id}/sync?scope=current\|history`, quote `freshness` | Map coverage and sync runs to stream states; measured thresholds; streaming/polling per provider capability |
-| Financial revision vs. market revision | Separate fields on the snapshot; figures change only when a revision moves | Constant fixture revisions | ledger, catalog and settlement-rule revisions in analytics responses | Invalidate and refetch per revision after mutations and new marks |
-| Decimals & availability | `readDecimal` (strings, nulls, malformed → unavailable) | n/a | Decimal strings everywhere | Use in all view-model adapters |
-| Overview | Valuation basis line (as-of, reconstructed, market-data state), native amounts per venue, indicative total note, Entry → Price / Implied column (one column; preference), stale source dates per row | Fixture marks | `/accounting?view=summary`, `/analytics/exposure` (`knownCombinedSubtotal` etc.), `/analytics/denominations` | Reported vs. reconstructed side by side; known subtotal ≠ NAV; "What changed" from actual changes since last visit |
-| Analytics | 1W–All + custom range, availability from history coverage, coverage line | Fixture weekly history | `/analytics/performance` (gaps, unavailable reasons) | Render return gaps and observed/carried/stale labels from the backend (LOCF methodology in `METHODOLOGY.md`) |
-| Risk | Acquisition cost vs. marked value, worst outcome vs. current value, as-of line | Fixture | `/analytics/exposure` | Per-denomination exposure; pending settlement/redemption exposure |
-| Scenario Lab (current market) | Frozen vs. latest reference check (`PriceCheckModal`, `applyLatestRefs`), assumed price separate, fee preference for new scenarios | Sample catalog references | Baseline tokens, `captureCurrentQuote`, rebase preview, revisions, `/evaluate-denominations` | Replace local evaluation with baseline/evaluate/save; rebase preview UI from the API |
-| Historical Replay | `/scenario-lab/replay`: Build · Analyze · Compare; lifecycle validation, explicit execution prices, LOCF valuation, per-account funding, native totals, hindsight labels, comparability flags; stored in `scevia-replays-v1` | Sample catalog with sample listing dates and one recorded resolution; no price history, so value over time is unavailable | `/v1/market-data/prices-history`, `/v1/market-catalog/kalshi/history` (bounded history); no replay engine in PR #8 | Backend replay service (Phase 7) using recorded observations; point-in-time mode is not offered |
-| Notifications & search | Scoped to the selected workspace; sample vs. local-sample labels; replays searchable | Sample-derived | Sync runs, settlements | Actual account, market, settlement and source-problem events |
+### Workspace isolation (implemented)
 
-Rules kept: no fake streaming or random prices; a retrieved last-trade price isn't presented as a current executable quote; provider credentials never reach the browser; frontend calculations remain fixture, validation or presentation logic and are not authoritative for connected accounts.
+- **Identity and status** come from `WorkspaceService` (`data/workspace.ts`) through `WorkspaceProvider` / `useActiveWorkspace()`: id, mode (`fixture` / `demo` / `actual`), revisions, per-stream freshness, load and refresh state. A late response from an earlier selection is ignored (request counter); a failed refresh keeps the last usable data, marked as not refreshed (`reason: 'refresh_failed'`).
+- **Financial read model** is per workspace: `createFinance(data)` (`lib/finance.ts`) bound to the selected workspace's `PortfolioData` and provided by `FinanceProvider` / `useFinance()` (`lib/financeContext.tsx`). No page reads a global portfolio; `lib/boundary.test.ts` fails if a page, component or shared library imports fixture data or `lib/fixtureFinance.ts` (the fixture-bound instance for the fixture service and tests).
+- **Without data** (loading, unavailable, failed, not connected) a workspace gets an **empty** portfolio (`hasPortfolio: false`): Overview, Analytics, Risk and Portfolio show the workspace state; Scenario Lab still builds from scratch and replays history with virtual capital. The Sample portfolio is never a fallback.
+- **Workspace-owned storage** uses `scopedKey(base, workspaceId)` → `base@<id>` (the development Sample keeps its original unsuffixed keys): scenarios, active scenario, replays, records (`useWorkspace.ts`, one store per workspace), local activity events and notification read state. Global preferences (settings, view choices, selected workspace) stay unscoped. `useSessionState` re-reads when its key changes, so one workspace's value is never written under another's key.
+- **Pages remount per workspace** (keyed outlet and detail panels), so filters, selections and open panels never carry across portfolios; a refresh of the same workspace keeps them.
+- **Development service** (`data/devWorkspaces.ts`): only in development builds and only when a tab sets `scevia-dev-workspaces` (or opens `?devWorkspaces=1`). It adds Development fixture B (different account, PUSD, holdings, cash, history and records; slow to load), C (fails to load) and D (refresh fails). `e2e/isolation.spec.ts` uses it. It isn't in production bundles.
+
+### Status by area
+
+| Area | Working frontend interaction | Development fixture behaviour | Backend implemented (main) | Backend under development | Formal integration (Phase 9) |
+|---|---|---|---|---|---|
+| Workspaces | Selector (Sample / Demo / My portfolios), per-workspace read model, keyed storage, stale-response guard, gate states | Sample = fixture; Demo always unavailable; no actual portfolios | `GET/POST /v1/portfolios` (`mode`), parsed by `readPortfolioList` | — | API-backed `WorkspaceService`; *Create portfolio* |
+| Demo portfolio | Explicit unavailable state; no fixture fallback | Unavailable | `/v1/demo` initialize / resume / reset / refresh (revision, 409), quotes with source time vs. retrieval (`readDemo`, `demoStreams`) | Approved real capture (Phase 6B) | Initialize / resume / reset / refresh actions |
+| Freshness | Independent streams; refresh with retry and failure state; future/invalid times unavailable; clock-skew tolerance; development age thresholds labelled as such (`classifiedBy`) | Fixture streams "Fixed sample" / unavailable | `/coverage`, `/sync-runs`, account sync, quote freshness | Scheduled acquisition, incremental sync, revaluation (Phase 7) | Map backend classifications and measured cadence onto streams |
+| Overview / Analytics / Risk | Workspace-bound figures; valuation basis, native amounts, reporting note only when assets mix; periods gated by the workspace's history | Fixture ledger and weekly sample marks | Strict accounting, `/analytics/performance` (carry-forward reference estimates, stale counts, return eligibility), `/analytics/exposure`, `/analytics/denominations` | Continuous valuation (Phase 7) | Replace fixture calculations with read models; plot carried values as estimates and keep gaps before a first mark |
+| Current-market scenarios | Frozen vs. latest vs. assumed price check (latest from the workspace's marks or the market service; missing latest ≠ unchanged); virtual starting / additional capital with shortfall cover; scenarios per workspace | Local evaluation on the fixture or an empty portfolio | Baseline tokens, `captureCurrentQuote`, evaluate, revisions/409, rebase preview, mixed-denomination evaluation | — | Baseline → evaluate → save; rebase preview from the API |
+| Historical Replay | Build · Analyze · Compare; trading open/close vs. expected/verified resolution; virtual funding buckets (venue + asset, freely editable, shortfall cover); funded / unfunded / unknown; unknown fees never zero; repeated positions per market; frozen reporting rates; comparison eligibility and normalized chart only with complete evidence | Sample catalog (sample opening dates; one recorded close and resolution; no price history → value over time unavailable) | Bounded price history endpoints; demo capture with `executionAt`, trading window and resolution evidence | Replay engine on the shared ledger (Phase 8) | Replace `runReplay` with the replay service; keep the presentation |
+| Notifications & search | Per workspace; origin labelled with the workspace name | Sample-derived | Sync runs, settlements | Account/market events (Phase 7) | Actual events |
+
+The frontend's calculations stay fixture, validation and presentation logic. Authoritative accounting, valuation, risk, scenario and replay results come from the backend.
+
+### Public Beta requirements (Phase 10, not frontend work here)
+
+Production identity and authorization, isolation, retention, export and deletion, source revocation, operational readiness and external testing gates must be in place before private financial workspaces are exposed. The Sample portfolio stays development-only; the user-facing Demo uses authorized market evidence, virtual capital and backend results.
 
 ## Adding sources (CSV, providers)
 
@@ -247,8 +258,11 @@ Order of work, following the roadmap (Issue #2), each step verified against real
    - Introduce the bounded outcome engine.
 5. **Scenario construction (Phase 5).** New markets and supported market links (extension path above).
 6. **Kalshi read-only + cross-platform portfolios (Phase 6).** Reviewed event relationships; provider-native identity preserved.
-7. **Release readiness (Phase 7).**
-   - Secure cloud workspace, export and deletion, then user testing.
+7. **Real data & continuous portfolio tracking (Phase 7).** Scheduled market acquisition, incremental account sync, revaluation.
+8. **Historical Replay engine (Phase 8).** Replay on the shared ledger with recorded observations and trading windows.
+9. **Unified integration & internal QA (Phase 9).** Bind the four modules, Scenario Lab and Historical Replay to the backend.
+10. **Secure release & free public Beta (Phase 10).**
+   - Secure cloud workspace, export and deletion, then external testing.
    - Production identity, authorization and isolation must exist before any private cloud portfolio is exposed to real users.
 
 ### Integration considerations

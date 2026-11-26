@@ -4,7 +4,6 @@
 import { useState } from 'react'
 import { Callout, Card, CardHeader, Seg, cx } from '../../components/ui'
 import { CAT_COLOR, PLATFORM_NAME } from '../../data/labels'
-import { TODAY } from '../../data/portfolio'
 import type { Category, Platform } from '../../data/types'
 import { fmtDate, holdingsAllocation } from '../../lib/finance'
 import { feeLabel } from '../../lib/fees'
@@ -19,7 +18,7 @@ const MAX_PICK = 5
 
 const fundingText = (s: Scenario) => (['pm', 'ks'] as Platform[]).filter((p) => (s.funding[p] ?? 0) > 0).map((p) => `${PLATFORM_NAME[p]} ${fmt(s.funding[p]!)}`).join(' · ') || 'None'
 /** Everything that makes two scenarios' starting assumptions different (not just total capital). */
-export const assumptionKey = (s: Scenario, e: Evaluation) => JSON.stringify([s.baseline, s.funding.pm ?? 0, s.funding.ks ?? 0, e.fees, e.constraints.map((c) => `${c.a}|${c.b}|${c.cls}`).sort(), s.baseline === 'portfolio' ? s.baseAsOf ?? TODAY : null])
+export const assumptionKey = (s: Scenario, e: Evaluation) => JSON.stringify([s.baseline, s.funding.pm ?? 0, s.funding.ks ?? 0, e.fees, e.constraints.map((c) => `${c.a}|${c.b}|${c.cls}`).sort(), s.baseline === 'portfolio' ? s.baseAsOf ?? null : null])
 
 export function CompareView({ scenarios, evals, actual, activeKey, onOpen }: { scenarios: Scenario[]; evals: Record<string, Evaluation>; actual: Evaluation; activeKey: string; onOpen: (k: string) => void }) {
   const [picked, setPicked] = useState<string[]>(() => [activeKey, ...scenarios.map((s) => s.key).filter((k) => k !== activeKey)].filter((k) => scenarios.some((s) => s.key === k)).slice(0, 4))

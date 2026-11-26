@@ -6,13 +6,14 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { PLATFORM_NAME } from '../data/labels'
 import { PROVENANCE_TEXT, REL_TEXT } from '../data/relations'
 import type { ClosedTrade } from '../data/types'
-import { POS_BY_ID, coverage, eventRelations, sourceRelations, exposures, fmtDate, outcomeLabel, sourceOf, tradeNet, type EventExposure, type PlatformFilter, type Position } from '../lib/finance'
+import { fmtDate, outcomeLabel, tradeNet, type EventExposure, type PlatformFilter, type Position } from '../lib/finance'
 import { handoffPath } from '../lib/handoff'
 import { fmt, int, pct, sfmt } from '../lib/format'
 import { Icon } from './Icon'
 import { Drawer, focusTopLayer } from './overlays'
 import { useConnect } from './ConnectSources'
 import { Button, Callout, Chip, PlatformBadge, Seg, SideChip, cx } from './ui'
+import { useFinance } from '../lib/financeContext'
 
 export type Detail =
   /** `scope` is the platform scope of the view the panel was opened from; figures start in that scope. */
@@ -39,6 +40,7 @@ export function DetailProvider({ children }: { children: ReactNode }) {
 }
 
 function DetailDrawer({ d, depth, onBack, onClose, open }: { d: Detail; depth: number; onBack: () => void; onClose: () => void; open: (d: Detail) => void }) {
+  const { POS_BY_ID, exposures } = useFinance()
   // The drawer stays mounted while its content changes (nested panel, Back): move focus into the new content
   // so it doesn't fall back to the page behind the overlay.
   const first = useRef(true)
@@ -71,6 +73,7 @@ function useSimulate(close: () => void) {
 }
 
 function PositionBody({ p, scope, open, close }: { p?: Position; scope: PlatformFilter; open: (d: Detail) => void; close: () => void }) {
+  const { exposures, sourceOf } = useFinance()
   const sim = useSimulate(close)
   if (!p) return <div className="empty"><p>This position is no longer in the portfolio.</p></div>
   const src = sourceOf(p.platform)
@@ -110,6 +113,7 @@ const SCOPE_LABEL: Record<PlatformFilter, string> = { all: 'All platforms', pm: 
 const tone = (v: number) => (v > 0.005 ? 'gain' : v < -0.005 ? 'loss' : undefined)
 
 function EventBody({ id, scope, open, close }: { id: string; scope: PlatformFilter; open: (d: Detail) => void; close: () => void }) {
+  const { coverage, eventRelations, sourceRelations, exposures, sourceOf } = useFinance()
   const sim = useSimulate(close)
   const nav = useNavigate(), { pathname } = useLocation()
   const rels = sourceRelations()
@@ -170,6 +174,7 @@ function EventFigures({ e, committed, scopeLabel, open }: { e: EventExposure; co
 }
 
 function GroupBody({ ids, open }: { ids: string[]; open: (d: Detail) => void }) {
+  const { POS_BY_ID } = useFinance()
   const ps = ids.map((i) => POS_BY_ID[i]).filter(Boolean).sort((a, b) => b.value - a.value)
   if (!ps.length) return <div className="empty"><p>No open positions in this group.</p></div>
   const value = ps.reduce((a, p) => a + p.value, 0), cost = ps.reduce((a, p) => a + p.cost, 0)

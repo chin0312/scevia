@@ -10,7 +10,7 @@
  * changing the pages. The bundled service knows only the fixture; the demo reports itself unavailable and there are no
  * actual portfolios until a backend is connected. Nothing here claims a connection, refresh or live feed it doesn't have.
  */
-import type { Denomination, Platform } from './types'
+import type { Denomination, Platform, PortfolioData } from './types'
 import type { StreamState, StreamStatus } from '../lib/freshness'
 import { PORTFOLIO } from './portfolio'
 
@@ -48,7 +48,13 @@ export interface WorkspaceSnapshot {
   streams: StreamStatus[]
   /** When Scevia last asked the source for this workspace (ISO). */
   checkedAt: string | null
+  /** The workspace's portfolio read model, or null when it has none (loading, unavailable, failed, not connected).
+   *  Never another workspace's data. */
+  data: PortfolioData | null
+  /** The workspace's own initial records (records management), when it provides them. */
+  recordsSeed?: (() => RecordsSeed) | null
 }
+export interface RecordsSeed { accounts: import('./sampleRecords').WorkspaceAccount[]; records: import('../lib/records').ManagedRecord[]; batches: import('./sampleRecords').ImportBatch[] }
 
 export interface RefreshResult { snapshot: WorkspaceSnapshot; changed: boolean }
 
@@ -101,15 +107,20 @@ export function readDemo(raw: unknown): DemoState {
   return { status: 'unavailable', reason: typeof raw.reason === 'string' ? raw.reason : 'unknown' }
 }
 
-/** Streams of an available demo: market evidence is a cached capture (never streaming); records are hypothetical. */
+/** Streams of an available demo. Market evidence is a cached capture (never streaming); each quote keeps its source
+ *  time (`effectiveAt`) apart from when it was retrieved. Market freshness follows the OLDEST quote (different held
+ *  instruments can differ), and valuation completeness is never inferred from a capture: the backend's valuation
+ *  availability decides it, so it stays partial here. */
 export function demoStreams(d: Extract<DemoState, { status: 'available' }>, checkedAt: string): StreamStatus[] {
-  const newest = d.quotes.map((q) => q.effectiveAt ?? q.retrievedAt).sort().at(-1) ?? null
-  const stale = d.quotes.length > 0 && d.quotes.every((q) => q.freshness === 'stale_capture')
+  const times = d.quotes.map((q) => q.effectiveAt ?? q.retrievedAt).sort()
+  const oldest = times[0] ?? null, newest = times.at(-1) ?? null
+  const stale = d.quotes.some((q) => q.freshness === 'stale_capture')
   const market: StreamState = !d.quotes.length ? 'unavailable' : stale ? 'stale' : 'cached_snapshot'
+  const span = oldest && newest && oldest !== newest ? ` Quotes range from ${oldest.slice(0, 10)} to ${newest.slice(0, 10)}.` : ''
   return [
-    { id: 'market', state: market, asOf: newest, checkedAt, detail: 'Approved real-market capture. Prices keep their original time; they aren’t streamed.' },
-    { id: 'account', state: 'fixture', asOf: d.capturedAt, checkedAt, detail: 'Hypothetical demo records with virtual capital. No personal account is connected.' },
-    { id: 'valuation', state: market === 'unavailable' ? 'unavailable' : 'cached_snapshot', asOf: d.capturedAt, checkedAt, detail: 'Valued at the capture cutoff.' },
+    { id: 'market', state: market, asOf: oldest, checkedAt, classifiedBy: 'source', detail: `Approved real-market capture. Prices keep their source time; they aren’t streamed.${span}` },
+    { id: 'account', state: 'fixture', asOf: d.capturedAt, checkedAt, classifiedBy: 'source', detail: 'Hypothetical demo records with virtual capital. No personal account is connected.' },
+    { id: 'valuation', state: market === 'unavailable' ? 'unavailable' : 'partial', asOf: d.capturedAt, checkedAt, detail: 'Valued at the capture cutoff; completeness comes from the valuation service.' },
     { id: 'history', state: 'partial', asOf: d.capturedAt, checkedAt, detail: 'History covers the captured period only.' },
     { id: 'sync', state: 'unavailable', asOf: null, checkedAt, detail: 'The demo has no account sync.' },
     { id: 'sources', state: 'unavailable', asOf: null, checkedAt, detail: 'No personal sources are connected to the demo.' },
@@ -124,12 +135,14 @@ const FIXTURE_SUMMARY: WorkspaceSummary = { id: FIXTURE_ID, name: 'Sample portfo
 const DEMO_SUMMARY: WorkspaceSummary = { id: DEMO_ID, name: 'Demo portfolio', mode: 'demo', blurb: 'Real markets · virtual capital', accountCount: null }
 
 /** The fixture snapshot. Its data never changes, so every stream is "Fixed sample" with the sample's own dates. */
-export function fixtureSnapshot(checkedAt: string | null = null): WorkspaceSnapshot {
-  const asOf = PORTFOLIO.asOf
+export function fixtureSnapshot(checkedAt: string | null = null): WorkspaceSnapshot { return staticSnapshot(FIXTURE_SUMMARY, PORTFOLIO, checkedAt) }
+/** A snapshot of fixed development data (no live source): every stream is "Fixed sample" or unavailable. */
+export function staticSnapshot(summary: WorkspaceSummary, data: PortfolioData, checkedAt: string | null, recordsSeed?: WorkspaceSnapshot['recordsSeed']): WorkspaceSnapshot {
+  const PORTFOLIO = data, asOf = data.asOf
   const staleVenues = Object.values(PORTFOLIO.sources).filter((s) => s?.stale).length
   return {
-    summary: FIXTURE_SUMMARY, status: 'ready', reason: null,
-    financialRevision: `fixture:${asOf}`, marketRevision: `fixture:${asOf}`, valuationAsOf: asOf, historyStart: PORTFOLIO.historyStart,
+    summary, status: 'ready', reason: null, recordsSeed,
+    financialRevision: `fixture:${summary.id}:${asOf}`, marketRevision: `fixture:${summary.id}:${asOf}`, valuationAsOf: asOf, historyStart: PORTFOLIO.historyStart,
     accounts: PORTFOLIO.accounts.map((a) => ({ id: a.id, venue: a.venue, label: a.label, denomination: a.denomination, capability: 'fixture' as const })),
     streams: [
       { id: 'market', state: 'fixture', asOf, checkedAt, detail: 'Fictional sample prices fixed at the sample date. They never update.' },
@@ -139,7 +152,7 @@ export function fixtureSnapshot(checkedAt: string | null = null): WorkspaceSnaps
       { id: 'sync', state: 'unavailable', asOf: null, checkedAt, detail: 'The sample has no background sync.' },
       { id: 'sources', state: 'unavailable', asOf: null, checkedAt, detail: 'The sample isn’t connected to any provider.' },
     ],
-    checkedAt,
+    checkedAt, data,
   }
 }
 
@@ -147,7 +160,7 @@ const unavailableDemo = (checkedAt: string): WorkspaceSnapshot => ({
   summary: DEMO_SUMMARY, status: 'unavailable', reason: 'authorized_demo_dataset_unavailable',
   financialRevision: null, marketRevision: null, valuationAsOf: null, historyStart: null, accounts: [],
   streams: (['market', 'account', 'valuation', 'history', 'sync', 'sources'] as const).map((id) => ({ id, state: 'unavailable' as const, asOf: null, checkedAt, detail: 'The demo’s approved real-market data isn’t available.' })),
-  checkedAt,
+  checkedAt, data: null,
 })
 
 const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))

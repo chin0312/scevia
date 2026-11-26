@@ -21,11 +21,11 @@ export function CardHeader({ title, sub, info, right, pad }: { title: ReactNode;
 }
 
 /* Segmented control (2–5 mutually exclusive views) */
-export function Seg<T extends string>({ options, value, onChange, label }: { options: readonly T[]; value: T; onChange: (v: T) => void; label: string }) {
+export function Seg<T extends string>({ options, value, onChange, label, disabled }: { options: readonly T[]; value: T; onChange: (v: T) => void; label: string; disabled?: (o: T) => string | null }) {
   return (
     <div className="seg" role="radiogroup" aria-label={label}>
       {options.map((o) => (
-        <button key={o} type="button" role="radio" aria-checked={o === value} className={cx(o === value && 'on')} onClick={() => onChange(o)}>{o}</button>
+        <button key={o} type="button" role="radio" aria-checked={o === value} className={cx(o === value && 'on')} disabled={!!disabled?.(o)} title={disabled?.(o) ?? undefined} onClick={() => onChange(o)}>{o}</button>
       ))}
     </div>
   )

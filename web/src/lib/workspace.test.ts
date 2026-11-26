@@ -1,10 +1,8 @@
 /* Scenario Lab workspace semantics: sizing modes, value bridge, constraint implications, account identity. */
 import { describe, expect, it } from 'vitest'
 import { SAMPLE_MARKET_EVENTS } from '../data/sampleMarkets'
-import {
-  POSITIONS, POS_BY_ID, eventProfiles, holdingsOfInstrument, instrumentOfPosition, partialFeasible, positionFor, scenarioMetrics,
-  simulate, startingValue, targetShares, valueBridge, type Adjustment, type InstrumentRef, type Position,
-} from './finance'
+import { eventProfiles, partialFeasible, scenarioMetrics, targetShares, type Adjustment, type InstrumentRef, type Position } from './finance'
+import { POSITIONS, POS_BY_ID, holdingsOfInstrument, instrumentOfPosition, positionFor, simulate, startingValue, valueBridge } from './fixtureFinance'
 import { instrumentFrom } from './markets'
 import * as SC from './scenarios'
 import type { Relation } from '../data/types'

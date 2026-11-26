@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { POSITIONS } from './finance'
+import { POSITIONS } from './fixtureFinance'
+import { FIXTURE } from './fixtureFinance'
 import { deriveNotifications } from './notifications'
 import { DEFAULT_SETTINGS, readSettings, resetSection } from './settings'
 
@@ -18,15 +19,15 @@ describe('settings', () => {
 
 describe('notifications', () => {
   it('have stable, unique ids; one per event; follow the preferences', () => {
-    const a = deriveNotifications(DEFAULT_SETTINGS, [], []), b = deriveNotifications(DEFAULT_SETTINGS, [], [])
+    const a = deriveNotifications(FIXTURE, DEFAULT_SETTINGS, [], []), b = deriveNotifications(FIXTURE, DEFAULT_SETTINGS, [], [])
     expect(a.map((n) => n.id)).toEqual(b.map((n) => n.id))
     expect(new Set(a.map((n) => n.id)).size).toBe(a.length)
     expect(a.filter((n) => n.id.startsWith('resolve:fed')).length).toBeLessThanOrEqual(1) // two Fed contracts, one event
-    const off = deriveNotifications({ ...DEFAULT_SETTINGS, alerts: { resolvingWithin: 0, priceMove: 0, concentration: false, settlements: false, dataQuality: false, imports: false } }, [], [])
+    const off = deriveNotifications(FIXTURE, { ...DEFAULT_SETTINGS, alerts: { resolvingWithin: 0, priceMove: 0, concentration: false, settlements: false, dataQuality: false, imports: false } }, [], [])
     expect(off).toEqual([])
   })
   it('every position moving past the threshold is listed (position-level), not just the largest', () => {
-    const moves = deriveNotifications({ ...DEFAULT_SETTINGS, alerts: { ...DEFAULT_SETTINGS.alerts, priceMove: 1 } }, [], []).filter((n) => n.category === 'activity')
+    const moves = deriveNotifications(FIXTURE, { ...DEFAULT_SETTINGS, alerts: { ...DEFAULT_SETTINGS.alerts, priceMove: 1 } }, [], []).filter((n) => n.category === 'activity')
     expect(moves.length).toBe(POSITIONS.filter((p) => Math.abs((p.mark - p.markAtLastVisit) * p.shares) >= 1).length)
     expect(moves.every((n) => n.scope === 'position')).toBe(true)
   })

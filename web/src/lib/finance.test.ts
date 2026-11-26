@@ -2,11 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { CASH_FLOWS, CLOSED_TRADES, OPEN_POSITIONS, TODAY } from '../data/portfolio'
 import { sampleFeeSchedule } from '../data/sampleFees'
 import { DEFAULT_FEES } from './fees'
-import {
-  MAX_JOINT_EVENTS, POSITIONS, POS_BY_ID, account, allocation, derivePosition, eventExposureOf, opposite, outcomeLabel, attribution, baseHoldings, entryBuckets, eventPnl, eventRelations, groupPnl, insights, isFeasible, jointOutcomes,
-  exposures, netPnlAt, outcomeRange, periodRange, periodStats, sourceRelations, withConstraints, scenarioMetrics, series, settlementRange, positionsFor, settlementRangeFor, simulate, tradesIn,
-  type Outcome, type PlatformFilter,
-} from './finance'
+import { MAX_JOINT_EVENTS, eventExposureOf, opposite, outcomeLabel, attribution, entryBuckets, eventPnl, groupPnl, insights, isFeasible, jointOutcomes, outcomeRange, withConstraints, scenarioMetrics, settlementRange, type Outcome, type PlatformFilter } from './finance'
+import { POSITIONS, POS_BY_ID, account, allocation, derivePosition, baseHoldings, eventRelations, exposures, netPnlAt, periodRange, periodStats, sourceRelations, series, positionsFor, settlementRangeFor, simulate, tradesIn } from './fixtureFinance'
 
 const close = (a: number | null | undefined, b: number | null | undefined, eps = 0.01) => { expect(a).toEqual(expect.any(Number)); expect(b).toEqual(expect.any(Number)); expect(Math.abs((a as number) - (b as number))).toBeLessThan(eps) }
 // Ranges are nullable (too many events); the sample is small enough that they always exist.

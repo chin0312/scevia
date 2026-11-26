@@ -7,10 +7,11 @@ import { Button, Callout, Chip, PlatformBadge, Seg, SideChip, Tabs, cx } from '.
 import { MARKET_CATALOG } from '../../data/markets'
 import { CATEGORIES, PLATFORM_NAME } from '../../data/labels'
 import type { Category, Platform } from '../../data/types'
-import { POSITIONS, fmtDate, holdingsOfInstrument, instrumentKey, instrumentOfPosition, type Adjustment, type Baseline, type InstrumentRef, type Position } from '../../lib/finance'
+import { fmtDate, instrumentKey, type Adjustment, type Baseline, type InstrumentRef, type Position, type Finance } from '../../lib/finance'
 import { qty } from '../../lib/format'
 import { instrumentFrom, type CatalogEvent, type LinkResolution } from '../../lib/markets'
 import { accountName } from '../../lib/useWorkspace'
+import { useFinance } from '../../lib/financeContext'
 
 type Source = 'Your holdings' | 'Search markets' | 'Paste link'
 /** One pick: an instrument, and the actual holding it refers to when picked from your holdings (account-specific). */
@@ -21,23 +22,24 @@ interface Pick { key: string; i: InstrumentRef; held: Position | null }
  *  instrument that exactly one account holds maps to that holding; when several accounts hold it, it is added as a
  *  new purchase (choose the account under "Your holdings" to change an existing one). Nothing is pre-filled for new
  *  instruments. */
-export function rowFor(i: InstrumentRef, baseline: Baseline, held?: Position | null): Adjustment {
-  const hs = held ? [held] : holdingsOfInstrument(i)
+export function rowFor(F: { holdingsOfInstrument: Finance['holdingsOfInstrument']; instrumentOfPosition: Finance['instrumentOfPosition'] }, i: InstrumentRef, baseline: Baseline, held?: Position | null): Adjustment {
+  const hs = held ? [held] : F.holdingsOfInstrument(i)
   const p = hs.length === 1 ? hs[0] : null
-  if (p && baseline === 'portfolio') return { id: p.id, to: p.shares, price: p.mark, instrument: instrumentOfPosition(p) }
+  if (p && baseline === 'portfolio') return { id: p.id, to: p.shares, price: p.mark, instrument: F.instrumentOfPosition(p) }
   return { id: p ? p.id : instrumentKey(i), to: null, price: null, instrument: i }
 }
 
 export function AddPositionModal({ baseline, present, onAdd, onClose }: { baseline: Baseline; present: Set<string>; onAdd: (a: Adjustment[]) => void; onClose: () => void }) {
+  const Fin = useFinance()
   const [tab, setTab] = useState<Source>(baseline === 'scratch' ? 'Search markets' : 'Your holdings')
   const [picked, setPicked] = useState<Pick[]>([])
-  const idOf = (p: Pick) => rowFor(p.i, baseline, p.held).id
+  const idOf = (p: Pick) => rowFor(Fin, p.i, baseline, p.held).id
   const inScenario = (p: Pick) => present.has(idOf(p))
   // The same scenario row can be reached from your holdings or from search: it is one selection either way.
   const same = (x: Pick, p: Pick) => x.key === p.key || idOf(x) === idOf(p)
   const isPicked = (p: Pick) => picked.some((x) => same(x, p))
   const toggle = (p: Pick) => setPicked((xs) => (xs.some((x) => same(x, p)) ? xs.filter((x) => !same(x, p)) : [...xs, p]))
-  const add = () => { onAdd(picked.filter((p) => !inScenario(p)).map((p) => rowFor(p.i, baseline, p.held))); onClose() }
+  const add = () => { onAdd(picked.filter((p) => !inScenario(p)).map((p) => rowFor(Fin, p.i, baseline, p.held))); onClose() }
   return (
     <Modal title="Add markets" sub="Pick one or more outcomes, then add them together. Hypothetical only: nothing is traded." onClose={onClose} width={720}
       footer={<div className="addpos-foot">
@@ -63,6 +65,7 @@ export function AddPositionModal({ baseline, present, onAdd, onClose }: { baseli
 interface PickProps { inScenario: (p: Pick) => boolean; isPicked: (p: Pick) => boolean; toggle: (p: Pick) => void }
 
 function Holdings({ baseline, inScenario, isPicked, toggle }: PickProps & { baseline: Baseline }) {
+  const { POSITIONS, instrumentOfPosition } = useFinance()
   const [q, setQ] = useState('')
   const list = POSITIONS.filter((p) => !q.trim() || p.market.toLowerCase().includes(q.trim().toLowerCase()))
   const picks = list.map((p): Pick => ({ key: `held:${p.id}`, i: instrumentOfPosition(p), held: p }))
@@ -171,6 +174,7 @@ function PasteLink({ inScenario, isPicked, toggle }: PickProps) {
 
 /** One event with its markets and selectable outcomes. Closed or resolved markets can't be added. */
 function EventCard({ ev, inScenario, isPicked, toggle }: PickProps & { ev: CatalogEvent }) {
+  const { holdingsOfInstrument } = useFinance()
   return (
     <div className="addpos-event">
       <div className="row"><PlatformBadge p={ev.provider} /><b>{ev.eventTitle}</b>{ev.markets.length > 1 && <small className="t3">{ev.markets.length} markets · pick each one you want</small>}</div>
