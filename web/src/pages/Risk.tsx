@@ -107,7 +107,7 @@ export default function Risk() {
   const openEvent = (id: string) => details.open({ kind: 'event', id, scope: 'all' })
   // Explicit hand-off of the holdings behind the rows shown; the Lab confirms the scenario and which of them to add.
   const stressIds = rows.flatMap((e) => e.positions.map((p) => p.id))
-  const stressTest = () => nav(handoffPath(stressIds, `Risk · outcome payoffs · ${filter.toLowerCase()} · all platforms`))
+  const stressTest = () => nav(handoffPath(stressIds, `Outcome payoffs in Risk (${filter.toLowerCase()})`))
   const na = 'Unavailable'
 
   return (
@@ -122,32 +122,32 @@ export default function Risk() {
       </SectionRail>
 
       <main>
-        <PageHead caption={`Risk · ${acct.openCount} positions across ${exps.length} events`} title="What you’re exposed to"
+        <PageHead caption={`${acct.openCount} positions across ${exps.length} events`} title="What you’re exposed to"
           actions={<><Seg label="Group by" options={['By event', 'By category', 'By platform'] as const} value={groupBy} onChange={setGroupBy} /><Button variant="primary" onClick={stressTest} disabled={stressIds.length === 0} title={`Choose a scenario and which of the ${stressIds.length} positions behind the payoff table to add`}><Icon name="flask" size={15} />Stress-test in Lab…</Button></>} />
 
-        <div className="asof" style={{ marginBottom: 'var(--space-3)' }}><span>Holdings and marks as of <b>{fmtDate(TODAY, { month: 'short', day: 'numeric', year: 'numeric' })}</b></span><span>Settlement ranges use reviewed relationships only; they aren’t probabilities or correlations</span><ReportingNote denominations={ACCOUNTS.map((a) => a.denomination)} /></div>
+        <div className="asof" style={{ marginBottom: 'var(--space-3)' }}><span>Holdings and marks as of <b>{fmtDate(TODAY, { month: 'short', day: 'numeric', year: 'numeric' })}</b></span><span>Settlement ranges use reviewed relationships only. They aren’t probabilities</span><ReportingNote denominations={ACCOUNTS.map((a) => a.denomination)} /></div>
         {exps.length === 0 && <Callout icon="info">No open positions in the selected sources, so there is no event exposure to analyse. This is an empty portfolio, not missing data.</Callout>}
         <p className="summary">You have <b>{fmt(committed)}</b> committed across {exps.length} events. {over.length > 0
           ? <><b>{over.length === 1 ? 'One event' : `${over.length} events`}</b> ({over.map((e) => e.event.short).join(', ')}) {over.length === 1 ? 'is' : 'are'} above your <button type="button" className="link" onClick={() => setEditLimit(limit)}>{limit}% guardrail</button>.</>
           : <>No event is above your <button type="button" className="link" onClick={() => setEditLimit(limit)}>{limit}% guardrail</button>.</>} If your three most exposed events all settled against you, you’d lose <b className="loss">{sfmt(-top3Loss)}</b> {acct.totalValue > 0 && <> ({pct((top3Loss / acct.totalValue) * 100, 0)} of portfolio value)</>}.{week.n > 1 && <> <b>{fmt(week.cost)}</b> resolves within one week ({fmtDate(week.from)}–{fmtDate(week.to)}).</>}</p>
 
         <div className="tiles">
-          <Tile label="Capital committed" info="Acquisition cost at risk: cost basis of open positions, fees included. Their current marked value is shown below; it moves with market prices." value={fmt(committed)} foot={`Marked value ${fmt(acct.positionsValue)}${acct.totalValue > 0 ? ` · cost is ${pct((committed / acct.totalValue) * 100, 0)} of portfolio value` : ''}`} />
-          <Tile label="Worst feasible outcome" info="Lowest settlement P&L of the whole portfolio across joint outcomes that are possible given confirmed relationships. Unclassified pairs can go either way. Not affected by the table filter below." value={portfolio ? sfmt(portfolio.min) : na} tone={portfolio ? 'loss' : undefined} foot={worstValue != null ? `You’d hold ${fmt(worstValue)} (cash + payouts) · ${sfmt(worstValue - acct.totalValue)} from current value` : 'Too many events to evaluate every combination exactly'} />
-          <Tile label="Largest single event" info="Capital committed to one event (the same outcome across platforms counts once) ÷ total committed." value={top ? pct(shareOf(top.cost)) : '—'} tone={top && shareOf(top.cost) > limit ? 'warn' : undefined} foot={top ? `${top.event.short} · ${shareOf(top.cost) > limit ? `over ${limit}% guardrail` : `within ${limit}%`}` : 'no open positions'} />
+          <Tile label="Capital committed" info="Acquisition cost at risk: cost basis of open positions, fees included. Their current value is shown below and moves with market prices." value={fmt(committed)} foot={`Worth ${fmt(acct.positionsValue)} at current prices`} />
+          <Tile label="Worst feasible outcome" info="Lowest settlement P&L of the whole portfolio across joint outcomes that are possible given confirmed relationships. Unclassified pairs can go either way. Not affected by the table filter below." value={portfolio ? sfmt(portfolio.min) : na} tone={portfolio ? 'loss' : undefined} foot={worstValue != null ? `${sfmt(worstValue - acct.totalValue)} from today’s value` : 'Too many events to check every combination'} />
+          <Tile label="Largest single event" info="Capital committed to one event (the same outcome across platforms counts once) ÷ total committed." value={top ? pct(shareOf(top.cost)) : 'None'} tone={top && shareOf(top.cost) > limit ? 'warn' : undefined} foot={top ? `${top.event.short}, ${shareOf(top.cost) > limit ? `above your ${limit}% limit` : `within your ${limit}% limit`}` : 'No open positions'} />
           <Tile label="Top-3 concentration" info="Share of committed capital in your three largest events." value={pct(shareOf(top3), 0)} foot={`${fmt(top3)} of committed`} />
-          <Tile label="Resolving ≤ 30 days" info="Capital committed to events that resolve within 30 days." value={fmt(soon.reduce((a, e) => a + e.cost, 0))} foot={soon.length ? `${soon.length} events · first ${fmtDate([...soon].sort((a, b) => a.days - b.days)[0].resolves)}` : 'none'} />
+          <Tile label="Resolving in 30 days" info="Capital committed to events that resolve within 30 days." value={fmt(soon.reduce((a, e) => a + e.cost, 0))} foot={soon.length ? `${soon.length} events, first on ${fmtDate([...soon].sort((a, b) => a.days - b.days)[0].resolves)}` : 'None'} />
         </div>
 
         <div className="grid g-21 anchor" id="exposure">
           <Card id="conc">
-            <CardHeader title={`${groupBy.replace('By ', '').replace(/^./, (c) => c.toUpperCase())} concentration`} sub="Capital committed · the same outcome on 2 platforms counts once · select a row for details"
+            <CardHeader title={`${groupBy.replace('By ', '').replace(/^./, (c) => c.toUpperCase())} concentration`} sub="Capital committed. The same outcome on two platforms counts once."
               right={<Legend items={[{ label: 'Within guardrail', color: 'var(--color-data-1)' }, { label: `Over ${groupLimit}%`, color: 'var(--color-warn-fg)' }]} />} />
             <div className="card-b">
               {groups.map((g) => {
                 const s = shareOf(g.cost)
                 const go = () => groupBy === 'By event' ? openEvent(g.key)
-                  : details.open({ kind: 'group', title: g.name, sub: `${fmt(g.cost)} committed · ${s.toFixed(1)}% of committed capital`, ids: g.ids })
+                  : details.open({ kind: 'group', title: g.name, sub: `${fmt(g.cost)} committed, ${s.toFixed(1)}% of the total`, ids: g.ids })
                 return (
                   <button type="button" key={g.key} className="conc conc-btn hoverable" aria-label={`${g.name}: ${s.toFixed(1)}% of committed capital, view details`} onClick={go}>
                     <span className="nm">{g.platforms.map((p) => <PlatformBadge key={p} p={p} />)}<span>{g.name}</span></span>
@@ -160,7 +160,7 @@ export default function Risk() {
             </div>
           </Card>
           <Card id="ladder">
-            <CardHeader title="Downside ladder" sub="Settlement loss if your N most exposed events all go against you · hover a step, select it for the event" />
+            <CardHeader title="Downside ladder" sub="Potential loss as more events settle against you" />
             <div className="card-b">
               <div ref={ladderRef}><svg viewBox={`0 0 ${LW} 220`} width="100%" style={{ overflow: 'visible' }} className="chart" role="group" aria-label={`Downside ladder: largest event ${sfmt(-(byLoss[0]?.maxLoss ?? 0))}, top three ${sfmt(-top3Loss)}, all events ${sfmt(-(ladder.at(-1) ?? 0))}`} onPointerLeave={() => setHotStep(null)}>
                 <g className="axis">{ladderTicks.map((t) => <g key={t}><line className="grid-l" x1={48} x2={LW - 10} y1={10 + (t / ladderMax) * 182} y2={10 + (t / ladderMax) * 182} strokeDasharray="2 4" /><text x={40} y={14 + (t / ladderMax) * 182} textAnchor="end">{t ? `−${kfmt(t)}` : '$0'}</text></g>)}
@@ -194,12 +194,12 @@ export default function Risk() {
         </div>
 
         <Card id="payoffs" flush>
-          <CardHeader pad title="Outcome payoffs" sub="P&L at settlement vs. cost basis (purchase fees included) · select a row for every contract behind the event" right={<Tabs label="Filter events" options={['All events', 'Next 30 days', 'Over guardrail'] as const} value={filter} onChange={setFilter} />} />
-          <div className="po-row h"><span>Event · your side</span><span>Resolves</span><span>Better outcome</span><span>Worse outcome</span><span className="r">Share</span></div>
+          <CardHeader pad title="Outcome payoffs" sub="P&L at settlement against cost basis, including purchase fees" right={<Tabs label="Filter events" options={['All events', 'Next 30 days', 'Over guardrail'] as const} value={filter} onChange={setFilter} />} />
+          <div className="po-row h"><span>Event and side</span><span>Resolves</span><span>Better outcome</span><span>Worse outcome</span><span className="r">Share</span></div>
           {rows.length === 0 && <div className="empty"><p>No events match “{filter}”. This filter only changes the table: the portfolio’s worst feasible outcome is still <b className="loss">{portfolio ? sfmt(portfolio.min) : na}</b>.</p><button type="button" className="link" onClick={() => setFilter('All events')}>Show all events</button></div>}
           {rows.map((e) => {
             const rel = relationOf(e.event.id)
-            const chip = rel === 'equivalent' ? { tone: 'accent' as const, text: `${e.positions.length} contracts · equivalent` } : rel ? { tone: REL_TEXT[rel].tone, text: REL_TEXT[rel].short } : null
+            const chip = rel === 'equivalent' ? { tone: 'accent' as const, text: `${e.positions.length} equivalent contracts` } : rel ? { tone: REL_TEXT[rel].tone, text: REL_TEXT[rel].short } : null
             return (
               <button type="button" key={e.event.id} className={cx('po-row', 'po-btn', 'hoverable', focus === e.event.id && 'sel')} style={focus === e.event.id ? { background: 'var(--color-accent-bg)' } : undefined}
                 onClick={() => openEvent(e.event.id)} aria-label={`${e.event.name}, ${e.positions.length} contract${e.positions.length > 1 ? 's' : ''}: view event exposure`}>
@@ -213,7 +213,7 @@ export default function Risk() {
               </button>
             )
           })}
-          {table && <div className="po-row t"><span>{filter === 'All events' ? 'Whole portfolio' : `${rows.length} event${rows.length > 1 ? 's' : ''} shown (subtotal)`} · feasible range</span><span /><span className="gain r">{sfmt(table.max)} <small className="t3">best case</small></span><span className="loss r">{sfmt(table.min)} <small className="t3">worst case</small></span><span className="r">{pct(rows.reduce((a, e) => a + shareOf(e.cost), 0), 0)}</span></div>}
+          {table && <div className="po-row t"><span>{filter === 'All events' ? 'Whole portfolio' : `Subtotal for ${rows.length} event${rows.length > 1 ? 's' : ''}`}</span><span /><span className="gain r">{sfmt(table.max)} <small className="t3">best case</small></span><span className="loss r">{sfmt(table.min)} <small className="t3">worst case</small></span><span className="r">{pct(rows.reduce((a, e) => a + shareOf(e.cost), 0), 0)}</span></div>}
           <div className="foot"><span>
             Best and worst cases search every joint outcome of the events {filter === 'All events' ? 'in the portfolio' : 'shown'} and skip impossible ones{table?.excluded ? ` (${table.excluded} combinations excluded by verified constraints)` : ''}.{filter !== 'All events' && ` Portfolio-wide: ${portfolio ? `${sfmt(portfolio.min)} to ${sfmt(portfolio.max)}` : na}.`}
  Related and unclassified events keep every combination possible and are never netted. This is settlement logic, not a statement about how likely outcomes are.
@@ -225,20 +225,20 @@ export default function Risk() {
             <CardHeader title="Event relationships" sub="Settlement logic from your sources: which joint outcomes are possible (not correlation)" />
             <div className="card-b">
               {exps.filter((e) => e.positions.length > 1).map((e) => (
-                <div className="rel" key={e.event.id}><div className="h"><button type="button" className="link" onClick={() => openEvent(e.event.id)}><b>{e.event.name}</b></button><Chip tone="yes">✓ Equivalent contract · confirmed</Chip></div>
-                  {e.positions.map((p) => <div className="leg" key={p.id}><PlatformBadge p={p.platform} />{p.market} · {p.side}</div>)}
+                <div className="rel" key={e.event.id}><div className="h"><button type="button" className="link" onClick={() => openEvent(e.event.id)}><b>{e.event.name}</b></button><Chip tone="yes">Confirmed equivalent</Chip></div>
+                  {e.positions.map((p) => <div className="leg" key={p.id}><PlatformBadge p={p.platform} />{p.market} {p.side}</div>)}
                   <p>Same source and date, combined as one event. If it resolves {e.worst.outcome}: <span className={e.worst.pnl < 0 ? 'loss' : 'gain'}>{sfmt(e.worst.pnl)}</span>.</p></div>
               ))}
               {relGroups.map((g) => (
                 <div className="rel" key={g.key}><div className="h"><b>{g.title}</b><Chip tone={REL_TEXT[g.cls].tone}>{REL_TEXT[g.cls].label}</Chip><small className="t3">{PROVENANCE_TEXT[g.provenance]}</small></div>
-                  <p>{g.events.map((e) => `${e.event.short} (${e.side === 'Mixed' ? 'YES + NO' : e.side})`).join(' · ')}. {g.cls === 'related' ? 'They may share drivers, but every combination of outcomes stays possible and nothing is netted.' : g.cls === 'mutex' ? 'Verified: they can’t both resolve YES, so that combination is excluded.' : g.cls === 'equivalent' ? 'Verified: they settle the same way.' : 'No constraint.'}{' '}
-                    <button type="button" className="link" onClick={() => nav(handoffPath(g.events.flatMap((e) => e.positions.map((p) => p.id)), `Risk · ${g.title} · all platforms`))} title="Choose a scenario and which of these holdings to add">Model them together in Scenario Lab…</button></p></div>
+                  <p>{g.events.map((e) => `${e.event.short} (${e.side === 'Mixed' ? 'YES and NO' : e.side})`).join(', ')}. {g.cls === 'related' ? 'They may share drivers, but every combination of outcomes stays possible and nothing is netted.' : g.cls === 'mutex' ? 'Verified: they can’t both resolve YES, so that combination is excluded.' : g.cls === 'equivalent' ? 'Verified: they settle the same way.' : 'No constraint.'}{' '}
+                    <button type="button" className="link" onClick={() => nav(handoffPath(g.events.flatMap((e) => e.positions.map((p) => p.id)), `${g.title} in Risk`))} title="Choose a scenario and which of these holdings to add">Model them together in Scenario Lab…</button></p></div>
               ))}
-              <p className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>Only verified constraints change which joint outcomes are possible; notes never do. Pairs without a recorded relationship keep every combination possible, which is not an assumption that they’re independent. To explore a hypothetical constraint, add it to a scenario in Scenario Lab.</p>
+              <p className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>Only verified constraints change which joint outcomes are possible. Notes never do. Pairs without a recorded relationship keep every combination possible, which is not an assumption that they’re independent. To explore a hypothetical constraint, add it to a scenario in Scenario Lab.</p>
             </div>
           </Card>
           <Card id="calendar">
-            <CardHeader title="Resolution calendar" sub="When capital is released or lost · circle area = capital at stake" right={<Seg label="Range" options={['90 days', '12 months'] as const} value={range} onChange={setRange} />} />
+            <CardHeader title="Resolution calendar" sub="When capital is released or lost. Larger circles mean more at stake." right={<Seg label="Range" options={['90 days', '12 months'] as const} value={range} onChange={setRange} />} />
             <div className="card-b">
               <Calendar exps={exps} range={range} hot={hotCal} setHot={setHotCal} onPick={openEvent} />
               <div className="tl-list cal-list" role="list" aria-label="Next resolutions">
@@ -293,7 +293,7 @@ function Calendar({ exps, range, hot, setHot, onPick }: { exps: EventExposure[];
         <line x1={x(0)} x2={x(0)} y1={14} y2={base} style={{ stroke: 'var(--color-accent-fg)' }} strokeWidth={1.5} />
         <text className="lbl" x={x(0) + 5} y={16} style={{ fill: 'var(--color-accent-fg)' }}>TODAY</text>
       </svg>
-      {h && <div className="tip" style={{ left: `${(x(h.days) / W) * 100}%`, top: 0, transform: 'translateX(-50%)' }}><div className="t3">{fmtDate(h.resolves)} · in {h.days} days</div><b>{h.event.name}</b><div>{kfmt(h.cost)} at stake</div></div>}
+      {h && <div className="tip" style={{ left: `${(x(h.days) / W) * 100}%`, top: 0, transform: 'translateX(-50%)' }}><div className="t3">{fmtDate(h.resolves)}, in {h.days} days</div><b>{h.event.name}</b><div>{kfmt(h.cost)} at stake</div></div>}
     </div>
   )
 }

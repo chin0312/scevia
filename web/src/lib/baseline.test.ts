@@ -27,7 +27,7 @@ describe('frozen scenario baseline', () => {
     // A different "latest" portfolio (another workspace, or new marks) doesn't take part in the evaluation.
     const moved = { ...FIXTURE.PORTFOLIO, openPositions: FIXTURE.OPEN_POSITIONS.map((p) => ({ ...p, mark: Math.min(0.99, p.mark + 0.1) })) }
     expect(baselineDiff(FF, createFinance(moved)).marksMoved).toBe(FIXTURE.POSITIONS.length)
-    setReportingFormat({ code: 'SGD', symbol: 'S$', rate: 1.34 })
+    setReportingFormat({ code: 'EUR', symbol: '€', rate: 0.92 })
     const after = evaluate({ ...s }, createFinance(readFrozen(JSON.parse(JSON.stringify(frozen)))!)).A.totalValue
     setReportingFormat({ code: 'USD', symbol: '$', rate: 1 })
     expect(after).toBeCloseTo(before!, 6)

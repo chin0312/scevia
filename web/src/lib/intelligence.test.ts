@@ -147,8 +147,8 @@ describe('Historical Replay', () => {
 
   it('trading close governs execution; a later resolution never extends the window', () => {
     expect(validateReplay(with_(pos({ entryDate: '2026-11-20' })), '2026-11-24').positions).toEqual({})
-    expect(validateReplay(with_(pos({ entryDate: '2026-11-21' })), '2026-11-24').positions.q).toBe('Trading closed on 2026-11-20; it resolved later, on 2026-11-23.')
-    expect(validateReplay(with_(pos({ exit: { kind: 'date', date: '2026-11-22', price: 0.9 } })), '2026-11-24').positions.q).toMatch(/^Trading closed on 2026-11-20.*Hold to settlement instead\.$/)
+    expect(validateReplay(with_(pos({ entryDate: '2026-11-21' })), '2026-11-24').positions.q).toBe('Trading closed on Nov 20, 2026. It resolved later, on Nov 23, 2026.')
+    expect(validateReplay(with_(pos({ exit: { kind: 'date', date: '2026-11-22', price: 0.9 } })), '2026-11-24').positions.q).toMatch(/^Trading closed on Nov 20, 2026.*Hold to settlement instead\.$/)
     // Holding to settlement is valid and settles at the verified resolution time.
     const res = runReplay(with_(pos({})), '2026-11-24')
     expect(res.lines[0]).toMatchObject({ end: 'settled', endDate: '2026-11-23', proceeds: 100 })
@@ -165,7 +165,7 @@ describe('Historical Replay', () => {
     expect(v.positions).toEqual({})
     expect(v.caveats.p2).toMatch(/Trading close isn’t recorded/)
     expect(v.caveats.p1).toBeUndefined()
-    expect(validateReplay({ ...base(), positions: [{ ...base().positions[1], entryDate: '2026-04-01' }] }, '2026-11-24').positions.p2).toMatch(/wasn’t listed until 2026-05-01/)
+    expect(validateReplay({ ...base(), positions: [{ ...base().positions[1], entryDate: '2026-04-01' }] }, '2026-11-24').positions.p2).toMatch(/wasn’t listed until May 1, 2026/)
   })
   it('restores older replays without turning a resolution date into a trading close', () => {
     const legacy = [{ key: 'old', name: 'Old', start: '2026-03-01', end: '2026-11-24', capital: { 'pm-main': 700 }, positions: [{ id: 'a', accountId: 'pm-main', market: { ...find('pm-mayor'), closesAt: '2026-11-05', expectedResolution: undefined }, outcome: 'YES', entryDate: '2026-03-02', entryPrice: 0.6, size: { mode: 'amount', value: 100 }, exit: { kind: 'settle' } }] }]
@@ -283,15 +283,40 @@ describe('reporting currency and exchange-rate references', () => {
     const { fixtureFx, convert } = await import('./fx')
     const fx = fixtureFx()
     expect(fx.live).toBe(false)
-    expect(fx.reference('USD', 'SGD')).toMatchObject({ rate: 1.34, kind: 'fiat', source: 'ecb_euro_reference', fixture: true })
-    expect(fx.reference('USD', 'MYR').freshness).toBe('stale')
+    expect(fx.reference('USD', 'EUR')).toMatchObject({ rate: 0.92, kind: 'fiat', source: 'ecb_euro_reference', fixture: true })
+    expect(fx.reference('USD', 'GBP')).toMatchObject({ rate: 0.79, kind: 'fiat' })
     expect(fx.reference('USDC', 'USD').kind).toBe('stablecoin')
     expect(fx.reference('USD', 'JPY')).toMatchObject({ rate: null, freshness: 'unsupported' })
     expect(convert(100, fx.reference('USD', 'JPY'))).toBeNull()
-    expect(convert(null, fx.reference('USD', 'SGD'))).toBeNull()
-    expect(convert(100, fx.reference('USDC', 'SGD'))).toBeCloseTo(134)
+    expect(convert(null, fx.reference('USD', 'EUR'))).toBeNull()
+    expect(convert(100, fx.reference('USDC', 'EUR'))).toBeCloseTo(92)
     // A confirmed zero needs no rate; an unknown amount stays unknown.
     expect(convert(0, fx.reference('USD', 'JPY'))).toBe(0)
+  })
+  it('reports stale and missing rates from an injected table instead of guessing', async () => {
+    const { fixtureFx, convert } = await import('./fx')
+    const fx = fixtureFx('2026-11-24', undefined, { EUR: { rate: 0.9, observedAt: '2026-10-01' } })
+    expect(fx.reference('USD', 'EUR')).toMatchObject({ rate: 0.9, freshness: 'stale' })
+    expect(fx.reference('USDC', 'EUR').freshness).toBe('stale')
+    expect(fx.reference('USD', 'GBP')).toMatchObject({ rate: null, freshness: 'unsupported' })
+    expect(convert(100, fx.reference('PUSD', 'GBP'))).toBeNull()
+  })
+  it('offers USD, EUR and GBP for reporting, keeps native assets distinct and shows PUSD as pUSD', async () => {
+    const { REPORTING_CURRENCIES, CURRENCIES, isReportingCurrency, currencyInfo, assetLabel } = await import('./fx')
+    expect(REPORTING_CURRENCIES).toEqual(['USD', 'EUR', 'GBP'])
+    expect(CURRENCIES.map((c) => c.code)).toEqual(['USD', 'EUR', 'GBP'])
+    expect(isReportingCurrency('SGD')).toBe(false)
+    expect(isReportingCurrency('MYR')).toBe(false)
+    expect(currencyInfo('SGD')?.symbol).toBeTruthy()
+    expect(['USD', 'USDC', 'PUSD'].map(assetLabel)).toEqual(['USD', 'USDC', 'pUSD'])
+  })
+  it('moves a saved SGD or MYR preference to USD and keeps EUR and GBP', async () => {
+    const { readSettings } = await import('./settings')
+    expect(readSettings({ reportingCurrency: 'SGD' }).reportingCurrency).toBe('USD')
+    expect(readSettings({ reportingCurrency: 'MYR' }).reportingCurrency).toBe('USD')
+    expect(readSettings({ reportingCurrency: 'EUR' }).reportingCurrency).toBe('EUR')
+    expect(readSettings({ reportingCurrency: 'GBP' }).reportingCurrency).toBe('GBP')
+    expect(readSettings({ reportingCurrency: 'JPY' }).reportingCurrency).toBe('USD')
   })
   it('uses each source only for the legs it supports, falls back qualified, and defaults to automatic', async () => {
     const { fixtureFx, readFxPreferences, AUTO_FX } = await import('./fx')
@@ -304,17 +329,21 @@ describe('reporting currency and exchange-rate references', () => {
   })
   it('never converts an authoritative reporting amount again', async () => {
     const { fmtReporting, setReportingFormat } = await import('./format')
-    setReportingFormat({ code: 'SGD', symbol: 'S$', rate: 1.34 })
+    setReportingFormat({ code: 'EUR', symbol: '€', rate: 0.92 })
+    expect(fmtReporting(1000, 'EUR')).toBe('€1,000.00')
+    expect(fmtReporting(null, 'EUR')).toBe('Unavailable')
+    // Formatting still covers currencies the backend may report, even though they aren't selectable here.
     expect(fmtReporting(1000, 'SGD')).toBe('S$1,000.00')
-    expect(fmtReporting(null, 'SGD')).toBe('Unavailable')
     setReportingFormat({ code: 'USD', symbol: '$', rate: 1 })
   })
   it('formats portfolio money in the reporting currency; native amounts keep their units', async () => {
     const { fmt, fmtNative, setReportingFormat, reportingCode } = await import('./format')
-    setReportingFormat({ code: 'SGD', symbol: 'S$', rate: 1.34 })
-    expect(fmt(1000)).toBe('S$1,340')
+    setReportingFormat({ code: 'GBP', symbol: '£', rate: 0.79 })
+    expect(fmt(1000)).toBe('£790')
     expect(fmtNative(1000, 'USDC')).toBe('1,000.00 USDC')
-    setReportingFormat({ code: 'MYR', symbol: 'RM', rate: null })
+    expect(fmtNative(1000, 'PUSD')).toBe('1,000.00 pUSD')
+    expect(reportingCode()).toBe('GBP')
+    setReportingFormat({ code: 'EUR', symbol: '€', rate: null })
     expect(fmt(1000)).toBe('$1,000 USD')
     expect(reportingCode()).toBe('USD')
     setReportingFormat({ code: 'USD', symbol: '$', rate: 1 })
@@ -362,7 +391,7 @@ describe('trading-window edge cases', () => {
       positions: [{ id: 'a', market: m, outcome: 'YES', bucketId: bucketId('pm', 'USDC'), entryDate: '2026-11-04', entryPrice: 0.9, size: { mode: 'shares', value: 10 }, exit: { kind: 'settle' } }] }
     const v = validateReplay(r, '2026-11-24')
     expect(v.positions).toEqual({})
-    expect(v.caveats.a).toMatch(/closing day \(2026-11-04\)/)
+    expect(v.caveats.a).toMatch(/closing day \(Nov 4, 2026\)/)
   })
 })
 
@@ -404,7 +433,7 @@ describe('replay funding follows each market’s own settlement asset', () => {
     const v = validateReplay(r, '2026-11-24')
     expect(v.positions.a).toBeUndefined()
     expect(v.positions.b).toBeUndefined()
-    expect(v.positions.c).toBe('This market settles in PUSD; its funding must be PUSD, not USDC.')
+    expect(v.positions.c).toBe('This market settles in pUSD, so it needs pUSD virtual funds, not USDC.')
     expect(v.positions.e).toMatch(/settlement asset isn’t established/)
     // A replay with USDC and PUSD keeps two native results.
     const res = runReplay({ ...r, positions: r.positions.slice(0, 2) }, '2026-11-24')

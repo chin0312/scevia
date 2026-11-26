@@ -94,4 +94,4 @@ export function maxDrawdown(points: ValuedPoint[]): { amount: number; from: stri
   return best
 }
 
-export const BASIS_LABEL: Record<PriceBasis, string> = { observed: 'Observed', carried: 'Carried forward', stale: 'Carried forward · stale', settled: 'Settled', unavailable: 'No price yet' }
+export const BASIS_LABEL: Record<PriceBasis, string> = { observed: 'Observed', carried: 'Carried forward', stale: 'Carried forward, out of date', settled: 'Settled', unavailable: 'No price yet' }

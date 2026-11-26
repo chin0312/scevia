@@ -33,14 +33,14 @@ export function AnalyzeView({ E, onEdit }: { E: Evaluation; onEdit: (id: string)
     <section className="an-summary anchor" id="a-summary" aria-label="Scenario summary">
       <div className="an-primary">
         <div className="an-big">
-          <div className="l">Value at reference marks <InfoTip text="Cash + positions × reference price (sample marks, not quotes). Trades at your assumed price move value between cash and contracts; only the gap to the mark and fees change it. Added capital is part of the start, never a gain." /></div>
+          <div className="l">Value at reference marks <InfoTip text="Cash plus positions at reference prices. These are sample prices, not quotes. Trades at your assumed price move value between cash and contracts. Only the gap to the mark and fees change it. Added capital is part of the start, never a gain." /></div>
           <div className="v">{A.totalValue == null ? 'Unavailable' : fmt(A.totalValue)}</div>
-          <div className="f">{B.totalValue == null ? 'start unavailable' : `start ${fmt(B.totalValue)}`} · <span className={cx(dv == null || Math.abs(dv) < 0.5 ? 't3' : dv > 0 ? 'gain' : 'loss')}>{dv == null ? 'change n/a' : Math.abs(dv) < 0.5 ? 'no change' : `${sfmt(dv)} from start`}</span></div>
+          <div className="f">{B.totalValue == null ? 'Start unavailable' : `Start ${fmt(B.totalValue)}`}, <span className={cx(dv == null || Math.abs(dv) < 0.5 ? 't3' : dv > 0 ? 'gain' : 'loss')}>{dv == null ? 'change unavailable' : Math.abs(dv) < 0.5 ? 'no change' : `${sfmt(dv)} from start`}</span></div>
         </div>
         <div className="an-big">
           <div className="l">Feasible settlement range <InfoTip text="Cash + $1 per winning share, in the worst and best joint outcome that verified relationships and this scenario’s constraints allow. Not a forecast: no outcome is weighted by likelihood." /></div>
           <div className="v">{A.worstValue == null || A.bestValue == null ? 'Unavailable' : <>{fmt(A.worstValue)} <span className="t3">to</span> {fmt(A.bestValue)}</>}</div>
-          <div className="f">{B.worstValue == null || B.bestValue == null ? 'start unavailable' : `start ${fmt(B.worstValue)} to ${fmt(B.bestValue)}`}{A.rangeIssue === 'too-many-events' ? ` · above ${MAX_JOINT_EVENTS} events` : A.rangeIssue === 'no-feasible-outcome' ? ' · constraints leave no possible outcome' : ''}</div>
+          <div className="f">{B.worstValue == null || B.bestValue == null ? 'Start unavailable' : `Start ${fmt(B.worstValue)} to ${fmt(B.bestValue)}`}{A.rangeIssue === 'too-many-events' ? `. More than ${MAX_JOINT_EVENTS} events` : A.rangeIssue === 'no-feasible-outcome' ? '. The constraints leave no possible outcome' : ''}</div>
         </div>
       </div>
       <div className="an-secondary">
@@ -76,7 +76,7 @@ export function AnalyzeView({ E, onEdit }: { E: Evaluation; onEdit: (id: string)
             <thead><tr><th scope="col" /><th scope="col" className="r">Worst feasible</th><th scope="col" className="r">At reference marks</th><th scope="col" className="r">Best feasible</th></tr></thead>
             <tbody>{([['Start', B], ['Scenario', A]] as const).map(([l, m]) => <tr key={l}><th scope="row">{l}</th><td className="r">{m.worstValue == null ? 'Unavailable' : fmt(m.worstValue)}</td><td className="r">{m.totalValue == null ? 'Unavailable' : fmt(m.totalValue)}</td><td className="r">{m.bestValue == null ? 'Unavailable' : fmt(m.bestValue)}</td></tr>)}</tbody>
           </table></div>
-          <div className="legend chart-note"><span><i style={{ background: 'var(--color-accent-solid)' }} />worst ○ — ● best</span><span><i className="ln" style={{ background: 'var(--color-text-primary)' }} />value at reference marks</span></div>
+          <div className="legend chart-note"><span><i style={{ background: 'var(--color-accent-solid)' }} />worst ○ to ● best</span><span><i className="ln" style={{ background: 'var(--color-text-primary)' }} />value at reference marks</span></div>
           <p className="t3 chart-note">The range isn’t a distribution: outcomes between the ends aren’t more likely, and the middle isn’t an expected value.{A.excluded ? ` ${A.excluded} impossible joint outcome${A.excluded > 1 ? 's' : ''} excluded by constraints.` : ''}</p>
         </div>
       </Card>
@@ -95,7 +95,7 @@ export function AnalyzeView({ E, onEdit }: { E: Evaluation; onEdit: (id: string)
         <div className="card-b"><OutcomeMatrix start={start} after={S} rels={E.rels} /></div>
       </Card>
       <Card id="payoff">
-        <CardHeader title="Payoff by event" sub="Settlement P&L per outcome for each event this scenario changes · ○ start → ● scenario" />
+        <CardHeader title="Payoff by event" sub="Settlement P&L by outcome for each event this scenario changes" />
         <div className="card-b"><Dumbbell eventIds={[...new Set(Object.keys(S.trades).map((id) => S.holdings[id]?.eventId).filter((x): x is string => !!x))]} start={start} after={S} /></div>
       </Card>
     </div>
@@ -178,7 +178,7 @@ function Exposure({ E, onFocus }: { E: Evaluation; onFocus: (e: EventProfile | n
   return (
     <Card id="a-exposure">
       <CardHeader title="Event exposure" sub={metric === 'Committed' ? 'Capital committed per event (cost basis incl. fees)' : 'Settlement P&L if the event resolves against these positions'}
-        info="Per event, every holding on it netted: YES and NO positions on the same event offset at settlement. Committed capital is cost; worst settlement is the outcome that pays least, vs. cost."
+        info="Per event, every holding on it netted: YES and NO positions on the same event offset at settlement. Committed capital is cost. Worst settlement is the outcome that pays least, compared with cost."
         right={<Seg label="Exposure metric" options={['Worst settlement', 'Committed'] as const} value={metric} onChange={setMetric} />} />
       <div className="card-b">
         {rows.length === 0 ? <div className="empty"><p>No open positions.</p></div> : (<>
@@ -249,7 +249,7 @@ function PositionDetail({ E, focus, onClear, onEdit }: { E: Evaluation; focus: {
           const h = r.a ?? r.b, val = r.a && r.a.shares > 0 ? (r.a.mark == null ? null : r.a.shares * r.a.mark) : 0, fs = S.feeStatusBy[r.id]
           return (
             <tr key={r.id}>
-              <td className="mkt"><span className="row"><PlatformBadge p={h.platform} size={18} /><span>{h.title}</span><SideChip side={h.side} />{h.isNew && <Chip tone="accent">New</Chip>}</span><small className="t3 cell-sub">{h.accountId ? accountName(h.accountId) : `${PLATFORM_NAME[h.platform]} · scenario cash`}</small></td>
+              <td className="mkt"><span className="row"><PlatformBadge p={h.platform} size={18} /><span>{h.title}</span><SideChip side={h.side} />{h.isNew && <Chip tone="accent">New</Chip>}</span><small className="t3 cell-sub">{h.accountId ? accountName(h.accountId) : `Virtual funds on ${PLATFORM_NAME[h.platform]}`}</small></td>
               <td className="r t2">{qty(r.b?.shares ?? 0)}</td><td className="r">{qty(r.a?.shares ?? 0)}</td>
               <td className="r">{r.t ? `${r.t.qty > 0 ? 'Buy' : 'Sell'} ${qty(Math.abs(r.t.qty))} @ ${fmtPrice(r.t.price)}` : <span className="t3">—</span>}</td>
               <td className="r">{r.t ? fmt(Math.abs(r.t.qty) * r.t.price, 2) : '—'}</td>

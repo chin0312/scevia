@@ -74,9 +74,9 @@ export function PositionRow({ a, start, after, sim, error, mode, selected, onSel
   const msg = localErr ?? (pending || missing ? null : error)
   const isNew = !start
   const derived = !complete ? null
-    : mode === 'shares' ? `≈ ${fmt(target! * a.price!)}${sim.startValue ? ` · ${pct((target! * a.price! / sim.startValue) * 100, 1)}` : ''}`
+    : mode === 'shares' ? `≈ ${fmt(target! * a.price!)}${sim.startValue ? `, ${pct((target! * a.price! / sim.startValue) * 100, 1)}` : ''}`
       : mode === 'amount' ? `= ${qty(target!)} shares${a.size?.by === 'amount' ? '' : ' (set in shares)'}`
-        : `= ${qty(target!)} shares · ${fmt(target! * a.price!)}`
+        : `= ${qty(target!)} shares, ${fmt(target! * a.price!)}`
   const shortfall = delta != null && delta > 0 && sim.shortfall[d.platform] > 0
   return (
     <div id={`row-${a.id}`} className={cx('brow', 'brow-sel', msg && 'has-error', !complete && !msg && 'incomplete', selected && 'is-sel')} role="row">
@@ -85,8 +85,8 @@ export function PositionRow({ a, start, after, sim, error, mode, selected, onSel
         <PlatformBadge p={d.platform} />
         <span className="brow-t"><b title={d.title}>{d.title}</b>
           <small className="t3"><SideChip side={d.side} />{isNew ? <Chip tone="accent">New</Chip> : <Chip>Held</Chip>}
-            {d.refPrice != null ? `ref ${fmtPrice(d.refPrice)}${d.sample ? ' (sample)' : ''}` : 'no reference price'}{d.resolves ? ` · resolves ${fmtDate(d.resolves)}` : ''}</small>
-          <small className="t3">{d.account ? `${PLATFORM_NAME[d.platform]} · ${accountName(d.account.id)}` : `Funded from ${PLATFORM_NAME[d.platform]} cash in this scenario`}</small></span>
+            {d.refPrice != null ? `Price ${fmtPrice(d.refPrice)}` : 'No price'}{d.resolves ? `, resolves ${fmtDate(d.resolves)}` : ''}</small>
+          <small className="t3">{d.account ? `${accountName(d.account.id)} on ${PLATFORM_NAME[d.platform]}` : `Virtual funds on ${PLATFORM_NAME[d.platform]}`}</small></span>
       </div>
       <div className="brow-n r" role="cell"><span className="brow-l">Current</span>{qty(from)}</div>
       <div className="brow-f" role="cell"><label className="brow-l" htmlFor={`q-${a.id}`}>Target ({SIZE_LABEL[mode]})</label>
@@ -144,9 +144,9 @@ export function PositionsCard({ E, adjs, baseline, mode, onMode, onAdjs, onAdd, 
   const refOf = (a: Adjustment) => describe(a, F).refPrice
   return (
     <Card id="positions" flush>
-      <CardHeader pad title={`Positions${adjs.length ? ` · ${adjs.length}` : ''}`} sub={baseline === 'scratch' ? 'Everything here is bought from zero with this scenario’s capital' : 'Only positions you change are listed; the rest of your portfolio stays as it is'}
+      <CardHeader pad title={`Positions${adjs.length ? ` (${adjs.length})` : ''}`} sub={baseline === 'scratch' ? 'Bought from zero with this scenario’s capital' : 'Only positions you change are listed. The rest of your portfolio stays as it is.'}
         right={<div className="row" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-          <span className="t3 seg-label">Size by <InfoTip text="Three ways to set the same position. Shares: the quantity. $ Amount: target position value at your assumed price (shares = amount ÷ price, rounded down to 0.01). % of start: share of this scenario’s starting value at reference marks, cash and added capital included. Switching only changes how targets are shown; typing sets the target in that unit." /></span>
+          <span className="t3 seg-label">Size by <InfoTip text="Three ways to set the same position. Shares: the quantity. $ Amount: target position value at your assumed price (shares = amount ÷ price, rounded down to 0.01). % of start: share of this scenario’s starting value at reference marks, cash and added capital included. Switching only changes how targets are shown. Typing sets the target in that unit." /></span>
           <Seg label="Size positions by" options={[SIZE_LABEL.shares, SIZE_LABEL.amount, SIZE_LABEL.weight]} value={SIZE_LABEL[mode]} onChange={(v) => onMode((Object.keys(SIZE_LABEL) as SizeMode[]).find((k) => SIZE_LABEL[k] === v)!)} />
           <Button size="sm" variant="primary" icon="plus" onClick={onAdd}>Add markets…</Button></div>} />
       {picked.length > 0 && (
@@ -156,7 +156,7 @@ export function PositionsCard({ E, adjs, baseline, mode, onMode, onAdjs, onAdd, 
           <Button size="sm" onClick={() => bulk(`Set ${picked.length} target${picked.length > 1 ? 's' : ''} to 0`, (a) => ({ ...a, to: 0, size: undefined }))} title="Simulates exiting (held) or not buying (new) these positions">Set target to 0</Button>
           {heldPicked.length > 0 && <Button size="sm" onClick={() => bulk('Reset to current size', (a) => (start.holdings[a.id] ? { ...a, to: start.holdings[a.id].shares, size: undefined } : a))} title="Keeps the rows, with targets equal to what you hold (no trade)">Reset to current size</Button>}
           <Button size="sm" variant="ghost" icon="trash" onClick={() => bulk(`Removed ${picked.length} position${picked.length > 1 ? 's' : ''} from the scenario`, () => null)}
-            title={baseline === 'portfolio' ? 'Removing a held position’s row restores your current holding; it is not an exit' : 'Removes these rows'}>Remove from scenario</Button>
+            title={baseline === 'portfolio' ? 'Removing a held position’s row restores your current holding. It isn’t an exit' : 'Removes these rows'}>Remove from scenario</Button>
           <button type="button" className="link" onClick={() => setSel(new Set())}>Clear selection</button>
           <small className="t3 bulk-note">{baseline === 'portfolio' && heldPicked.length ? 'Remove restores your current holding. To simulate selling everything, set the target to 0.' : ''}</small>
         </div>
@@ -166,7 +166,7 @@ export function PositionsCard({ E, adjs, baseline, mode, onMode, onAdjs, onAdd, 
       <div role="table" aria-label="Scenario positions" className="builder">
         {adjs.length > 0 && <div className="brow brow-sel brow-h" role="row">
           <span role="columnheader"><span className="sr-only">Select</span></span>
-          <span role="columnheader">Position</span><span role="columnheader" className="r">Current</span><span role="columnheader">Target · {SIZE_LABEL[mode]}</span><span role="columnheader">Trade</span>
+          <span role="columnheader">Position</span><span role="columnheader" className="r">Current</span><span role="columnheader">Target ({SIZE_LABEL[mode]})</span><span role="columnheader">Trade</span>
           <span role="columnheader">Assumed price</span><span role="columnheader" className="r">Notional</span><span role="columnheader" className="r">Est. fee</span><span role="columnheader"><span className="sr-only">Remove</span></span></div>}
         {adjs.map((a, k) => <PositionRow key={`${a.id}:${mode}`} a={a} start={start.holdings[a.id]} after={S.holdings[a.id]} sim={S} error={S.errors[a.id]} mode={mode}
           selected={sel.has(a.id)} onSelect={(on) => toggle(a.id, on)}

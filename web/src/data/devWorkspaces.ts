@@ -28,9 +28,9 @@ export const FIXTURE_B: PortfolioData = (() => {
 })()
 
 const SUM = (id: string, name: string, blurb: string): WorkspaceSummary => ({ id, name, mode: 'fixture', blurb, accountCount: 1 })
-const B = SUM('dev-b', 'Development fixture B', 'Development fixture · slow to load')
-const C = SUM('dev-fail', 'Development fixture C', 'Development fixture · fails to load')
-const D = SUM('dev-flaky', 'Development fixture D', 'Development fixture · refresh fails')
+const B = SUM('dev-b', 'Development fixture B', 'Development fixture, slow to load')
+const C = SUM('dev-fail', 'Development fixture C', 'Development fixture, fails to load')
+const D = SUM('dev-flaky', 'Development fixture D', 'Development fixture, refresh fails')
 const seedB = () => ({ accounts: [{ id: 'pm-b', venue: 'pm' as const, label: 'Fixture B wallet', kind: 'imported' as const, sources: ['csv' as const], openingDeclared: false, inAnalytics: true, lastObserved: null }], records: [], batches: [] })
 
 export function devWorkspaceService(): WorkspaceService {

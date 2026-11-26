@@ -7,7 +7,7 @@
    Switching or refreshing never changes a scenario, a record or an input. */
 import { useEffect, useState, type ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { FRESHNESS_LABEL } from '../lib/fx'
+import { FRESHNESS_LABEL, assetLabel } from '../lib/fx'
 import { useReporting } from '../lib/reporting'
 import { FIXTURE_ID, MODE_LABEL, type WorkspaceSnapshot } from '../data/workspace'
 import { PLATFORM_NAME } from '../data/labels'
@@ -44,7 +44,7 @@ export function PortfolioSelector() {
     <Menu label="Portfolio" width={360} trigger={(t) => (
       <button type="button" className="chip accent chip-btn" aria-label={`Portfolio: ${s.summary.name}`} {...t}>
         <span className="chip-long">{s.summary.name}</span><span className="chip-short">{shortName(s)}</span>
-        {s.valuationAsOf && <span className="chip-date"> · {fmtDate(s.valuationAsOf.slice(0, 10))}</span>}
+        {s.valuationAsOf && <span className="chip-date">as of {fmtDate(s.valuationAsOf.slice(0, 10))}</span>}
       </button>)}>
       {(close) => (<>
         <div className="menu-h">Portfolios</div>
@@ -69,9 +69,9 @@ export function PortfolioSelector() {
         <button type="button" role="menuitem" className="menu-i" disabled title="Creating portfolios needs a Scevia account"><Icon name="plus" />Create portfolio<small className="t3" style={{ marginLeft: 'auto' }}>needs an account</small></button>
         {s.accounts.length > 0 && <>
           <div className="menu-sep" />
-          <div className="menu-h">{s.summary.name} · accounts</div>
+          <div className="menu-h">Accounts in {s.summary.name}</div>
           {s.accounts.map((a) => (
-            <div className="menu-row acct-row" key={a.id}><span className="row"><PlatformBadge p={a.venue} size={18} /><span className="acct-name">{accountName(a.id, s.accounts)}</span></span><small className="t3">{PLATFORM_NAME[a.venue]} · {a.denomination}</small></div>
+            <div className="menu-row acct-row" key={a.id}><span className="row"><PlatformBadge p={a.venue} size={18} /><span className="acct-name">{accountName(a.id, s.accounts)}</span></span><small className="t3">{PLATFORM_NAME[a.venue]} {assetLabel(a.denomination)}</small></div>
           ))}
         </>}
         <div className="menu-sep" />
@@ -93,7 +93,7 @@ export function DataStatus() {
   const doRefresh = async () => {
     const r = await refresh()
     if (r?.failed) toast('Couldn’t refresh. Showing the last data, not newly checked.', 'info')
-    else if (r) toast(r.changed ? 'Updated with new data' : s.summary.mode === 'fixture' ? 'Checked · the sample portfolio has no new data' : 'Checked · no new data')
+    else if (r) toast(r.changed ? 'Updated with new data' : s.summary.mode === 'fixture' ? 'Checked. The sample portfolio has no new data' : 'Checked. No new data')
   }
   return (
     <Menu label="Data status" width={380} trigger={(t) => (
@@ -101,7 +101,7 @@ export function DataStatus() {
         <span className={cx('ds-dot', busy && 'spin')} aria-hidden="true" /><span className="ds-text">{failed ? 'Refresh failed' : STATE_LABEL[state]}</span>
       </button>)}>
       {(close) => (<>
-        <div className="menu-h"><span>Data status<small>{s.summary.name}{s.valuationAsOf ? ` · valued as of ${fmtDate(s.valuationAsOf.slice(0, 10), { month: 'short', day: 'numeric', year: 'numeric' })}` : ''}</small></span></div>
+        <div className="menu-h"><span>Data status<small>{s.summary.name}{s.valuationAsOf ? `, valued as of ${fmtDate(s.valuationAsOf.slice(0, 10), { month: 'short', day: 'numeric', year: 'numeric' })}` : ''}</small></span></div>
         {s.streams.length === 0 && <div className="menu-row t3">{s.status === 'loading' ? 'Loading…' : 'No data to report.'}</div>}
         <ul className="ds-list" aria-label="Data streams">
           {s.streams.map((x) => (
@@ -114,7 +114,7 @@ export function DataStatus() {
         </ul>
         {failed
           ? <div className="menu-row menu-note" role="status"><span className="stale">The last refresh failed {ago(lastRefresh?.at ?? null, now)}.</span> <span className="t3">Showing data from the previous successful check{s.checkedAt ? ` (${ago(s.checkedAt, now)})` : ''}; it isn’t newly synchronized.</span></div>
-          : <div className="menu-row t3 menu-note">{s.checkedAt ? `Last checked ${ago(s.checkedAt, now)}${lastRefresh ? (lastRefresh.changed ? ' · new data' : ' · no new data') : ''}.` : 'Not checked in this tab yet.'} Refreshing keeps your filters, selections and inputs.</div>}
+          : <div className="menu-row t3 menu-note">{s.checkedAt ? `Last checked ${ago(s.checkedAt, now)}${lastRefresh ? (lastRefresh.changed ? ', new data found' : ', no new data') : ''}.` : 'Not checked in this tab yet.'} Refreshing keeps your filters, selections and inputs.</div>}
         <div className="menu-sep" />
         <button type="button" role="menuitem" className="menu-i" disabled={busy || s.status === 'unavailable'} onClick={() => { void doRefresh() }}><Icon name="reset" />{busy ? 'Refreshing…' : failed ? 'Try again' : 'Refresh now'}</button>
         <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); nav('/portfolio/coverage') }}><Icon name="shield" />Data coverage<small className="t3" style={{ marginLeft: 'auto' }}>what figures are based on</small></button>
@@ -149,11 +149,11 @@ export function WorkspaceGate({ children }: { children: ReactNode }) {
   )
 }
 
-/** The selected portfolio's name and data basis, for page footers ("Sample portfolio · fictional data"). */
+/** The selected portfolio's name and data basis, for page footers ("Sample portfolio (fictional data)"). */
 export function WorkspaceLabel({ suffix }: { suffix?: string }) {
   const { snapshot: s } = useActiveWorkspace()
   const basis = s.summary.mode === 'fixture' ? 'fictional data' : s.summary.mode === 'demo' ? 'real markets, virtual capital' : 'your records'
-  return <>{s.summary.name} · {suffix ?? basis}</>
+  return <>{s.summary.name} ({suffix ?? basis})</>
 }
 
 /** How combined figures are converted: each native asset at its own reference into the reporting currency. Shown
@@ -163,7 +163,7 @@ export function ReportingNote({ denominations }: { denominations: string[] }) {
   const { currency, assetReference, reference } = useReporting()
   const assets = [...new Set(denominations)]
   if (currency === 'USD' && assets.every((d) => d === 'USD')) return null
-  const parts = assets.map((d) => { const r = assetReference(d); return r.rate == null ? `${d}: conversion unavailable` : d === currency ? null : `1 ${d} = ${r.rate.toFixed(4)} ${currency}` }).filter(Boolean)
+  const parts = assets.map((d) => { const r = assetReference(d); return r.rate == null ? `no ${assetLabel(d)} rate` : d === currency ? null : `1 ${assetLabel(d)} = ${r.rate.toFixed(4)} ${currency}` }).filter(Boolean)
   const title = [reference, ...assets.map((d) => assetReference(d))].map((r) => `${r.base}→${r.quote}: ${r.source}, ${r.methodology}${r.observedAt ? `, observed ${r.observedAt}` : ''} (${FRESHNESS_LABEL[r.freshness].toLowerCase()})`).join('\n')
-  return <span title={title}>In {currency}{parts.length ? ` · ${parts.join(' · ')}` : ''} · reference rates, not live</span>
+  return <span title={title}>Shown in {currency}{parts.length ? ` (${parts.join(', ')})` : ''}</span>
 }

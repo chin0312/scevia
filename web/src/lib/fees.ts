@@ -76,4 +76,4 @@ export function readFeeAssumption(v: unknown, legacyInclude?: unknown): FeeAssum
   return legacyInclude === false ? { mode: 'excluded' } : DEFAULT_FEES
 }
 
-export const feeLabel = (a: FeeAssumption) => a.mode === 'excluded' ? 'Excluded' : a.mode === 'custom' ? `Custom ${a.pct}% of notional` : `Provider estimate · ${a.role}`
+export const feeLabel = (a: FeeAssumption) => a.mode === 'excluded' ? 'Excluded' : a.mode === 'custom' ? `Custom ${a.pct}% of notional` : `Provider estimate, ${a.role}`

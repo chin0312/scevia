@@ -57,14 +57,14 @@ export type RowKey = keyof ScenarioMetrics | 'events'
 /** tone: 'up' = higher is better for the user, 'down' = lower is better, 'neutral' = a transfer or a count, never judged. */
 export interface Row { label: string; key: RowKey; tone: 'up' | 'down' | 'neutral'; info: string }
 export const ROWS: Row[] = [
-  { label: 'Cash', key: 'cash', tone: 'neutral', info: 'Buying spends cash; selling returns it. A transfer, not a gain. Negative means the scenario needs more cash than it has. Includes any added capital.' },
+  { label: 'Cash', key: 'cash', tone: 'neutral', info: 'Buying spends cash and selling returns it. A transfer, not a gain. Negative means the scenario needs more cash than it has. Includes any added capital.' },
   { label: 'Positions at mark', key: 'positionsValue', tone: 'neutral', info: 'Shares × reference price. Unavailable when a position has no reference price.' },
   { label: 'Value at mark', key: 'totalValue', tone: 'up', info: 'Cash + positions at mark. A trade at your assumed price changes this only by the gap between that price and the mark, plus fees.' },
   { label: 'Capital committed', key: 'committed', tone: 'neutral', info: 'Cost basis of open positions.' },
   { label: 'Events held', key: 'events', tone: 'neutral', info: 'Distinct events (settlement groups) with open positions.' },
   { label: 'Locked-in from sales', key: 'realized', tone: 'up', info: 'Realized P&L of hypothetical sales after their fees. Purchases never create realized P&L.' },
   { label: 'Est. fees on these trades', key: 'fees', tone: 'down', info: 'Fees on this scenario’s hypothetical trades under its fee setting (provider estimate, custom or excluded). Fees already paid on existing positions aren’t included.' },
-  { label: 'Funding shortfall', key: 'shortfall', tone: 'down', info: 'Cash the purchases need beyond each platform’s cash (and any added capital). Shown as if funded; not an input error.' },
+  { label: 'Funding shortfall', key: 'shortfall', tone: 'down', info: 'Cash the purchases need beyond each platform’s cash (and any added capital). Shown as if funded. This isn’t an input error.' },
   { label: 'Value if worst feasible outcome', key: 'worstValue', tone: 'up', info: 'Cash + $1 per winning share in the worst joint outcome that’s possible given this scenario’s relationships. Unavailable above the event limit.' },
   { label: 'Value if best feasible outcome', key: 'bestValue', tone: 'up', info: 'Cash + $1 per winning share in the best possible joint outcome.' },
   { label: 'Worst single-event outcome', key: 'largestEventLoss', tone: 'up', info: 'The largest settlement loss of any single event, shown as a signed outcome (−$5,000 → −$3,000 is an improvement). Holdings on opposite sides of the same event offset each other.' },

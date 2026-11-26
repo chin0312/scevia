@@ -16,7 +16,7 @@ import { ROWS, judge, rowValue, type Evaluation, type Row } from './model'
 type Basis = 'Absolute' | 'Change from start' | '% of own start'
 const MAX_PICK = 5
 
-const fundingText = (s: Scenario) => (['pm', 'ks'] as Platform[]).filter((p) => (s.funding[p] ?? 0) > 0).map((p) => `${PLATFORM_NAME[p]} ${fmt(s.funding[p]!)}`).join(' · ') || 'None'
+const fundingText = (s: Scenario) => (['pm', 'ks'] as Platform[]).filter((p) => (s.funding[p] ?? 0) > 0).map((p) => `${PLATFORM_NAME[p]} ${fmt(s.funding[p]!)}`).join(', ') || 'None'
 /** Everything that makes two scenarios' starting assumptions different (not just total capital). */
 export const assumptionKey = (s: Scenario, e: Evaluation) => JSON.stringify([s.baseline, s.funding.pm ?? 0, s.funding.ks ?? 0, e.fees, e.constraints.map((c) => `${c.a}|${c.b}|${c.cls}`).sort(), s.baseline === 'portfolio' ? s.baseAsOf ?? null : null])
 
@@ -51,7 +51,7 @@ export function CompareView({ scenarios, evals, actual, activeKey, onOpen }: { s
           return (
             <label key={s.key} className={cx('pick-chip', on && 'on')} title={!on && picked.length >= MAX_PICK ? `Up to ${MAX_PICK} at a time` : undefined}>
               <input type="checkbox" checked={on} disabled={!on && picked.length >= MAX_PICK} onChange={() => toggle(s.key)} aria-label={`Compare ${s.name}`} />
-              <i style={{ background: s.color }} />{s.name}<small>{s.baseline === 'scratch' ? 'from scratch' : 'from current'} · {s.adjs.length} pos.{Object.keys(e.sim.errors).length ? ' · incomplete' : ''}</small>
+              <i style={{ background: s.color }} />{s.name}<small>{s.adjs.length} position{s.adjs.length === 1 ? '' : 's'}{Object.keys(e.sim.errors).length ? ', incomplete' : ''}</small>
             </label>
           )
         })}
@@ -61,7 +61,7 @@ export function CompareView({ scenarios, evals, actual, activeKey, onOpen }: { s
 
     <div className="grid g-lab anchor" id="c-charts">
       <Card id="c-range">
-        <CardHeader title="Settlement range" sub={basis === 'Absolute' ? 'Worst → best feasible value; tick = value at reference marks' : basis === 'Change from start' ? 'Worst → best feasible value minus each scenario’s own starting value' : 'Worst → best feasible value as a change in % of each scenario’s own starting value'} />
+        <CardHeader title="Settlement range" sub={basis === 'Absolute' ? 'Range from worst to best value. The tick is the value at reference prices' : basis === 'Change from start' ? 'Worst → best feasible value minus each scenario’s own starting value' : 'Worst → best feasible value as a change in % of each scenario’s own starting value'} />
         <div className="card-b">
           <RangeRows label="Settlement range by scenario" rows={entries.map((x) => {
             const lo = norm(x.e.A.worstValue, x.e), hi = norm(x.e.A.bestValue, x.e), ref = norm(x.e.A.totalValue, x.e)
@@ -94,7 +94,7 @@ export function CompareView({ scenarios, evals, actual, activeKey, onOpen }: { s
     </div>
 
     <Card id="c-table" flush>
-      <CardHeader pad title="Detailed comparison" sub="Each value with its change from that scenario’s own starting point · select a column to open it" />
+      <CardHeader pad title="Detailed comparison" sub="Each value with its change from that scenario’s own start" />
       <div className="dt-wrap">
         <table className="dt cmp-table">
           <thead><tr>
@@ -103,7 +103,7 @@ export function CompareView({ scenarios, evals, actual, activeKey, onOpen }: { s
             {list.map((s) => (
               <th scope="col" key={s.key} className={cx('r', s.key === activeKey && 'is-active')}>
                 <button type="button" className="col-btn" aria-pressed={s.key === activeKey} onClick={() => onOpen(s.key)}><i style={{ background: s.color }} />{s.name}</button>
-                <small>{s.adjs.length} position{s.adjs.length === 1 ? '' : 's'} · {SC.statusLabel(s).toLowerCase()}{Object.keys(evals[s.key].sim.errors).length ? ' · incomplete' : ''}</small>
+                <small>{s.adjs.length} position{s.adjs.length === 1 ? '' : 's'}, {SC.statusLabel(s).toLowerCase()}{Object.keys(evals[s.key].sim.errors).length ? ', incomplete' : ''}</small>
               </th>
             ))}
           </tr></thead>

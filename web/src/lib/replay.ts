@@ -17,10 +17,11 @@
    - Valuation of open holdings uses recorded observations with LOCF (lib/history.ts); none → unavailable.
    - Reporting: native results first. A combined USD figure needs a frozen USD rate for each non-USD asset. */
 import type { Denomination, Platform } from '../data/types'
-import { addDays, daysBetween, floorQty, type Outcome } from './finance'
+import { addDays, daysBetween, floorQty, fmtDate, type Outcome } from './finance'
 import { estimateFee, readFeeAssumption, type FeeAssumption, type FeeSchedule } from './fees'
 import { maxDrawdown, priceAt, seriesQuality, valueSeries, type InstrumentHistory, type PriceObs, type ValuedPoint } from './history'
 import type { CatalogEvent, CatalogMarket } from './markets'
+import { assetLabel } from './fx'
 
 export interface ReplayMarket {
   provider: Platform; marketId: string; title: string; eventTitle: string; category: string
@@ -93,12 +94,13 @@ const isDate = (s: unknown): s is string => typeof s === 'string' && /^\d{4}-\d{
 /** A date-only trade happens during that UTC day: it is after a close only if the close was before that day began. */
 const tradesAfterClose = (date: string, close: string) => (/T/.test(close) ? t(date) >= t(close) : date > close.slice(0, 10))
 const day = (s: string) => s.slice(0, 10)
+const longDate = (s: string) => fmtDate(day(s), { month: 'short', day: 'numeric', year: 'numeric' })
 
 /** Whether a market could be traded on a date, given its recorded trading window. */
 export function tradingWindow(m: ReplayMarket, date: string): { ok: true; closeUnknown: boolean } | { ok: false; reason: string } {
-  if (m.listedAt && date < day(m.listedAt)) return { ok: false, reason: `This market wasn’t listed until ${day(m.listedAt)}.` }
-  if (m.closesAt && tradesAfterClose(date, m.closesAt)) return { ok: false, reason: `Trading closed on ${day(m.closesAt)}${m.resolution && day(m.resolution.at) > day(m.closesAt) ? `; it resolved later, on ${day(m.resolution.at)}` : ''}.` }
-  if (!m.closesAt && m.resolution && date >= day(m.resolution.at)) return { ok: false, reason: `This market resolved on ${day(m.resolution.at)}.` }
+  if (m.listedAt && date < day(m.listedAt)) return { ok: false, reason: `This market wasn’t listed until ${longDate(m.listedAt)}.` }
+  if (m.closesAt && tradesAfterClose(date, m.closesAt)) return { ok: false, reason: `Trading closed on ${longDate(m.closesAt)}${m.resolution && day(m.resolution.at) > day(m.closesAt) ? `. It resolved later, on ${longDate(m.resolution.at)}` : ''}.` }
+  if (!m.closesAt && m.resolution && date >= day(m.resolution.at)) return { ok: false, reason: `This market resolved on ${longDate(m.resolution.at)}.` }
   return { ok: true, closeUnknown: !m.closesAt }
 }
 
@@ -118,9 +120,9 @@ export function validateReplay(r: Replay, today: string): ReplayIssues {
     const entry = isDate(p.entryDate) ? tradingWindow(m, p.entryDate) : null
     const exit = p.exit.kind === 'date' && isDate(p.exit.date) ? tradingWindow(m, p.exit.date) : null
     const e = !m.denomination ? 'This market’s settlement asset isn’t established, so it can’t be funded or valued.'
-      : !b ? `Choose ${PLATFORM_LABEL[m.provider]} ${m.denomination} virtual funding for this position.`
+      : !b ? `Choose ${PLATFORM_LABEL[m.provider]} ${assetLabel(m.denomination)} virtual funds for this position.`
       : b.venue !== m.provider ? 'This market trades on another venue than this funding.'
-      : b.denomination !== m.denomination ? `This market settles in ${m.denomination}; its funding must be ${m.denomination}, not ${b.denomination}.`
+      : b.denomination !== m.denomination ? `This market settles in ${assetLabel(m.denomination)}, so it needs ${assetLabel(m.denomination)} virtual funds, not ${assetLabel(b.denomination)}.`
       : !isDate(p.entryDate) ? 'Enter an entry date.'
       : !period && (p.entryDate < r.start || p.entryDate > r.end) ? 'The entry date must fall inside the replay period.'
       : entry && !entry.ok ? entry.reason
@@ -136,8 +138,8 @@ export function validateReplay(r: Replay, today: string): ReplayIssues {
       : null
     const onCloseDay = !!m.closesAt && !/T/.test(m.closesAt) && (p.entryDate === day(m.closesAt) || (p.exit.kind === 'date' && p.exit.date === day(m.closesAt)))
     if (e) positions[p.id] = e
-    else if (!m.closesAt) caveats[p.id] = 'Trading close isn’t recorded for this market; the replay assumes it was still trading on these dates.'
-    else if (onCloseDay) caveats[p.id] = `This trade is on the closing day (${day(m.closesAt)}) and no close time is recorded; the replay assumes it happened before trading closed.`
+    else if (!m.closesAt) caveats[p.id] = 'Trading close isn’t recorded for this market. The replay assumes it was still trading on these dates.'
+    else if (onCloseDay) caveats[p.id] = `This trade is on the closing day (${longDate(m.closesAt)}) and no close time is recorded. The replay assumes it happened before trading closed.`
   }
   return { period, capital, positions, caveats }
 }

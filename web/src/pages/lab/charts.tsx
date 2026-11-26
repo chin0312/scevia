@@ -105,7 +105,7 @@ export function StackBars({ rows, selected, onSelect, label }: { rows: { key: st
                 const share = s.value / r.total!
                 return (
                   <button type="button" key={s.key} className={cx('sb-seg', 'hoverable', selected === s.key && 'hot')} style={{ width: `${share * 100}%`, background: s.color }}
-                    aria-pressed={selected === s.key} aria-label={`${s.label}: ${(share * 100).toFixed(1)}%`} title={`${s.label} · ${(share * 100).toFixed(1)}%`}
+                    aria-pressed={selected === s.key} aria-label={`${s.label}: ${(share * 100).toFixed(1)}%`} title={`${s.label}, ${(share * 100).toFixed(1)}%`}
                     onClick={() => onSelect?.(selected === s.key ? null : s.key)}>{share >= 0.09 ? <span>{(share * 100).toFixed(0)}%</span> : null}</button>
                 )
               })}

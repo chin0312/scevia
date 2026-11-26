@@ -45,7 +45,7 @@ export function NotificationCentre() {
       {(close) => (<>
         <div className="menu-h">Notifications <button type="button" role="menuitem" className="link" onClick={() => markRead(list.map((n) => n.id))} disabled={!unread}>{unread ? 'Mark all read' : 'All read'}</button></div>
         <div className="notif-filters">
-          <div className="seg" role="group" aria-label="Show">{(['All', 'Unread'] as const).map((o) => <button key={o} type="button" role="menuitemradio" aria-checked={show === o} className={cx(show === o && 'on')} onClick={() => setShow(o)}>{o}{o === 'Unread' && unread ? ` · ${unread}` : ''}</button>)}</div>
+          <div className="seg" role="group" aria-label="Show">{(['All', 'Unread'] as const).map((o) => <button key={o} type="button" role="menuitemradio" aria-checked={show === o} className={cx(show === o && 'on')} onClick={() => setShow(o)}>{o}{o === 'Unread' && unread ? ` (${unread})` : ''}</button>)}</div>
           {cats.length > 1 && <select className="select" aria-label="Notification category" value={cat} onChange={(e) => setCat(e.target.value as NotifCategory | 'all')}><option value="all">All categories</option>{cats.map((c) => <option key={c} value={c}>{CATEGORY_LABEL[c]}</option>)}</select>}
         </div>
         <div className="notif-list">
@@ -54,7 +54,7 @@ export function NotificationCentre() {
             <div key={n.id} className={cx('notif-item', !isRead(n) && 'unread')}>
               <button type="button" role="menuitem" className="menu-i notif" onClick={() => { close(); markRead([n.id]); if (n.detail) details.open(n.detail); else if (n.to) nav(n.to) }}>
                 <span className={`ic ${n.tone}`}><Icon name={n.icon} size={14} /></span>
-                <span><b>{n.title}</b><small>{n.body}</small><small className="notif-meta">{CATEGORY_LABEL[n.category]} · {ago(n.at)} · {n.origin === 'sample' ? origin : `${origin} records · this tab`}</small></span>
+                <span><b>{n.title}</b><small>{n.body}</small><small className="notif-meta">{CATEGORY_LABEL[n.category]}, {ago(n.at)}{n.origin === 'sample' ? '' : `, ${origin} records`}</small></span>
               </button>
               {!isRead(n) && <button type="button" role="menuitem" className="icon-btn notif-dot" aria-label={`Mark “${n.title}” as read`} title="Mark as read" onClick={() => markRead([n.id])}><span /></button>}
             </div>

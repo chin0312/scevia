@@ -47,7 +47,7 @@ function DetailDrawer({ d, depth, onBack, onClose, open }: { d: Detail; depth: n
   useEffect(() => { if (first.current) { first.current = false; return } focusTopLayer() }, [d])
   const title = d.kind === 'position' ? POS_BY_ID[d.id]?.market ?? 'Position'
     : d.kind === 'event' ? exposures('all').find((e) => e.event.id === d.id)?.event.name ?? 'Event' : d.title
-  const sub = d.kind === 'position' ? positionSub(POS_BY_ID[d.id]) : d.kind === 'event' ? 'Event exposure · settlement outcomes YES / NO' : d.sub
+  const sub = d.kind === 'position' ? positionSub(POS_BY_ID[d.id]) : d.kind === 'event' ? 'Event exposure if it settles YES or NO' : d.sub
   return (
     <Drawer title={title} sub={sub} onClose={onClose}>
       {depth > 1 && <button type="button" className="link back-link" onClick={onBack}><Icon name="arrowRight" size={12} className="flip" /> Back</button>}
@@ -59,7 +59,7 @@ function DetailDrawer({ d, depth, onBack, onClose, open }: { d: Detail; depth: n
   )
 }
 
-const positionSub = (p?: Position) => (p ? `${PLATFORM_NAME[p.platform]} · ${p.category} · resolves ${fmtDate(p.resolves, { month: 'short', day: 'numeric', year: 'numeric' })} (in ${p.days} days)` : '')
+const positionSub = (p?: Position) => (p ? `${PLATFORM_NAME[p.platform]}, ${p.category}. Resolves ${fmtDate(p.resolves, { month: 'short', day: 'numeric', year: 'numeric' })}, in ${p.days} days` : '')
 
 /** Explicit hand-off to Scenario Lab. The Lab asks which scenario to use before changing anything. */
 function useSimulate(close: () => void) {
@@ -80,7 +80,7 @@ function PositionBody({ p, scope, open, close }: { p?: Position; scope: Platform
   const sameEvent = exposures('all').find((e) => e.event.id === p.eventId)
   return (<>
     <div className="row"><PlatformBadge p={p.platform} /><SideChip side={p.side} /><Chip>{int(p.shares)} shares</Chip><span className="spacer" />
-      <span className={cx('stale', !src.stale && 't3')}>{src.label} · as of {fmtDate(src.asOf)}{src.stale && ' · stale'}</span></div>
+      <span className={cx('stale', !src.stale && 't3')}>{src.label}, as of {fmtDate(src.asOf)}{src.stale && ' (out of date)'}</span></div>
     <div className="cov-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
       <div><span className="t3">Cost basis</span><b>{fmt(p.cost, 2)}</b></div>
       <div><span className="t3">Value at mark {p.mark.toFixed(2)}</span><b>{fmt(p.value, 2)}</b></div>
@@ -91,7 +91,7 @@ function PositionBody({ p, scope, open, close }: { p?: Position; scope: Platform
       <div><span className="t3">{p.side} (for you)</span><b className={tone(p.ifWin)}>{sfmt(p.ifWin, 2)}</b><span className="t3">{int(p.shares)} × $1 − cost basis</span></div>
       <div><span className="t3">{p.side === 'YES' ? 'NO' : 'YES'} (against you)</span><b className={tone(p.ifLose)}>{sfmt(p.ifLose, 2)}</b><span className="t3">the cost basis is lost</span></div>
     </div>
-    <h5 className="caps">Fills · how the average cost is calculated</h5>
+    <h5 className="caps">Fills and average cost</h5>
     <table className="dt">
       <thead><tr><th scope="col">Date</th><th scope="col">Action</th><th scope="col" className="r">Shares</th><th scope="col" className="r">Price</th><th scope="col" className="r">Fee</th></tr></thead>
       <tbody>{p.fills.map((f) => (
@@ -104,7 +104,7 @@ function PositionBody({ p, scope, open, close }: { p?: Position; scope: Platform
     {sameEvent && sameEvent.positions.length > 1 && <Callout icon="link">This contract is one of {sameEvent.positions.length} positions on <b>{sameEvent.event.name}</b>.</Callout>}
     <div className="drawer-actions">
       <Button icon="shield" onClick={() => open({ kind: 'event', id: p.eventId, scope })}>View event exposure</Button>
-      <Button variant="primary" icon="flask" onClick={() => sim.go([p.id], `${p.market} · ${PLATFORM_NAME[p.platform]}`)}>{sim.label}</Button>
+      <Button variant="primary" icon="flask" onClick={() => sim.go([p.id], `${p.market} on ${PLATFORM_NAME[p.platform]}`)}>{sim.label}</Button>
     </div>
   </>)
 }
@@ -130,8 +130,8 @@ function EventBody({ id, scope, open, close }: { id: string; scope: PlatformFilt
   const committed = scoped.reduce((a, x) => a + x.cost, 0)
   const related = eventRelations(id, rels)
   return (<>
-    <div className="row" style={{ flexWrap: 'wrap' }}><Chip>Resolves {fmtDate(full.resolves, { month: 'short', day: 'numeric', year: 'numeric' })} · in {full.days} days</Chip>
-      {full.positions.length > 1 && <Chip tone="accent">{full.positions.length} contracts · treated as one event</Chip>}
+    <div className="row" style={{ flexWrap: 'wrap' }}><Chip>Resolves {fmtDate(full.resolves, { month: 'short', day: 'numeric', year: 'numeric' })} , in {full.days} days</Chip>
+      {full.positions.length > 1 && <Chip tone="accent">{full.positions.length} contracts, one event</Chip>}
       <span className="spacer" />
       {canWiden && <Seg label="Scope" options={[SCOPE_LABEL[scope], SCOPE_LABEL.all]} value={SCOPE_LABEL[view]} onChange={(v) => setView(v === SCOPE_LABEL.all ? 'all' : scope)} />}
     </div>
@@ -142,14 +142,14 @@ function EventBody({ id, scope, open, close }: { id: string; scope: PlatformFilt
     <h5 className="caps">Relationships</h5>
     {related.length === 0 && <p className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>No relationship recorded with other events: every combination with them is treated as possible (that’s not an assumption that they’re independent).</p>}
     {related.map((r) => (
-      <div className="list-row" key={r.other.id}><span>{r.other.name}{r.note && <small className="t3"> · {r.note}</small>}</span><span className="r row"><Chip tone={REL_TEXT[r.cls].tone}>{REL_TEXT[r.cls].label}</Chip><small className="t3">{PROVENANCE_TEXT[r.provenance]}</small></span></div>
+      <div className="list-row" key={r.other.id}><span>{r.other.name}{r.note && <small className="t3"> ({r.note})</small>}</span><span className="r row"><Chip tone={REL_TEXT[r.cls].tone}>{REL_TEXT[r.cls].label}</Chip><small className="t3">{PROVENANCE_TEXT[r.provenance]}</small></span></div>
     ))}
     <h5 className="caps">Data <button type="button" className="link" style={{ textTransform: 'none', letterSpacing: 0, marginLeft: 'var(--space-2)' }} onClick={() => { close(); connect('coverage') }}>Data coverage →</button></h5>
-    {(e?.platforms ?? []).map((pl) => { const src = sourceOf(pl), c = coverage(pl); return <div className="cov" key={pl}><PlatformBadge p={pl} /><span>{c.fills} fills · {c.settlements} settlements</span><span className={src.stale ? 'stale' : 't3'}>as of {fmtDate(src.asOf)}{src.stale ? ' · stale' : ''}</span></div> })}
+    {(e?.platforms ?? []).map((pl) => { const src = sourceOf(pl), c = coverage(pl); return <div className="cov" key={pl}><PlatformBadge p={pl} /><span>{c.fills} fills, {c.settlements} settlements</span><span className={src.stale ? 'stale' : 't3'}>as of {fmtDate(src.asOf)}{src.stale ? ' (out of date)' : ''}</span></div> })}
     <div className="drawer-actions">
       {!pathname.startsWith('/risk') && <Button icon="shield" onClick={() => { close(); nav(`/risk?event=${id}#payoffs`) }}>Analyze in Risk</Button>}
       {e && <Button variant="primary" icon="flask" title={`Choose a scenario for these ${e.positions.length} position${e.positions.length > 1 ? 's' : ''}`}
-        onClick={() => sim.go(e.positions.map((p) => p.id), `${full.event.name} · ${SCOPE_LABEL[view]}`)}>{sim.label}{e.positions.length > 1 ? ` (${e.positions.length})` : ''}</Button>}
+        onClick={() => sim.go(e.positions.map((p) => p.id), `${full.event.name} (${SCOPE_LABEL[view]})`)}>{sim.label}{e.positions.length > 1 ? ` (${e.positions.length})` : ''}</Button>}
     </div>
   </>)
 }
@@ -159,7 +159,7 @@ function EventFigures({ e, committed, scopeLabel, open }: { e: EventExposure; co
   const value = e.positions.reduce((a, p) => a + p.value, 0)
   return (<>
     <div className="cov-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
-      <div><span className="t3">Capital committed</span><b>{fmt(e.cost)}</b><span className="t3">{pct((e.cost / committed) * 100)} of committed · {scopeLabel}</span></div>
+      <div><span className="t3">Capital committed</span><b>{fmt(e.cost)}</b><span className="t3">{pct((e.cost / committed) * 100)} of committed, {scopeLabel}</span></div>
       <div><span className="t3">Value at mark</span><b>{fmt(value)}</b></div>
       <div><span className="t3">Unrealized</span><b className={tone(value - e.cost)}>{sfmt(value - e.cost)}</b></div>
     </div>
@@ -167,7 +167,7 @@ function EventFigures({ e, committed, scopeLabel, open }: { e: EventExposure; co
     <div className="cov-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
       {(['YES', 'NO'] as const).map((o) => <div key={o}><span className="t3">{outcomeLabel(e, o)}</span><b className={tone(e.pnl[o])}>{sfmt(e.pnl[o])}</b></div>)}
     </div>
-    {e.side === 'Mixed' && <Callout tone="warn">You hold both sides of this event. Payoffs use each position’s own side, so opposing holdings offset; capital committed is still the gross amount paid.</Callout>}
+    {e.side === 'Mixed' && <Callout tone="warn">You hold both sides of this event. Payoffs use each position’s own side, so opposing holdings offset. Capital committed is still the gross amount paid.</Callout>}
     <h5 className="caps">Positions on this event</h5>
     <PosList ps={e.positions} open={open} right={(p) => <><b>{fmt(p.value)}</b><small className="t3">cost {fmt(p.cost)}</small></>} />
   </>)
@@ -195,7 +195,7 @@ function PosList({ ps, open, right }: { ps: Position[]; open: (d: Detail) => voi
       {ps.map((p) => (
         <button type="button" key={p.id} className="list-btn pos-li" aria-label={`${p.market}: open details`} onClick={() => open({ kind: 'position', id: p.id })}>
           <PlatformBadge p={p.platform} />
-          <span className="pos-li-m"><b>{p.market}</b><small className="t3"><SideChip side={p.side} /> {int(p.shares)} @ {p.avg.toFixed(2)} → {p.mark.toFixed(2)} · {PLATFORM_NAME[p.platform]}</small></span>
+          <span className="pos-li-m"><b>{p.market}</b><small className="t3"><SideChip side={p.side} /> {int(p.shares)} @ {p.avg.toFixed(2)} → {p.mark.toFixed(2)} on {PLATFORM_NAME[p.platform]}</small></span>
           <span className="pos-li-r">{right(p)}</span>
         </button>
       ))}
@@ -208,10 +208,10 @@ function TradesBody({ trades }: { trades: ClosedTrade[] }) {
   return (<>
     {trades.map((r) => (
       <div className="list-row" key={r.id}><PlatformBadge p={r.platform} />
-        <div><b style={{ fontWeight: 'var(--font-weight-medium)' }}>{r.market}</b><div className="t3" style={{ fontSize: 'var(--font-size-xs)' }}><SideChip side={r.side} /> {int(r.shares)} @ {r.entry.toFixed(2)} → {r.exit.toFixed(2)} · {r.outcome} · {fmtDate(r.closed, { month: 'short', day: 'numeric', year: 'numeric' })}{r.fees ? ` · fees ${fmt(r.fees, 2)}${r.feeKnown ? '' : ' est.'}` : ''}</div></div>
+        <div><b style={{ fontWeight: 'var(--font-weight-medium)' }}>{r.market}</b><div className="t3" style={{ fontSize: 'var(--font-size-xs)' }}><SideChip side={r.side} /> {int(r.shares)} @ {r.entry.toFixed(2)} → {r.exit.toFixed(2)}. {r.outcome} {fmtDate(r.closed, { month: 'short', day: 'numeric', year: 'numeric' })}{r.fees ? `, fees ${fmt(r.fees, 2)}${r.feeKnown ? '' : ' (estimated)'}` : ''}</div></div>
         <span className={cx('r', tradeNet(r) >= 0 ? 'gain' : 'loss')}>{sfmt(tradeNet(r), 2)}</span>
       </div>
     ))}
-    <p className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>{trades.length} trade{trades.length > 1 ? 's' : ''} · total {sfmt(trades.reduce((a, t) => a + tradeNet(t), 0), 2)} after fees.</p>
+    <p className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>{trades.length} trade{trades.length > 1 ? 's' : ''}, total {sfmt(trades.reduce((a, t) => a + tradeNet(t), 0), 2)} after fees.</p>
   </>)
 }

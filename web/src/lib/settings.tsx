@@ -64,6 +64,8 @@ export function readSettings(raw: unknown): Settings {
   const D = DEFAULT_SETTINGS, DA = D.alerts
   return {
     defaultScope: o.defaultScope === 'pm' || o.defaultScope === 'ks' ? o.defaultScope : 'all',
+    // Earlier prototypes offered SGD and MYR; any value that isn't selectable now returns to USD (a display preference
+    // only; no stored amount or saved result changes).
     reportingCurrency: isReportingCurrency(o.reportingCurrency) ? o.reportingCurrency : 'USD',
     fx: readFxPreferences(o.fx),
     autoRefresh: o.autoRefresh === 0 || o.autoRefresh === 5 || o.autoRefresh === 60 ? o.autoRefresh : D.autoRefresh,

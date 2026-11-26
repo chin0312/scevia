@@ -95,7 +95,7 @@ export const SAMPLE_FILES: SampleFile[] = [
     ],
   },
   {
-    name: 'wallet-c-export.csv', about: 'Another wallet’s history. Import it as its own account; nothing in it is matched to other accounts.',
+    name: 'wallet-c-export.csv', about: 'Another wallet’s history. Import it as its own account. Nothing in it is matched to other accounts.',
     rows: [
       { time: '2026-06-15T10:00:00Z', type: 'deposit', instrument: null, marketId: null, side: null, quantity: null, price: null, amount: 1000, fee: 0 },
       { time: '2026-06-16T11:20:00Z', type: 'buy', instrument: 'Solana above $500 on Dec 31', marketId: 'pm-sol-500', side: 'YES', quantity: 2000, price: 0.1, amount: null, fee: 0 },

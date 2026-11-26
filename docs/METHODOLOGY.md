@@ -322,3 +322,5 @@ Each scenario is measured against **its own starting point**: the baseline plus 
 ## Reporting currency
 
 Portfolio money is held in the USD reporting basis and shown in the selected reporting currency at the latest eligible reference (`lib/fx.ts`, `lib/format.ts`). Native balances, prices, quantities and payouts keep their units. Combined amounts across native assets convert each asset at its own reference; a missing reference makes the converted value unavailable (shown in USD with the code), never zero or parity. Historical performance needs the reference for each valuation date (backend); the development fixture's references are constant and labelled, so its historical charts are a constant-rate view. Changing the currency never re-evaluates or rewrites a saved scenario or replay.
+
+Selectable reporting currencies are USD, EUR and GBP. Conversion sources are selected automatically per leg (ECB reference rates for fiat, Kraken for USDC, CoinGecko for pUSD). A rate older than the staleness threshold is marked out of date, and a missing rate makes the converted figure unavailable. Native assets (USD, USDC, pUSD) are never treated as each other.

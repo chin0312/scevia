@@ -19,13 +19,13 @@ async function buildReplay(p) {
   await dlg.getByRole('button', { name: 'Select Incumbent wins Springfield mayoral election YES' }).click()
   await dlg.getByRole('button', { name: 'Select Fed cuts rates at Jan 2027 FOMC YES' }).click()
   await dlg.getByRole('button', { name: 'Add 2 positions' }).click()
-  await p.getByLabel('Starting capital, Polymarket · USDC').fill('1000')
-  await p.getByLabel('Starting capital, Kalshi · USD').fill('100')
+  await p.getByLabel('Starting capital, Polymarket USDC').fill('1000')
+  await p.getByLabel('Starting capital, Kalshi USD').fill('100')
   const mayor = p.getByRole('group', { name: /^Position \d: Incumbent wins/ })
-  await mayor.getByLabel('Execution price').fill('0.6'); await mayor.getByLabel('Amount').fill('300')
+  await mayor.getByLabel('Entry price').fill('0.6'); await mayor.getByLabel('Amount').fill('300')
   const fed = p.getByRole('group', { name: /^Position 2: Fed cuts rates/ })
   await fed.getByRole('radiogroup', { name: /Outcome for/ }).getByRole('radio', { name: 'NO' }).click()
-  await fed.getByLabel('Entry date').fill('2026-04-01'); await fed.getByLabel('Execution price').fill('0.5'); await fed.getByLabel('Amount').fill('200')
+  await fed.getByLabel('Entry date').fill('2026-04-01'); await fed.getByLabel('Entry price').fill('0.5'); await fed.getByLabel('Amount').fill('200')
 }
 
 for (const [w, h] of [[375, 812], [768, 1024], [1440, 900]]) await at(w, h, async (p) => {
@@ -54,7 +54,7 @@ await at(1440, 900, async (p) => {
   await p.getByRole('button', { name: /^Add \d+ USD$/ }).first().click(); await shot(p, 'replay-analyze', true)
   await p.getByRole('button', { name: 'Duplicate' }).click()
   await p.getByRole('tablist', { name: 'Replay views' }).getByRole('tab', { name: /^Build/ }).click()
-  await p.getByLabel('Starting capital, Polymarket · USDC').fill('2000')
+  await p.getByLabel('Starting capital, Polymarket USDC').fill('2000')
   await p.getByRole('tablist', { name: 'Replay views' }).getByRole('tab', { name: /^Compare/ }).click(); await shot(p, 'replay-compare', true)
 })
 // Workspace isolation (development-only service): another portfolio's figures, a failed refresh, the Demo in Scenario Lab.
@@ -73,9 +73,9 @@ await at(1440, 900, async (p) => {
 // Reporting currency, discovery, independent Scenario Lab collection.
 await at(1440, 900, async (p) => {
   await p.goto(base + '/overview'); await p.evaluate(() => { sessionStorage.clear(); sessionStorage.setItem('scevia-dev-workspaces', '1') }); await p.goto(base + '/overview')
-  await p.getByRole('button', { name: 'Settings' }).click(); await p.getByLabel('Reporting currency').selectOption('SGD'); await shot(p, 'settings-reporting-currency')
-  await p.getByRole('dialog', { name: 'Settings' }).getByText('Reference sources (advanced)').click(); await p.getByLabel('Stablecoin reference source').selectOption('kraken_usdc_usd_ohlc'); await shot(p, 'settings-fx-sources')
-  await p.keyboard.press('Escape'); await p.locator('.hero-fig').waitFor(); await shot(p, 'overview-sgd')
+  await p.getByRole('button', { name: 'Settings' }).click(); await p.getByLabel('Reporting currency').selectOption('EUR'); await shot(p, 'settings-reporting-currency')
+  await p.getByRole('dialog', { name: 'Settings' }).getByText('Rates in use').click(); await shot(p, 'settings-fx-rates-in-use')
+  await p.keyboard.press('Escape'); await p.locator('.hero-fig').waitFor(); await shot(p, 'overview-eur')
   await p.goto(base + '/scenario-lab/replay?new=1'); await p.getByRole('button', { name: 'Add markets…' }).first().click()
   const rd = p.getByRole('dialog', { name: 'Add markets' }); await rd.getByLabel('Search markets').fill('Brent')
   await rd.getByRole('button', { name: 'Select Brent above $90 on Mar 31 NO' }).click(); await rd.getByLabel('Search markets').fill('Copper'); await rd.getByRole('group', { name: 'Copper above $5 on Dec 31' }).waitFor(); await shot(p, 'replay-picker-denominations')
@@ -87,7 +87,7 @@ await at(1440, 900, async (p) => {
   await dlg.getByRole('tab', { name: 'Paste link' }).click(); await dlg.getByLabel('Market link').fill('https://kalshi.com/markets/kxscalar-27'); await dlg.getByRole('button', { name: 'Find market' }).click()
   await dlg.getByText(/market type isn’t supported/).waitFor(); await shot(p, 'discovery-unsupported'); await p.keyboard.press('Escape')
   await p.getByRole('button', { name: /^Portfolio:/ }).click(); await p.getByRole('menuitemradio', { name: /Development fixture B/ }).click()
-  await p.goto(base + '/scenario-lab'); await p.getByText(/frozen/).first().waitFor(); await shot(p, 'scenario-frozen-other-portfolio')
+  await p.goto(base + '/scenario-lab'); await p.getByText(/isn’t selected now/).first().waitFor(); await shot(p, 'scenario-frozen-other-portfolio')
 })
 await browser.close()
 console.log('done')

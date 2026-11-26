@@ -32,7 +32,6 @@ import { AssumptionsBar, AssumptionsDrawer, StartSetup } from './lab/Setup'
 import { COLORS, EXAMPLES, describe, evaluate, evaluateActual, type Evaluation, type SizeMode } from './lab/model'
 import { PriceCheckModal } from './lab/PriceCheck'
 import { useFinance, useFinanceCtx } from '../lib/financeContext'
-import { WorkspaceLabel } from '../components/Workspace'
 
 type View = 'Build' | 'Analyze' | 'Compare'
 const VIEWS = ['Build', 'Analyze', 'Compare'] as const
@@ -151,7 +150,7 @@ export default function ScenarioLab() {
     if (!claimHandoff(h.req)) return
     const ids = [...new Set([...h.ids.filter((id) => POS_BY_ID[id]), ...POSITIONS.filter((p) => h.events.includes(p.eventId)).map((p) => p.id)])]
     if (!ids.length) { toast('Those holdings aren’t in your portfolio', 'info'); return }
-    setPending({ ids, from: h.from ?? (h.events.length ? 'Event link · all platforms' : null) })
+    setPending({ ids, from: h.from ?? (h.events.length ? 'Event link, all platforms' : null) })
   }, [params, setParams, toast])
   /** The destination's starting portfolio decides how incoming holdings start: at their current size (no trade) in a
    *  current-portfolio scenario; from zero with no quantity in an empty-portfolio scenario, unless the user chose to
@@ -234,8 +233,8 @@ export default function ScenarioLab() {
   /** Explicit rebase: replace the frozen starting portfolio with the latest one (or copy into a new scenario). */
   const rebase = (copy: boolean) => {
     if (!active || !fromHere) return
-    if (copy) { const key = nextKey(); setScenarios((ss) => [...ss, { ...SC.duplicate(active, key, nextColor()), name: `${active.name} (latest)`.slice(0, 80), ...frozenFor() }]); open(key); toast('New scenario from the latest portfolio (not saved yet)') }
-    else { update((s) => ({ ...s, ...frozenFor() })); toast('Rebased onto the latest portfolio. Save to keep it.', 'info') }
+    if (copy) { const key = nextKey(); setScenarios((ss) => [...ss, { ...SC.duplicate(active, key, nextColor()), name: `${active.name} (latest)`.slice(0, 80), ...frozenFor() }]); open(key); toast('Copy created from the latest portfolio') }
+    else { update((s) => ({ ...s, ...frozenFor() })); toast('Starting portfolio updated. Save to keep it.', 'info') }
     setRebasing(false)
   }
 
@@ -263,7 +262,7 @@ export default function ScenarioLab() {
         ) : (<>
           <section className="page-head anchor lab-head" id="summary">
             <div style={{ minWidth: 0 }}>
-              <div className="caps"><span className="accent">Scenario Lab</span> · {SC.statusLabel(active)} · hypothetical, nothing is traded</div>
+              <div className="caps"><span className="accent">Scenario Lab</span> <span className="t3">{SC.statusLabel(active)}</span></div>
               {renaming
                 ? <input className="inline-edit" aria-label="Scenario name" autoFocus defaultValue={active.name} onBlur={(e) => { const v = e.target.value; update((s) => SC.rename(s, v)); setRenaming(false) }} onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') setRenaming(false) }} />
                 : <h1 className="scn-title">{active.name}<button type="button" className="edit-btn" aria-label="Rename scenario" onClick={() => setRenaming(true)}><Icon name="edit" size={16} /></button></h1>}
@@ -282,10 +281,10 @@ export default function ScenarioLab() {
             <AssumptionsBar s={active} E={E} onEdit={() => setAssumptions(true)} onCheckPrices={() => setPriceCheck(true)} />
           </div>
           {active.baseline === 'portfolio' && (!active.frozen
-            ? <Callout tone="warn" icon="alert"><b>Original starting portfolio unavailable.</b> This scenario was saved by an earlier version that didn’t record its starting portfolio. Its positions and assumptions are kept, but results aren’t shown until a starting portfolio is set. {fromHere ? <button type="button" className="link" onClick={() => { update((s) => ({ ...s, ...frozenFor(), baselineNote: 'replaced' })); toast('New starting portfolio set. It isn’t the original one.', 'info') }}>Set a new starting portfolio from {wsName} ({fmtDate(TODAY)})</button> : `Select ${active.source?.name ?? 'its portfolio'} to set a new one.`}</Callout>
-            : active.baselineNote === 'replaced' && fromHere && diff?.same ? <Callout icon="info">New starting portfolio from {active.source?.name} as of {fmtDate(active.frozen.asOf)}; the original wasn’t recorded.</Callout>
-            : !fromHere ? <Callout icon="info">Starts from {active.source?.name ?? 'a portfolio'} as of {fmtDate(active.frozen.asOf)}, frozen. That portfolio isn’t the one selected now (or has no data), so its latest state isn’t compared; the saved starting point and results are kept.</Callout>
-            : diff && !diff.same ? <Callout icon="info">{wsName} has changed since this scenario’s starting point ({fmtDate(diff.asOf.frozen)}). The scenario keeps its frozen start until you rebase. <button type="button" className="link" onClick={() => setRebasing(true)}>Review rebase…</button></Callout>
+            ? <Callout tone="warn" icon="alert"><b>Original starting portfolio unavailable.</b> An earlier version didn’t save it. Your positions and assumptions are kept. Set a starting portfolio to see results. {fromHere ? <button type="button" className="link" onClick={() => { update((s) => ({ ...s, ...frozenFor(), baselineNote: 'replaced' })); toast('New starting portfolio set. It isn’t the original one.', 'info') }}>Set a new starting portfolio from {wsName} ({fmtDate(TODAY)})</button> : `Select ${active.source?.name ?? 'its portfolio'} to set a new one.`}</Callout>
+            : active.baselineNote === 'replaced' && fromHere && diff?.same ? <Callout icon="info">New starting portfolio from {active.source?.name} as of {fmtDate(active.frozen.asOf)}. The original wasn’t saved.</Callout>
+            : !fromHere ? <p className="t3 lab-note">Starts from {active.source?.name ?? 'a portfolio'} as of {fmtDate(active.frozen.asOf)}. That portfolio isn’t selected now, so the saved starting point is used.</p>
+            : diff && !diff.same ? <Callout icon="info">{wsName} has changed since this scenario started on {fmtDate(diff.asOf.frozen)}. <button type="button" className="link" onClick={() => setRebasing(true)}>Review changes</button></Callout>
             : null)}
 
           {active.baseline === 'portfolio' && !active.frozen ? null : view === 'Build' && (
@@ -301,7 +300,7 @@ export default function ScenarioLab() {
           )}
           {(active.baseline !== 'portfolio' || !!active.frozen) && view === 'Analyze' && <AnalyzeView E={E} onEdit={editRow} />}
           {(active.baseline !== 'portfolio' || !!active.frozen) && view === 'Compare' && <CompareView key={activeKey} scenarios={scenarios} evals={evals} actual={actual} activeKey={activeKey} onOpen={(k) => open(k, 'Compare')} />}
-          <div className="footer-note"><span>Scenario results show what happens under the outcomes and prices you choose. They aren’t forecasts or recommendations.</span><span><WorkspaceLabel suffix="sample market data" /></span></div>
+          <div className="footer-note"><span>Scenario results show what happens under the outcomes and prices you choose. They aren’t forecasts or recommendations.</span><span>Sample market data</span></div>
         </>)}
       </main>
 
@@ -311,7 +310,7 @@ export default function ScenarioLab() {
             <Button onClick={() => applyBaseline(switchTo, true)}>Keep target quantities</Button>
             <Button variant="primary" onClick={() => applyBaseline(switchTo, false)}>{switchTo === 'scratch' ? 'Clear quantities of held positions' : 'Start held positions unchanged'}</Button></>}>
           <p className="t2">{switchTo === 'scratch'
-            ? 'From an empty portfolio, every target quantity is a purchase from zero. Keeping them turns positions you hold into full-size purchases; clearing them lets you enter new quantities.'
+            ? 'From an empty portfolio, every target quantity is a purchase from zero. Keeping them turns positions you hold into full-size purchases. Clearing them lets you enter new quantities.'
             : 'From your current portfolio, a target quantity is compared with what you hold: the difference becomes a buy or sell. Starting held positions unchanged sets them to your current quantity (no trade).'}</p>
         </Modal>
       )}
@@ -324,13 +323,13 @@ export default function ScenarioLab() {
           toast(`Added ${list.length} position${list.length > 1 ? 's' : ''}.${blank ? ` ${blank === list.length ? (blank > 1 ? 'Enter their targets and prices' : 'Enter a target and price') : `${blank} need${blank > 1 ? '' : 's'} a target and price`} to be included.` : ' Held positions start at their current size.'}`, 'info')
           setView('Build')
         }} />}
-      {priceCheck && active && <PriceCheckModal adjs={adjs} baseAsOf={active.baseAsOf ?? null} latest={active.baseline === 'portfolio' ? (fromHere ? F : null) : F} titleOf={(a) => `${describe(a, SF).title} · ${describe(a, SF).side}`} onClose={() => setPriceCheck(false)}
-        onApply={(checks) => { setAdjs((as) => SC.applyLatestRefs(as, checks)); setPriceCheck(false); toast('Reference prices updated. Save to keep them; assumed prices and targets are unchanged.') }} />}
+      {priceCheck && active && <PriceCheckModal adjs={adjs} baseAsOf={active.baseAsOf ?? null} latest={active.baseline === 'portfolio' ? (fromHere ? F : null) : F} titleOf={(a) => `${describe(a, SF).title} ${describe(a, SF).side}`} onClose={() => setPriceCheck(false)}
+        onApply={(checks) => { setAdjs((as) => SC.applyLatestRefs(as, checks)); setPriceCheck(false); toast('Reference prices updated. Save to keep them. Your assumed prices and targets are unchanged.') }} />}
       {assumptions && active && <AssumptionsDrawer s={active} E={E} onChange={(patch) => update((s) => SC.configure(s, patch))} onClose={() => setAssumptions(false)} />}
       {rebasing && active && diff && (
-        <Modal title="Rebase onto the latest portfolio?" sub={`${active.name} · frozen ${fmtDate(diff.asOf.frozen)} → latest ${fmtDate(diff.asOf.latest)}`} onClose={() => setRebasing(false)} width={600}
-          footer={<><Button variant="ghost" onClick={() => setRebasing(false)}>Keep existing baseline</Button><Button onClick={() => rebase(true)}>Duplicate with latest</Button><Button variant="primary" onClick={() => rebase(false)}>Rebase this scenario</Button></>}>
-          <p className="t2">Rebasing replaces the starting holdings, cash and marks with the latest portfolio. Your hypothetical positions, assumed prices and assumptions stay; held-position targets are then compared with the latest holdings.</p>
+        <Modal title="Update the starting portfolio?" sub={`${active.name} starts from ${fmtDate(diff.asOf.frozen)}. The latest portfolio is from ${fmtDate(diff.asOf.latest)}.`} onClose={() => setRebasing(false)} width={600}
+          footer={<><Button variant="ghost" onClick={() => setRebasing(false)}>Keep current start</Button><Button onClick={() => rebase(true)}>Copy with latest portfolio</Button><Button variant="primary" onClick={() => rebase(false)}>Update starting portfolio</Button></>}>
+          <p className="t2">The scenario will start from your latest holdings, cash and prices. Your simulated trades and assumptions stay as they are.</p>
           <ul className="rebase-list">
             {diff.cash.map((c) => <li key={c.venue}>Cash on {c.venue === 'pm' ? 'Polymarket' : 'Kalshi'}: {fmt(c.frozen, 2)} → {fmt(c.latest, 2)}</li>)}
             {diff.added.map((x) => <li key={`a${x.id}`}>New holding: {x.market}</li>)}
@@ -339,7 +338,7 @@ export default function ScenarioLab() {
             {diff.marksMoved > 0 && <li>{diff.marksMoved} mark{diff.marksMoved === 1 ? '' : 's'} moved</li>}
             {diff.asOf.frozen !== diff.asOf.latest && <li>Valuation date {fmtDate(diff.asOf.frozen)} → {fmtDate(diff.asOf.latest)}</li>}
           </ul>
-          <small className="t3">Checking latest prices only updates reference prices; rebasing changes the whole starting portfolio. Nothing is saved until you save.</small>
+          <small className="t3">Nothing is saved until you save the scenario.</small>
         </Modal>
       )}
       </FinanceProvider>
@@ -366,24 +365,24 @@ function AddToScenarioModal({ ids, from, scenarios, defaultTarget, onCancel, onC
   const present = new Set(scenarios.find((x) => x.key === target)?.adjs.map((a) => a.id) ?? [])
   const addable = picked.filter((id) => !present.has(id))
   return (
-    <Modal title="Add to a scenario" sub={scratch ? 'This scenario starts from an empty portfolio: positions are added from zero' : 'Positions start at their current size and mark, so the scenario doesn’t change until you edit them'} onClose={onCancel}
+    <Modal title="Add to a scenario" sub={scratch ? 'This scenario starts from an empty portfolio, so positions are added from zero' : 'Positions start at their current size and mark, so the scenario doesn’t change until you edit them'} onClose={onCancel}
       footer={<><Button variant="ghost" onClick={onCancel}>Cancel</Button><Button variant="primary" disabled={addable.length === 0} onClick={() => onConfirm(target, addable, scratch && copyQty)}>{addable.length ? `Add ${addable.length} position${addable.length > 1 ? 's' : ''}` : 'Nothing to add'}</Button></>}>
       <label className="add-field"><span className="l">Scenario</span>
         <select data-autofocus className="select" value={target} onChange={(e) => setTarget(e.target.value)} aria-label="Target scenario">
-          {scenarios.map((x) => <option key={x.key} value={x.key}>{x.name} · {x.adjs.length} position{x.adjs.length === 1 ? '' : 's'}{x.baseline === 'scratch' ? ' · empty portfolio' : ''}</option>)}
+          {scenarios.map((x) => <option key={x.key} value={x.key}>{x.name} ({x.adjs.length} position{x.adjs.length === 1 ? '' : 's'}{x.baseline === 'scratch' ? ', from scratch' : ''})</option>)}
           <option value="new">New scenario (current portfolio)</option>
         </select>
       </label>
       {from && <p className="t2" style={{ fontSize: 'var(--font-size-sm)' }}><span className="t3">From </span>{from}</p>}
       {scratch && <label className="choice"><input type="checkbox" checked={copyQty} onChange={(e) => setCopyQty(e.target.checked)} /><span>Copy my current quantities as purchases<small>Otherwise they’re added with no quantity, and nothing changes until you enter one.</small></span></label>}
-      <fieldset className="add-list"><legend className="l">Holdings · {[...new Set(ids.map((id) => PLATFORM_NAME[POS_BY_ID[id].platform]))].join(' + ')}</legend>
+      <fieldset className="add-list"><legend className="l">Holdings on {[...new Set(ids.map((id) => PLATFORM_NAME[POS_BY_ID[id].platform]))].join(' and ')}</legend>
         {ids.map((id) => {
           const p = POS_BY_ID[id], already = present.has(id)
           return (
             <label key={id} className={cx('choice', picked.includes(id) && !already && 'on')} style={already ? { opacity: 0.6, cursor: 'not-allowed' } : undefined}>
               <input type="checkbox" disabled={already} checked={already || picked.includes(id)} onChange={(e) => setPicked((x) => (e.target.checked ? [...x, id] : x.filter((y) => y !== id)))} />
               <span><span className="row" style={{ gap: 'var(--space-2)' }}><PlatformBadge p={p.platform} />{p.market}<SideChip side={p.side} /></span>
-                <small>{already ? 'Already in this scenario: left as it is' : scratch ? (copyQty ? `Buys ${int(p.shares)} shares at ${p.mark.toFixed(2)}` : 'Added from zero; you enter the quantity') : `${int(p.shares)} shares at ${p.mark.toFixed(2)} (no change)`}</small></span>
+                <small>{already ? 'Already in this scenario: left as it is' : scratch ? (copyQty ? `Buys ${int(p.shares)} shares at ${p.mark.toFixed(2)}` : 'Added from zero. You enter the quantity') : `${int(p.shares)} shares at ${p.mark.toFixed(2)} (no change)`}</small></span>
             </label>
           )
         })}

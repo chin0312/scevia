@@ -6,24 +6,31 @@
    frontend consumes and a deterministic development fixture that is labelled as such and never described as live.
 
    Kinds of reference (never mixed up):
-   - fiat: a foreign-exchange reference (USD→SGD …);
+   - fiat: a foreign-exchange reference (USD to EUR, GBP);
    - stablecoin: a market reference price of a stablecoin in USD (USDC, PUSD). Never assumed to be exactly 1;
    - hypothetical: an explicit user assumption (e.g. a replay's override), labelled as such.
    Methodology: current tracking uses the latest eligible reference; historical performance needs the reference for
    each valuation date (the backend supplies it); a constant-rate view must say so. */
 
-export type ReportingCurrency = 'USD' | 'SGD' | 'EUR' | 'GBP' | 'MYR'
-export interface CurrencyInfo { code: ReportingCurrency; name: string; symbol: string }
-/** Initial selection, subject to backend rate coverage. Extend by adding an entry. */
-export const CURRENCIES: CurrencyInfo[] = [
-  { code: 'USD', name: 'US dollar', symbol: '$' },
-  { code: 'SGD', name: 'Singapore dollar', symbol: 'S$' },
+/** Currencies the product can represent and format (an existing value in any of them can still be shown). */
+export type CurrencyCode = 'USD' | 'EUR' | 'GBP' | 'SGD' | 'MYR'
+/** Reporting currencies users can choose. Starts with USD (default), EUR and GBP; more are added when there is real
+ *  demand and reliable reference coverage. The backend schema may accept more; that doesn't make them selectable. */
+export type ReportingCurrency = 'USD' | 'EUR' | 'GBP'
+export interface CurrencyInfo { code: CurrencyCode; name: string; symbol: string }
+export const ALL_CURRENCIES: CurrencyInfo[] = [
+  { code: 'USD', name: 'US Dollar', symbol: '$' },
   { code: 'EUR', name: 'Euro', symbol: '€' },
-  { code: 'GBP', name: 'British pound', symbol: '£' },
-  { code: 'MYR', name: 'Malaysian ringgit', symbol: 'RM' },
+  { code: 'GBP', name: 'British Pound', symbol: '£' },
+  { code: 'SGD', name: 'Singapore Dollar', symbol: 'S$' },
+  { code: 'MYR', name: 'Malaysian Ringgit', symbol: 'RM' },
 ]
-export const currencyInfo = (c: string) => CURRENCIES.find((x) => x.code === c) ?? CURRENCIES[0]
-export const isReportingCurrency = (v: unknown): v is ReportingCurrency => CURRENCIES.some((c) => c.code === v)
+export const REPORTING_CURRENCIES: ReportingCurrency[] = ['USD', 'EUR', 'GBP']
+export const CURRENCIES = ALL_CURRENCIES.filter((c) => (REPORTING_CURRENCIES as string[]).includes(c.code))
+export const currencyInfo = (c: string) => ALL_CURRENCIES.find((x) => x.code === c) ?? ALL_CURRENCIES[0]
+export const isReportingCurrency = (v: unknown): v is ReportingCurrency => (REPORTING_CURRENCIES as unknown[]).includes(v)
+/** How a native asset is written for people (canonical ids stay `USD`, `USDC`, `PUSD`). */
+export const assetLabel = (a: string) => (a === 'PUSD' ? 'pUSD' : a)
 
 export type RateKind = 'fiat' | 'stablecoin' | 'hypothetical'
 export type RateFreshness = 'current' | 'recent' | 'last_known' | 'stale' | 'unavailable' | 'unsupported' | 'override' | 'identity'
@@ -38,7 +45,7 @@ export type FiatSource = (typeof FIAT_SOURCES)[number]
 export type StablecoinSource = (typeof STABLECOIN_SOURCES)[number]
 export interface FxPreferences { fiatSource: FiatSource | 'auto'; stablecoinSource: StablecoinSource | 'auto' }
 export const AUTO_FX: FxPreferences = { fiatSource: 'auto', stablecoinSource: 'auto' }
-export const SOURCE_LABEL: Record<FiatSource | StablecoinSource, string> = { ecb_euro_reference: 'ECB euro reference rates', kraken_usdc_usd_ohlc: 'Kraken USDC/USD', coingecko_polygon_pusd_usd: 'CoinGecko Polygon PUSD/USD' }
+export const SOURCE_LABEL: Record<FiatSource | StablecoinSource, string> = { ecb_euro_reference: 'ECB', kraken_usdc_usd_ohlc: 'Kraken', coingecko_polygon_pusd_usd: 'CoinGecko' }
 /** Which legs a source can supply (the backend's capability mapping). */
 export const SOURCE_SUPPORTS: Record<FiatSource | StablecoinSource, string[]> = { ecb_euro_reference: ['fiat'], kraken_usdc_usd_ohlc: ['USDC'], coingecko_polygon_pusd_usd: ['PUSD'] }
 export const readFxPreferences = (v: unknown): FxPreferences => {
@@ -80,15 +87,14 @@ export interface FxService {
 
 const FIXTURE_DATE = '2026-11-24'
 const FIXTURE_REV = 'fixture-fx-2026-11-24'
-/** Development fixture references (fixed numbers, not market data). MYR is deliberately older to show a stale state;
- *  the stablecoin references are fixture values, not a claim that the stablecoins trade at par. */
-const FIXTURE_USD_TO: Record<string, { rate: number; observedAt: string }> = {
-  SGD: { rate: 1.34, observedAt: FIXTURE_DATE }, EUR: { rate: 0.92, observedAt: FIXTURE_DATE }, GBP: { rate: 0.79, observedAt: FIXTURE_DATE }, MYR: { rate: 4.47, observedAt: '2026-11-10' },
-}
+/** Development fixture references (fixed numbers, not market data). The stablecoin references are fixture values,
+ *  not a claim that the stablecoins trade at par. Tests pass their own table (e.g. a stale or missing rate). */
+export type FixtureRates = Record<string, { rate: number; observedAt: string }>
+const FIXTURE_USD_TO: FixtureRates = { EUR: { rate: 0.92, observedAt: FIXTURE_DATE }, GBP: { rate: 0.79, observedAt: FIXTURE_DATE } }
 const FIXTURE_STABLE_USD: Record<string, number> = { USDC: 1, PUSD: 1 }
 const STALE_DAYS = 3
 
-export function fixtureFx(today = FIXTURE_DATE, prefs: FxPreferences = AUTO_FX): FxService {
+export function fixtureFx(today = FIXTURE_DATE, prefs: FxPreferences = AUTO_FX, table: FixtureRates = FIXTURE_USD_TO): FxService {
   // The fixture uses the backend's source identifiers so the presentation matches integration, but every value is a
   // labelled development fixture. Kraken has no PUSD leg and CoinGecko no USDC leg: preferring one for the other
   // falls back to the eligible source, qualified.
@@ -107,7 +113,7 @@ export function fixtureFx(today = FIXTURE_DATE, prefs: FxPreferences = AUTO_FX):
     if (a in FIXTURE_STABLE_USD) { const s = stableSource(a); return ref(a, 'USD', FIXTURE_STABLE_USD[a], 'stablecoin', FIXTURE_DATE, undefined, s.source, s.fallback) }
     return ref(a, 'USD', null, 'fiat', null, 'unsupported')
   }
-  const fromUsd = (c: string): FxReference => (c === 'USD' ? ref('USD', 'USD', 1, 'fiat', null, 'identity') : FIXTURE_USD_TO[c] ? ref('USD', c, FIXTURE_USD_TO[c].rate, 'fiat', FIXTURE_USD_TO[c].observedAt) : ref('USD', c, null, 'fiat', null, 'unsupported'))
+  const fromUsd = (c: string): FxReference => (c === 'USD' ? ref('USD', 'USD', 1, 'fiat', null, 'identity') : table[c] ? ref('USD', c, table[c].rate, 'fiat', table[c].observedAt) : ref('USD', c, null, 'fiat', null, 'unsupported'))
   return {
     label: 'Development fixture rates', live: false,
     reference(base, quote) {

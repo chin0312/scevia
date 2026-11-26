@@ -15,7 +15,6 @@ import type { Category, Platform } from '../data/types'
 import { PERIODS, fmtDate, tradeNet, type Period, type PlatformFilter, type Position } from '../lib/finance'
 import { fmt, fmtNative, fmtPx, int, kfmt, pct, sfmt } from '../lib/format'
 import { useActiveWorkspace } from '../lib/workspaceContext'
-import { STATE_LABEL } from '../lib/freshness'
 import { accountName } from '../lib/useWorkspace'
 import { useFinance } from '../lib/financeContext'
 import { ReportingNote, WorkspaceLabel } from '../components/Workspace'
@@ -34,7 +33,7 @@ const toFilter = (l: PlatformLabel): PlatformFilter => (l === 'Polymarket' ? 'pm
 type SortKey = 'market' | 'shares' | 'cost' | 'value' | 'upl' | 'days'
 
 export default function Overview() {
-  const { CLOSED_TRADES, LAST_VISIT, TODAY, account, accountOf, accountsOn, allocation, coverage, sourceOf, exposures, netPnlAt, periodAvailable, periodRange, positionsFor, series } = useFinance()
+  const { CLOSED_TRADES, LAST_VISIT, TODAY, account, accountsOn, allocation, coverage, sourceOf, exposures, netPnlAt, periodAvailable, periodRange, positionsFor, series } = useFinance()
   useHashScroll()
   const nav = useNavigate()
   const connect = useConnect()
@@ -96,10 +95,10 @@ export default function Overview() {
 
   const recentClosed = useMemo(() => CLOSED_TRADES.filter((t) => f === 'all' || t.platform === f).sort((a, b) => (a.closed < b.closed ? 1 : -1)).slice(0, 8), [f])
   const activity = useMemo(() => [
-    ...pos.flatMap((p) => p.fills.map((fl) => ({ date: fl.date, platform: p.platform, pos: p, trade: null as ClosedTrade | null, text: `Bought ${int(fl.shares)} ${p.side} · ${p.market} @ ${fl.price.toFixed(2)}` }))),
-    ...recentClosed.map((t) => ({ date: t.closed, platform: t.platform, pos: null as Position | null, trade: t, text: `${t.outcome === 'Closed early' ? 'Sold' : `Settled ${t.outcome === 'Won' ? 'in your favour' : 'against you'}`} · ${t.market} · ${sfmt(tradeNet(t), 2)}` })),
+    ...pos.flatMap((p) => p.fills.map((fl) => ({ date: fl.date, platform: p.platform, pos: p, trade: null as ClosedTrade | null, text: `Bought ${int(fl.shares)} ${p.side} in ${p.market} at ${fl.price.toFixed(2)}` }))),
+    ...recentClosed.map((t) => ({ date: t.closed, platform: t.platform, pos: null as Position | null, trade: t, text: `${t.outcome === 'Closed early' ? 'Sold' : t.outcome === 'Won' ? 'Won' : 'Lost'} ${t.market}, ${sfmt(tradeNet(t), 2)}` })),
   ].sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 8), [pos, recentClosed])
-  const openTrade = (t: ClosedTrade) => details.open({ kind: 'trades', title: t.market, sub: `${PLATFORM_NAME[t.platform]} · ${t.category} · closed ${fmtDate(t.closed, { month: 'short', day: 'numeric', year: 'numeric' })}`, trades: [t] })
+  const openTrade = (t: ClosedTrade) => details.open({ kind: 'trades', title: t.market, sub: `Closed on ${PLATFORM_NAME[t.platform]}, ${fmtDate(t.closed, { month: 'short', day: 'numeric', year: 'numeric' })}`, trades: [t] })
   const feeEstimateTrades = CLOSED_TRADES.filter((t) => !t.feeKnown && (f === 'all' || t.platform === f))
 
   const n = pts.length
@@ -135,7 +134,7 @@ export default function Overview() {
       </SectionRail>
 
       <main>
-        <PageHead caption={f === 'all' ? `${ws.summary.name} · Polymarket + Kalshi` : `${ws.summary.name}: ${plat} only · ${plat === 'Polymarket' ? 'Kalshi' : 'Polymarket'} excluded`} title="Portfolio overview"
+        <PageHead caption={f === 'all' ? ws.summary.name : `${ws.summary.name}, ${plat} only`} title="Portfolio overview"
           actions={<><Pills label="Platform" options={PLATFORM_FILTER} value={plat} onChange={setPlat} counts={counts} /></>} />
 
         <div className="grid g-21">
@@ -147,16 +146,15 @@ export default function Overview() {
             <div className="card-b">
               <div className="hero-top">
                 <div>
-                  <div className="caps">{chartTab === 'Value' ? `Portfolio value · ${scope}` : `Net P&L since ${fmtDate(pts[0].date, { month: 'short', year: 'numeric' })} · ${scope}`}</div>
+                  <div className="caps">{chartTab === 'Value' ? 'Portfolio value' : `Net P&L since ${fmtDate(pts[0].date, { month: 'short', year: 'numeric' })}`}</div>
                   <div style={{ marginTop: 'var(--space-2)' }}><HeroFigure value={chartTab === 'Value' ? acct.totalValue : periodChange} /></div>
                   <div className="hero-sub">
                     <Delta value={periodChange}>{periodChange >= 0 ? '▲' : '▼'} {sfmt(periodChange, 2)}</Delta>
-                    <span>{period} net P&amp;L (deposits excluded) · all-time {sfmt(acct.netPnl, 2)} on {fmt(acct.netDeposits)} net deposits</span>
+                    <span>{period} net P&amp;L. All time {sfmt(acct.netPnl, 2)} on {fmt(acct.netDeposits)} deposited.</span>
                   </div>
                   {chartTab === 'Value' && <div className="asof" aria-label="Valuation basis">
-                    <span>Valued at marks as of <b>{fmtDate(TODAY, { month: 'short', day: 'numeric', year: 'numeric' })}</b> · reconstructed from records</span>
-                    <span>Market data: <b>{STATE_LABEL[ws.streams.find((x) => x.id === 'market')?.state ?? 'unavailable']}</b></span>
-                    {(['pm', 'ks'] as Platform[]).filter((p) => (f === 'all' || f === p) && accountsOn(p).length).map((p) => { const src = sourceOf(p), d = accountsOn(p)[0]?.denomination ?? 'USD'; return <span key={p}>{PLATFORM_NAME[p]} <b>{fmtNative(account(p).totalValue, d)}</b>{src.stale ? <span className="stale"> · records as of {fmtDate(src.asOf)}</span> : ''}</span> })}
+                    <span>Prices as of <b>{fmtDate(TODAY, { month: 'short', day: 'numeric', year: 'numeric' })}</b></span>
+                    {(['pm', 'ks'] as Platform[]).filter((p) => (f === 'all' || f === p) && accountsOn(p).length).map((p) => { const src = sourceOf(p), d = accountsOn(p)[0]?.denomination ?? 'USD'; return <span key={p}>{PLATFORM_NAME[p]} <b>{fmtNative(account(p).totalValue, d)}</b>{src.stale ? <>{' '}<span className="stale">(records from {fmtDate(src.asOf)})</span></> : ''}</span> })}
                     <ReportingNote denominations={(['pm', 'ks'] as Platform[]).filter((p) => f === 'all' || f === p).flatMap((p) => accountsOn(p).map((a) => a.denomination))} />
                   </div>}
                 </div>
@@ -168,13 +166,13 @@ export default function Overview() {
                   xTicks={tickIdx.map((i) => [i, fmtDate(pts[i].date)] as [number, string])}
                   tooltip={(i) => (<><div className="t3">Week of {fmtDate(pts[i].date, { month: 'short', day: 'numeric', year: 'numeric' })}</div>
                     <b>{fmt(chartTab === 'Value' ? pts[i].value : pts[i].netPnl, 2)}</b>
-                    {chartTab === 'Value' && <div className="t3" style={{ marginTop: 2 }}>Net deposits {fmt(pts[i].deposits)} · net P&amp;L {sfmt(pts[i].netPnl)}</div>}</>)} />
+                    {chartTab === 'Value' && <div className="t3" style={{ marginTop: 2 }}>Deposits {fmt(pts[i].deposits)}, net P&amp;L {sfmt(pts[i].netPnl)}</div>}</>)} />
               </div>
             </div>
           </div>
 
           <div className="card">
-            <CardHeader title="Summary" sub={`Since your last visit · ${fmtDate(LAST_VISIT)} · ${scope}`} />
+            <CardHeader title="Summary" sub={`Since your last visit on ${fmtDate(LAST_VISIT)}`} />
             <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
               <p className="summary" style={{ fontSize: 'var(--font-size-md)' }}>
                 Net P&amp;L {sinceVisit >= 0 ? 'rose' : 'fell'} <b className={sinceVisit >= 0 ? 'gain' : 'loss'}>{sfmt(sinceVisit)}</b> since {fmtDate(LAST_VISIT)}{movers[0] && <>, led by <button type="button" className="link" onClick={() => openPos(movers[0].p)}>{movers[0].p.market}</button></>}. <b>{pct((acct.committed / acct.totalValue) * 100, 0)}</b> of value is committed to open contracts{soon.length ? <>, and <b>{soon.length} event{soon.length > 1 ? 's' : ''}</b> resolve within 30 days</> : ''}.
@@ -182,7 +180,7 @@ export default function Overview() {
               <ul className="changes">
                 {movers.slice(0, 1).map(({ p, move }) => (
                   <li key={p.id}><span className="ic" style={{ background: move >= 0 ? 'var(--color-gain-bg)' : 'var(--color-loss-bg)', color: move >= 0 ? 'var(--color-gain-fg)' : 'var(--color-loss-fg)' }}>{move >= 0 ? '▲' : '▼'}</span>
-                    <div><b>{p.market} {p.side}</b> moved {p.markAtLastVisit.toFixed(2)} → {p.mark.toFixed(2)} ({sfmt(move)}).<br /><button type="button" className="link" onClick={() => openPos(p)}>View position</button> <Link to={handoffPath([p.id], `${p.market} · ${PLATFORM_NAME[p.platform]}`)}>Simulate in Scenario Lab →</Link></div></li>
+                    <div><b>{p.market} {p.side}</b> moved {p.markAtLastVisit.toFixed(2)} → {p.mark.toFixed(2)} ({sfmt(move)}).<br /><button type="button" className="link" onClick={() => openPos(p)}>View position</button> <Link to={handoffPath([p.id], `${p.market} on ${PLATFORM_NAME[p.platform]}`)}>Simulate in Scenario Lab →</Link></div></li>
                 ))}
                 {soon.length > 0 && <li><span className="ic" style={{ background: 'var(--color-warn-bg)', color: 'var(--color-warn-fg)' }}>!</span><div><b>{fmt(soonCost)} resolves within 30 days</b> across {soon.length} event{soon.length > 1 ? 's' : ''}, {pct((soonCost / acct.committed) * 100, 0)} of committed capital.<br /><button type="button" className="link" onClick={() => scrollToSection('upcoming')}>See upcoming resolutions</button> <Link to="/risk#calendar">Analyze in Risk →</Link></div></li>}
                 {crossPlatform && <li><span className="ic" style={{ background: 'var(--color-accent-bg)', color: 'var(--color-accent-fg)' }}>⇄</span><div>Same {crossPlatform.event.short} outcome on <b>two platforms</b>. If it resolves {crossPlatform.worst.outcome}: <b className={crossPlatform.worst.pnl < 0 ? 'loss' : 'gain'}>{sfmt(crossPlatform.worst.pnl)}</b> combined.<br /><button type="button" className="link" onClick={() => details.open({ kind: 'event', id: crossPlatform.event.id, scope: f })}>View event exposure</button></div></li>}
@@ -192,21 +190,21 @@ export default function Overview() {
         </div>
 
         <div className="tiles">
-          <Tile label="Realized P&L" info="Closed trades: shares × (exit − entry) − that trade’s fees. All time." value={sfmt(acct.realized, 2)} tone={acct.realized >= 0 ? 'gain' : 'loss'} foot={`${acct.closedCount} closed · after ${fmt(acct.closedFees, 2)} fees`} />
-          <Tile label="Unrealized P&L" info="Open positions at mark price minus cost basis. Cost basis includes fees paid on those purchases, so unrealized P&L is after acquisition fees." value={sfmt(acct.unrealized, 2)} tone={acct.unrealized >= 0 ? 'gain' : 'loss'} foot={`${acct.openCount} open · incl. ${fmt(acct.openFees, 2)} purchase fees`} />
+          <Tile label="Realized P&L" info="Closed trades: shares × (exit − entry) − that trade’s fees. All time." value={sfmt(acct.realized, 2)} tone={acct.realized >= 0 ? 'gain' : 'loss'} foot={`${acct.closedCount} closed trades, after ${fmt(acct.closedFees, 2)} fees`} />
+          <Tile label="Unrealized P&L" info="Open positions at mark price minus cost basis. Cost basis includes fees paid on those purchases, so unrealized P&L is after acquisition fees." value={sfmt(acct.unrealized, 2)} tone={acct.unrealized >= 0 ? 'gain' : 'loss'} foot={`${acct.openCount} open positions, after ${fmt(acct.openFees, 2)} purchase fees`} />
           <Tile label="Capital committed" info="Cost basis of open positions, including purchase fees: what you’d lose if every open contract resolved against you." value={fmt(acct.committed)} foot={`${pct((acct.committed / acct.totalValue) * 100, 0)} of portfolio value`} />
-          <Tile label="Cash" info="Net deposits + realized P&L − cost and fees of open fills, per platform." value={fmt(acct.cash, 2)} foot={f === 'all' ? `Poly ${fmt(account('pm').cash)} · Kalshi ${fmt(account('ks').cash)}` : `${plat} balance`} />
-          <Tile label="Win rate · all time" info="Resolved positions that settled in your favour ÷ all resolved positions (early exits excluded). Small samples are noisy." value={acct.resolved ? `${Math.round((acct.wins / acct.resolved) * 100)}%` : '—'} foot={`${acct.wins} of ${acct.resolved} resolved`} />
+          <Tile label="Cash" info="Net deposits + realized P&L − cost and fees of open fills, per platform." value={fmt(acct.cash, 2)} foot={f === 'all' ? `Polymarket ${fmt(account('pm').cash)}, Kalshi ${fmt(account('ks').cash)}` : `${plat} balance`} />
+          <Tile label="Win rate" info="Resolved positions that settled in your favour ÷ all resolved positions (early exits excluded). Small samples are noisy." value={acct.resolved ? `${Math.round((acct.wins / acct.resolved) * 100)}%` : 'No data'} foot={`${acct.wins} of ${acct.resolved} resolved trades`} />
         </div>
 
         <div className="grid g-3 anchor" id="breakdown">
           <Card id="allocation">
-            <CardHeader title="Allocation" sub={`Share of open-position market value (cash excluded) · ${scope}`} right={<Seg label="Group by" options={['Category', 'Platform'] as const} value={allocBy} onChange={setAllocBy} />} />
+            <CardHeader title="Allocation" sub="Open positions by market value" right={<Seg label="Group by" options={['Category', 'Platform'] as const} value={allocBy} onChange={setAllocBy} />} />
             <div className="card-b alloc">
               {alloc.length === 0 ? <div className="empty" style={{ gridColumn: '1 / -1' }}><p>No open positions in {scope}.</p></div> : <>
               <Donut parts={alloc.map((a) => ({ key: a.key, value: a.value, color: a.color }))} active={hotSlice ?? shownBy?.key ?? null} onHover={setHotSlice} onSelect={select}
-                center={(() => { const c = hot ?? alloc.find((x) => x.key === shownBy?.key); return <div><b>{fmt(c ? c.value : allocTotal)}</b><span className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>{c ? `${c.label} · ${pct(c.share * 100, 0)}` : `${pos.length} positions`}</span></div> })()} />
-              <div role="group" aria-label={`Allocation by ${allocBy.toLowerCase()}: select a segment to filter Holdings`}>
+                center={(() => { const c = hot ?? alloc.find((x) => x.key === shownBy?.key); return <div><b>{fmt(c ? c.value : allocTotal)}</b><span className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>{c ? `${c.label}, ${pct(c.share * 100, 0)}` : `${pos.length} positions`}</span></div> })()} />
+              <div role="group" aria-label={`Allocation by ${allocBy.toLowerCase()}. Choose a segment to filter holdings.`}>
                 {alloc.map((a) => {
                   const on = active?.by === allocBy && active.key === a.key
                   return (
@@ -228,7 +226,7 @@ export default function Overview() {
                     {selSeg.positions.slice(0, 3).map(({ p, shareOfSegment }) => (
                       <button type="button" key={p.id} className="seg-pos" onClick={() => openPos(p)}><span>{p.market}</span><span className="t3" title={`Share of ${segLabel(shownBy.by, shownBy.key)}`}>{pct(shareOfSegment * 100, 0)}</span></button>
                     ))}
-                    <p className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>% = share of {segLabel(shownBy.by, shownBy.key)} · {fmt(selSeg.value)} is {pct(selSeg.share * 100, 0)} of open value in {scope}</p>
+                    <p className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>Percentages are shares of {segLabel(shownBy.by, shownBy.key)}, which is {fmt(selSeg.value)} or {pct(selSeg.share * 100, 0)} of open value.</p>
                     {selSeg.positions.length === 1 && <p className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>A single position: its whole value rides on one contract.</p>}
                     <Button size="sm" onClick={showInHoldings}>{selSeg.positions.length > 3 ? `Show all ${selSeg.positions.length} in Holdings` : 'Show in Holdings'}</Button>
                   </div>
@@ -241,13 +239,13 @@ export default function Overview() {
           </Card>
 
           <Card id="upcoming">
-            <CardHeader title="Upcoming resolutions" sub="Next 6 resolutions · capital at stake" right={<Link className="btn btn-sm btn-ghost" to="/risk#calendar" title="Open the resolution calendar in Risk">Full calendar →</Link>} />
+            <CardHeader title="Upcoming resolutions" sub="Next six events and the capital at stake" right={<Link className="btn btn-sm btn-ghost" to="/risk#calendar" title="Open the resolution calendar in Risk">Full calendar →</Link>} />
             <div className="card-b">
               {exps.length === 0 && <div className="empty"><p>No open positions to resolve.</p></div>}
               {[...exps].sort((a, b) => a.days - b.days).slice(0, 6).map((e) => (
                 <button type="button" key={e.event.id} className="tl-row tl-btn" aria-label={`${e.event.name}: view event exposure`} onClick={() => details.open({ kind: 'event', id: e.event.id, scope: f })}>
                   <div className="date"><b>{fmtDate(e.resolves, { day: 'numeric' })}</b><span>{fmtDate(e.resolves, { month: 'short' })}</span></div>
-                  <div className="t">{e.event.name} {e.positions.length > 1 && <Chip tone="accent">{e.positions.length} contracts</Chip>}<small>{e.platforms.map((p) => PLATFORM_NAME[p]).join(' + ')} · {e.side === 'Mixed' ? 'YES + NO' : e.side} · in {e.days} days</small></div>
+                  <div className="t">{e.event.name} {e.positions.length > 1 && <Chip tone="accent">{e.positions.length} contracts</Chip>}<small>{e.side === 'Mixed' ? 'YES and NO' : e.side} on {e.platforms.map((p) => PLATFORM_NAME[p]).join(' and ')}, in {e.days} days</small></div>
                   <span>{fmt(e.cost)}</span>
                 </button>
               ))}
@@ -260,7 +258,7 @@ export default function Overview() {
               <p className="t3" style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--space-2)' }}>{wsName}{wsMode === 'fixture' ? '. No account is connected.' : ''}</p>
               {(['pm', 'ks'] as Platform[]).filter((p) => f === 'all' || p === f).map((p) => {
                 const c = coverage(p), src = sourceOf(p)
-                return <div className="cov" key={p}><PlatformBadge p={p} /><span>{accountsOn(p).map((a) => accountName(a.id)).join(', ')} · {c.fills} fills · {c.settlements} settlements</span><span className={src.stale ? 'stale' : 't3'} title={src.stale ? 'Older than 24 hours' : undefined}>as of {fmtDate(src.asOf)}{src.stale ? ' · stale' : ''}</span></div>
+                return <div className="cov" key={p}><PlatformBadge p={p} /><span>{accountsOn(p).map((a) => accountName(a.id)).join(', ')}: {c.fills} fills, {c.settlements} settlements</span><span className={src.stale ? 'stale' : 't3'} title={src.stale ? 'Older than 24 hours' : undefined}>{src.stale ? 'Out of date, ' : ''}{fmtDate(src.asOf)}</span></div>
               })}
               {(() => { const ps = (['pm', 'ks'] as Platform[]).filter((p) => f === 'all' || p === f).map(coverage); const t = (k: keyof (typeof ps)[number]) => ps.reduce((a, c) => a + c[k], 0)
                 return <div className="cov-mini"><div><b>{t('open')}</b>open positions</div><div><b>{t('fills')}</b>fills</div><div><b>{t('settlements')}</b>settlements</div><div><b>{t('feeEstimates')}</b>fee estimates</div></div> })()}
@@ -276,7 +274,7 @@ export default function Overview() {
         <Card id="holdings" flush>
           <div className="card-h" style={{ paddingBottom: 'var(--space-4)', alignItems: 'center' }}>
             <Tabs label="Holdings view" options={['Open positions', 'Resolved', 'Activity'] as const} value={holdTab} onChange={setHoldTab}
-              render={(o) => (o === 'Open positions' ? `Open positions · ${pos.length}` : o === 'Resolved' ? `Latest closed · 8 of ${acct.closedCount}` : o)} />
+              render={(o) => (o === 'Open positions' ? `Open positions (${pos.length})` : o === 'Resolved' ? 'Recently closed' : o)} />
             {holdTab === 'Open positions' && <Pills label="Category" options={['All categories', ...CATEGORIES] as const} value={active?.by === 'Category' ? (active.key as Category) : 'All categories'}
               onChange={(v) => setSel(v === 'All categories' ? (active?.by === 'Platform' ? active : null) : { by: 'Category', key: v })} />}
           </div>
@@ -284,7 +282,7 @@ export default function Overview() {
             <>
               {(active || selInvalid) && (
                 <div className="filter-bar" role="status">
-                  {active ? <>Showing <b>{segLabel(active.by, active.key)}</b> ({active.by.toLowerCase()}) · {rows.length} of {pos.length} positions · {fmt(selSeg!.value)} · {pct(selSeg!.share * 100, 0)} of open value</>
+                  {active ? <>Showing <b>{segLabel(active.by, active.key)}</b>: {rows.length} of {pos.length} positions, {fmt(selSeg!.value)} or {pct(selSeg!.share * 100, 0)} of open value</>
                     : <>The {sel!.by.toLowerCase()} filter “{segLabel(sel!.by, sel!.key)}” has no positions in {scope}, so all positions are shown.</>}
                   <button type="button" className="link" onClick={() => setSel(null)}>Clear filter</button>
                 </div>
@@ -297,7 +295,7 @@ export default function Overview() {
                     const w = (v: number) => Math.min((Math.abs(v) / 8000) * 100, 100)
                     return (
                       <tr key={p.id} className="clickable" tabIndex={0} aria-label={`${p.market}: open details`} onClick={() => openPos(p)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); openPos(p) } }}>
-                        <td className="mkt"><div className="mk"><PlatformBadge p={p.platform} /><div><b>{p.market}</b><small>{p.category} · {PLATFORM_NAME[p.platform]} · {accountOf(p.accountId)?.denomination ?? 'USD'}</small></div></div></td>
+                        <td className="mkt"><div className="mk"><PlatformBadge p={p.platform} /><div><b>{p.market}</b><small>{p.category}, {PLATFORM_NAME[p.platform]}</small></div></div></td>
                         <td><SideChip side={p.side} /></td>
                         <td className="r">{int(p.shares)}</td>
                         <td className="r"><span className="t3">{px(p.avg)}</span> → {px(p.mark)}{sourceOf(p.platform).stale && <small className="stale" style={{ display: 'block' }}>as of {fmtDate(sourceOf(p.platform).asOf)}</small>}</td>
@@ -311,7 +309,7 @@ export default function Overview() {
                           <span className="gain" style={{ fontSize: 'var(--font-size-xs)' }}>+{kfmt(p.ifWin).slice(1)}</span>
                         </div></td>
                         <td className="t2">{fmtDate(p.resolves)}</td>
-                        <td className="r"><span className="row-act" onClick={(e) => e.stopPropagation()}><Button size="sm" icon="flask" title="Open Scenario Lab and choose a scenario to add this position to" onClick={() => nav(handoffPath([p.id], `${p.market} · ${PLATFORM_NAME[p.platform]}`))}>Simulate</Button></span></td>
+                        <td className="r"><span className="row-act" onClick={(e) => e.stopPropagation()}><Button size="sm" icon="flask" title="Open Scenario Lab and choose a scenario to add this position to" onClick={() => nav(handoffPath([p.id], `${p.market} on ${PLATFORM_NAME[p.platform]}`))}>Simulate</Button></span></td>
                       </tr>
                     )
                   })}
@@ -343,10 +341,10 @@ export default function Overview() {
       </main>
 
       {feeReview && (
-        <Drawer title="Settlements with estimated fees" sub={`${sourceOf('ks').label} · as of ${fmtDate(sourceOf('ks').asOf)}`} onClose={() => setFeeReview(false)}>
+        <Drawer title="Settlements with estimated fees" sub={`${sourceOf('ks').label}, records as of ${fmtDate(sourceOf('ks').asOf)}`} onClose={() => setFeeReview(false)}>
           <Callout tone="warn">The source didn’t report fees for these settlements. Scevia estimates them at the platform’s fee rate and labels them “est.” everywhere.</Callout>
           {feeEstimateTrades.map((t) => (
-            <div className="list-row" key={t.id}><PlatformBadge p={t.platform} /><div><b style={{ fontWeight: 'var(--font-weight-medium)' }}>{t.market}</b><div className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>Settled {fmtDate(t.closed)} · estimated fee {fmt(t.fees, 2)}</div></div><span className="r t3">est.</span></div>
+            <div className="list-row" key={t.id}><PlatformBadge p={t.platform} /><div><b style={{ fontWeight: 'var(--font-weight-medium)' }}>{t.market}</b><div className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>Settled {fmtDate(t.closed)}, estimated fee {fmt(t.fees, 2)}</div></div><span className="r t3">est.</span></div>
           ))}
           <div className="row" style={{ marginTop: 'var(--space-2)' }}><Icon name="info" size={14} /><span className="t3" style={{ fontSize: 'var(--font-size-xs)' }}>A newer export from the source replaces these estimates with the reported fees.</span></div>
         </Drawer>

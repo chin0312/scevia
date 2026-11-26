@@ -86,7 +86,7 @@ export function readPortfolioList(raw: unknown): WorkspaceSummary[] | null {
     if (!isObj(it) || typeof it.id !== 'string' || typeof it.name !== 'string' || !isMode(it.mode)) return []
     const n = typeof it.providerAccountCount === 'number' ? it.providerAccountCount : null
     return [{ id: it.id, name: it.name, mode: it.mode, accountCount: n,
-      blurb: it.mode === 'demo' ? 'Real markets · virtual capital' : it.mode === 'fixture' ? 'Fictional markets and records' : `${n ?? 'Unknown'} account${n === 1 ? '' : 's'}` }]
+      blurb: it.mode === 'demo' ? 'Real markets, virtual capital' : it.mode === 'fixture' ? 'Fictional markets and records' : `${n ?? 'Unknown'} account${n === 1 ? '' : 's'}` }]
   })
 }
 
@@ -118,9 +118,9 @@ export function demoStreams(d: Extract<DemoState, { status: 'available' }>, chec
   const market: StreamState = !d.quotes.length ? 'unavailable' : stale ? 'stale' : 'cached_snapshot'
   const span = oldest && newest && oldest !== newest ? ` Quotes range from ${oldest.slice(0, 10)} to ${newest.slice(0, 10)}.` : ''
   return [
-    { id: 'market', state: market, asOf: oldest, checkedAt, classifiedBy: 'source', detail: `Approved real-market capture. Prices keep their source time; they aren’t streamed.${span}` },
+    { id: 'market', state: market, asOf: oldest, checkedAt, classifiedBy: 'source', detail: `Approved real-market capture. Prices keep their source time and aren’t streamed.${span}` },
     { id: 'account', state: 'fixture', asOf: d.capturedAt, checkedAt, classifiedBy: 'source', detail: 'Hypothetical demo records with virtual capital. No personal account is connected.' },
-    { id: 'valuation', state: market === 'unavailable' ? 'unavailable' : 'partial', asOf: d.capturedAt, checkedAt, detail: 'Valued at the capture cutoff; completeness comes from the valuation service.' },
+    { id: 'valuation', state: market === 'unavailable' ? 'unavailable' : 'partial', asOf: d.capturedAt, checkedAt, detail: 'Valued at the capture cutoff. Completeness comes from the valuation service.' },
     { id: 'history', state: 'partial', asOf: d.capturedAt, checkedAt, detail: 'History covers the captured period only.' },
     { id: 'fx', state: 'unavailable', asOf: null, checkedAt, detail: 'Exchange-rate references come with the demo’s valuation from the backend.' },
     { id: 'sync', state: 'unavailable', asOf: null, checkedAt, detail: 'The demo has no account sync.' },
@@ -133,7 +133,7 @@ export function demoStreams(d: Extract<DemoState, { status: 'available' }>, chec
 export const FIXTURE_ID = 'sample', DEMO_ID = 'demo'
 
 const FIXTURE_SUMMARY: WorkspaceSummary = { id: FIXTURE_ID, name: 'Sample portfolio', mode: 'fixture', blurb: 'Fictional markets and records', accountCount: PORTFOLIO.accounts.length }
-const DEMO_SUMMARY: WorkspaceSummary = { id: DEMO_ID, name: 'Demo portfolio', mode: 'demo', blurb: 'Real markets · virtual capital', accountCount: null }
+const DEMO_SUMMARY: WorkspaceSummary = { id: DEMO_ID, name: 'Demo portfolio', mode: 'demo', blurb: 'Real markets, virtual capital', accountCount: null }
 
 /** The fixture snapshot. Its data never changes, so every stream is "Fixed sample" with the sample's own dates. */
 export function fixtureSnapshot(checkedAt: string | null = null): WorkspaceSnapshot { return staticSnapshot(FIXTURE_SUMMARY, PORTFOLIO, checkedAt) }

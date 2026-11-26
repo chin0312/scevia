@@ -27,7 +27,7 @@ export function AssumptionsBar({ s, E, onEdit, onCheckPrices }: { s: Scenario; E
       <span><span className="t3">Added capital</span> {E.funding ? fmt(E.funding) : 'none'}</span>
       <span><span className="t3">Fees</span> {feeLabel(fees).toLowerCase()}</span>
       <span><span className="t3">Constraints</span> {cs.length ? `${cs.length} hypothetical` : 'none'}</span>
-      <span><span className="t3">References</span> frozen{s.baseAsOf ? ` ${fmtDate(s.baseAsOf)}` : ' when added'}{onCheckPrices && <> · <button type="button" className="link" onClick={onCheckPrices}>Check latest</button></>}</span>
+      <span><span className="t3">Prices</span> saved {s.baseAsOf ? fmtDate(s.baseAsOf) : 'when added'}{onCheckPrices && <> <button type="button" className="link" onClick={onCheckPrices}>Check latest</button></>}</span>
       <span><span className="t3">Execution</span> your assumed prices</span>
       <button type="button" className="link" onClick={onEdit}>Edit assumptions</button>
     </div>
@@ -36,20 +36,19 @@ export function AssumptionsBar({ s, E, onEdit, onCheckPrices }: { s: Scenario; E
 
 /** Essentials at the top of Build. */
 export function StartSetup({ s, E, canPortfolio = true, onChange, onBaseline }: { s: Scenario; E: Evaluation; canPortfolio?: boolean; onChange: (p: Patch) => void; onBaseline: (b: Baseline) => void }) {
-  const { accountsOn } = useFinance()
   const heldRows = s.adjs.filter((a) => !a.instrument).length
   return (
     <Card id="setup">
       <div className="card-b start-setup">
         <fieldset className="setup-f"><legend className="l">Starting portfolio</legend>
           <Seg label="Starting portfolio" options={['Current portfolio', 'Empty portfolio'] as const} value={s.baseline === 'scratch' ? 'Empty portfolio' : 'Current portfolio'} disabled={(o) => (o === 'Current portfolio' && !canPortfolio && s.baseline === 'scratch' ? 'No portfolio data to start from in the selected portfolio' : null)} onChange={(v) => onBaseline(v === 'Empty portfolio' ? 'scratch' : 'portfolio')} />
-          <small className="t3">{s.baseline === 'scratch' ? 'No holdings, cash or history.' : `Your holdings and cash · ${fmt(E.B.totalValue ?? 0)} at marks${E.funding ? ' incl. added capital' : ''}.`}{heldRows > 0 && s.baseline === 'scratch' ? ` ${heldRows} older position${heldRows > 1 ? 's' : ''} can’t be used from scratch.` : ''}</small>
+          <small className="t3">{s.baseline === 'scratch' ? 'No holdings, cash or history.' : `Your holdings and cash, worth ${fmt(E.B.totalValue ?? 0)}${E.funding ? ' with added capital' : ''}.`}{heldRows > 0 && s.baseline === 'scratch' ? ` ${heldRows} older position${heldRows > 1 ? 's' : ''} can’t be used from scratch.` : ''}</small>
         </fieldset>
-        <fieldset className="setup-f"><legend className="l">{s.baseline === 'scratch' ? 'Virtual starting capital' : 'Additional virtual capital'} <span className="t3">(by venue · simulated, not profit)</span></legend>
+        <fieldset className="setup-f"><legend className="l">{s.baseline === 'scratch' ? 'Virtual starting capital' : 'Added virtual capital'}</legend>
           <div className="row" style={{ gap: 'var(--space-2)', flexWrap: 'wrap' }}>
             {(['pm', 'ks'] as Platform[]).map((p) => <FundingInput key={p} p={p} value={s.funding[p]} onChange={(v) => onChange({ funding: { ...s.funding, [p]: v } })} />)}
           </div>
-          <small className="t3">Simulated capital in each venue’s virtual funding{s.baseline === 'portfolio' ? <> ({(['pm', 'ks'] as Platform[]).map((p) => `${PLATFORM_NAME[p]} · ${accountsOn(p)[0] ? accountName(accountsOn(p)[0].id, accountsOn(p)) : `virtual ${DEFAULT_ASSET[p]}`}`).join(' and ')})</> : ''}. No account or deposit is needed. It raises cash and the starting value, is never a gain, and isn’t moved between venues. Each venue’s virtual cash is one pool here; with the integrated service it is held per native asset (USD, USDC, PUSD), and different assets never fund each other.</small>
+          <small className="t3">Simulated money for this scenario. It isn’t a deposit, it never counts as a gain, and it stays on its platform.</small>
         </fieldset>
       </div>
     </Card>
@@ -58,7 +57,7 @@ export function StartSetup({ s, E, canPortfolio = true, onChange, onBaseline }: 
 
 export function AssumptionsDrawer({ s, E, onChange, onClose }: { s: Scenario; E: Evaluation; onChange: (p: Patch) => void; onClose: () => void }) {
   return (
-    <Drawer title="Scenario assumptions" sub={`${s.name} · apply to this scenario only`} onClose={onClose}>
+    <Drawer title="Scenario assumptions" sub="These apply to this scenario only." onClose={onClose}>
       <FeeSetup value={s.assumptions.fees ?? DEFAULT_FEES} onChange={(fees) => onChange({ assumptions: { ...s.assumptions, fees } })} />
       <Constraints s={s} E={E} onChange={(constraints) => onChange({ assumptions: { ...s.assumptions, constraints: constraints.length ? constraints : undefined } })} />
       <Methodology baseline={s.baseline} />
@@ -78,7 +77,7 @@ function FeeSetup({ value, onChange }: { value: FeeAssumption; onChange: (v: Fee
         onChange={(v) => onChange(v === 'Excluded' ? { mode: 'excluded' } : v === 'Custom' ? { mode: 'custom', pct: parsed.state === 'ok' ? parsed.value : Number.NaN } : DEFAULT_FEES)} />
       {value.mode === 'provider' && <>
         <Seg label="Assumed order role" options={['Taker', 'Maker'] as const} value={value.role === 'maker' ? 'Maker' : 'Taker'} onChange={(v) => onChange({ mode: 'provider', role: v === 'Maker' ? 'maker' : 'taker' })} />
-        <small className="t3">Uses each market’s fee parameters. Taker: your order fills against a resting one. Maker: your resting order is filled; most standard markets charge makers nothing. Markets without parameters show the fee as unavailable, never $0.</small>
+        <small className="t3">Uses each market’s fee parameters. Taker: your order fills against a resting one. Maker: your resting order is filled. Most standard markets charge makers nothing. Markets without parameters show the fee as unavailable, never $0.</small>
       </>}
       {value.mode === 'custom' && <>
         <label className="fund"><input className="num-input" inputMode="decimal" aria-label="Custom fee, % of notional" placeholder="% of notional" value={pctText} aria-invalid={parsed.state === 'invalid' || (parsed.state === 'ok' && !validFeePct(parsed.value))} onChange={(e) => setPct(e.target.value)} /><span className="t3">% of notional</span></label>
@@ -104,7 +103,7 @@ function Constraints({ s, E, onChange }: { s: Scenario; E: Evaluation; onChange:
       <small className="t3">Say which joint outcomes can’t happen under the markets’ settlement rules. It changes this scenario’s best/worst cases only. It isn’t a correlation or a probability, and never changes Risk or other scenarios.</small>
       {verified.map((r) => <div className="list-row" key={`${r.a}-${r.b}`}><span>{title(r.a)} × {title(r.b)}</span><span className="r row"><Chip tone={REL_TEXT[r.cls].tone}>{REL_TEXT[r.cls].label}</Chip><small className="t3">{PROVENANCE_TEXT.verified}</small></span></div>)}
       {cs.map((c, i) => (
-        <div className="list-row" key={`${c.a}-${c.b}`}><span>{title(c.a)} × {title(c.b)}{stale.includes(c) && <small className="stale"> · not in this portfolio, no effect</small>}</span>
+        <div className="list-row" key={`${c.a}-${c.b}`}><span>{title(c.a)} × {title(c.b)}{stale.includes(c) && <small className="stale"> (not in this portfolio, no effect)</small>}</span>
           <span className="r row"><Chip tone={REL_TEXT[c.cls].tone}>{REL_TEXT[c.cls].label}</Chip><small className="t3">{PROVENANCE_TEXT.hypothetical}</small>
             <button type="button" className="link" onClick={() => onChange(cs.filter((_, k) => k !== i))} aria-label={`Remove constraint ${title(c.a)} × ${title(c.b)}`}>Remove</button></span></div>
       ))}
@@ -128,9 +127,9 @@ function Methodology({ baseline }: { baseline: Baseline }) {
     <details className="adv drawer-sec">
       <summary><span>Methodology</span><span className="t3">how results are calculated</span></summary>
       <div className="adv-b t2 method">
-        <p>Contracts settle at $1 or $0. Your assumed price applies to the whole quantity; slippage and order-book depth aren’t modelled. Quantities use a 0.01-share step; venue lot sizes aren’t enforced.</p>
-        <p>Cost basis is a weighted average including acquisition fees; sale proceeds are after fees. Cash stays on its venue. Added capital is contributed capital, never a gain.</p>
-        <p>Provider fee estimates follow each market’s parameters (Polymarket: rate × p × (1 − p), takers; Kalshi: 0.07 × p × (1 − p), rounded up to the cent). In this build the parameters are sample values.</p>
+        <p>Contracts settle at $1 or $0. Your assumed price applies to the whole quantity. Slippage and order-book depth aren’t modelled. Quantities use a 0.01-share step. Platform lot sizes aren’t enforced.</p>
+        <p>Cost basis is a weighted average including acquisition fees. Sale proceeds are after fees. Cash stays on its venue. Added capital is contributed capital, never a gain.</p>
+        <p>Provider fee estimates follow each market’s parameters (Polymarket charges takers rate × p × (1 − p). Kalshi charges 0.07 × p × (1 − p), rounded up to the cent). In this build the parameters are sample values.</p>
         <p>{baseline === 'portfolio' ? 'Starts from the sample portfolio’s holdings and cash at their reference marks.' : 'Starts empty: no holdings, cash or history from your accounts.'} Best and worst cases enumerate every feasible joint outcome (up to 16 events); none is weighted by likelihood.</p>
       </div>
     </details>
@@ -145,7 +144,7 @@ function FundingInput({ p, value, onChange }: { p: Platform; value?: number; onC
   const invalid = parsed.state === 'invalid' || (value != null && !validFunding(value))
   const acct = accountsOn(p)
   return (
-    <label className={cx('fund', invalid && 'has-error')} title={acct.length === 1 ? `${PLATFORM_NAME[p]} · ${accountName(acct[0].id)}` : undefined}><PlatformBadge p={p} size={18} />
+    <label className={cx('fund', invalid && 'has-error')} title={acct.length === 1 ? `${accountName(acct[0].id)} on ${PLATFORM_NAME[p]}` : undefined}><PlatformBadge p={p} size={18} />
       <span className="sr-only">Added capital on {PLATFORM_NAME[p]}</span>
       <input className="num-input" inputMode="decimal" placeholder={`${PLATFORM_NAME[p]} ${DEFAULT_ASSET[p]}`} aria-label={`Added capital on ${PLATFORM_NAME[p]}`} aria-invalid={invalid} value={text}
         onChange={(e) => { const t = e.target.value; setText(t); const r = parseMoney(t); onChange(r.state === 'empty' ? undefined : r.state === 'ok' ? r.value : Number.NaN) }} />

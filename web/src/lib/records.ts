@@ -86,8 +86,8 @@ export const ACTION_HELP: Record<Action, string> = {
   exclude: 'Leaves the records out of this account. The source records aren’t deleted, and other decisions are kept.',
   restore: 'Returns membership to how the source delivered the records. Corrections and duplicate or identity decisions stay.',
   distinct: 'Accepts records that looked like overlaps as separate transactions.',
-  reset_identity: 'Removes a “distinct” decision; overlapping records need review again.',
-  reset_duplicate: 'Removes the duplicate link; the record counts on its own again (or needs review).',
+  reset_identity: 'Removes a “distinct” decision. Overlapping records need review again.',
+  reset_duplicate: 'Removes the duplicate link. The record counts on its own again, or needs review.',
   reset_correction: 'Returns the records to their original source values.',
   reset_all: 'Removes every decision and correction: the records are as delivered.',
 }

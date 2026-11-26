@@ -44,6 +44,6 @@ export const rng = (seed: number) => () => (seed = (seed * 16807) % 2147483647) 
 export const qty = (v: number) => (Number.isInteger(v) ? nf(0).format(v) : new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(v))
 
 /** An amount in its native asset: "25,000.00 USDC". USD, USDC and PUSD are never silently treated as the same. */
-export const fmtNative = (v: number, denom: string, d = 2) => `${v < 0 ? '−' : ''}${nf(d).format(Math.abs(v))} ${denom}`
+export const fmtNative = (v: number, denom: string, d = 2) => `${v < 0 ? '−' : ''}${nf(d).format(Math.abs(v))} ${denom === 'PUSD' ? 'pUSD' : denom}`
 /** A binary contract's market price, as a price (0.64) or as the market-implied probability (64%). Never a forecast. */
 export const fmtPx = (p: number, mode: 'price' | 'implied' = 'price') => (mode === 'implied' ? `${Math.round(p * 100)}%` : p.toFixed(2))

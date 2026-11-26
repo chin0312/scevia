@@ -16,7 +16,7 @@ export function OutcomeMatrix({ start, after, rels, onRelations }: { start: Simu
   const [sel, setSel] = useState<[string | null, string | null]>([null, null])
   const aId = sel[0] && events.some((e) => e.id === sel[0]) ? sel[0] : pick[0]?.id ?? null
   const bId = sel[1] && events.some((e) => e.id === sel[1]) && sel[1] !== aId ? sel[1] : pick.find((e) => e.id !== aId)?.id ?? null
-  if (!aId || !bId) return <div className="empty"><p>The outcome matrix needs two events. {events.length === 1 ? 'This portfolio holds one event; its payoffs are shown below.' : 'Add positions to see joint outcomes.'}</p></div>
+  if (!aId || !bId) return <div className="empty"><p>The outcome matrix needs two events. {events.length === 1 ? 'This portfolio holds one event. Its payoffs are shown below.' : 'Add positions to see joint outcomes.'}</p></div>
   const evA = events.find((e) => e.id === aId)!, evB = events.find((e) => e.id === bId)!
   const relation = findRelation(aId, bId, rels)
   const rel = relation?.cls ?? null, binds = !!relation && constrains(relation)

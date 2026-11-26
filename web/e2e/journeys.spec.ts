@@ -53,7 +53,7 @@ test('1 · view a position in Overview, then add it to a scenario only after cho
   await expect(page).toHaveURL(/\/scenario-lab$/) // the request is consumed, so reload/Back can't re-add
   const add = page.getByRole('dialog', { name: 'Add to a scenario' })
   await expect(add).toContainText(p.market)
-  await add.getByLabel('Target scenario').selectOption({ label: 'Exit sports longshots · 2 positions' })
+  await add.getByLabel('Target scenario').selectOption({ label: 'Exit sports longshots (2 positions)' })
   await add.getByRole('button', { name: 'Add 1 position' }).click()
   await expect(page.getByRole('heading', { level: 1 })).toContainText('Exit sports longshots')
   // starts at the current holding and mark: nothing changes until the user edits it
@@ -76,7 +76,7 @@ test('1b · cancelling an incoming add changes no scenario; already-included pos
   expect(JSON.parse((await page.evaluate(() => sessionStorage.getItem('scevia-scenarios-v5')))!)).toEqual(JSON.parse(before!))
 
   await page.goto('/scenario-lab?add=fedk') // the draft already adjusts this contract
-  await page.getByRole('dialog', { name: 'Add to a scenario' }).getByLabel('Target scenario').selectOption({ label: 'Trim crypto, add to Fed · 3 positions' })
+  await page.getByRole('dialog', { name: 'Add to a scenario' }).getByLabel('Target scenario').selectOption({ label: 'Trim crypto, add to Fed (3 positions)' })
   await expect(page.getByText('Already in this scenario: left as it is')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Nothing to add' })).toBeDisabled()
 })
@@ -177,7 +177,7 @@ test('3 · a hypothetical settlement constraint changes only its own scenario; R
 test('4 · switching platform and period keeps summaries consistent', async ({ page }) => {
   await fresh(page, '/overview')
   await page.getByRole('radiogroup', { name: 'Platform' }).getByRole('radio', { name: /Polymarket/ }).click()
-  await expect(page.getByText('Sample portfolio: Polymarket only')).toBeVisible()
+  await expect(page.getByText('Sample portfolio, Polymarket only')).toBeVisible()
   const pm = account('pm')
   const [i, d] = pm.totalValue.toFixed(2).split('.')
   await expect(page.locator('.hero-fig')).toContainText(`$${Number(i).toLocaleString('en-US')}`)
@@ -210,7 +210,7 @@ test('Risk: table filters never change portfolio-level metrics', async ({ page }
   const portfolioWorst = await tile.innerText()
   await page.getByRole('tab', { name: 'Next 30 days' }).click()
   await expect(tile).toHaveText(portfolioWorst)
-  await expect(page.locator('#payoffs .po-row.t')).toContainText('shown (subtotal)')
+  await expect(page.locator('#payoffs .po-row.t')).toContainText('Subtotal for')
   // make "Over guardrail" empty: raise the guardrail above every event
   await page.getByRole('button', { name: /Edit \d+% guardrail/ }).click()
   await page.getByLabel('Guardrail percent').fill('40')
@@ -366,7 +366,7 @@ test('hand-offs keep existing adjustments untouched', async ({ page }) => {
   await row.hover()
   await row.getByRole('button', { name: 'Simulate' }).click()
   const add = page.getByRole('dialog', { name: 'Add to a scenario' })
-  await add.getByLabel('Target scenario').selectOption({ label: 'Trim crypto, add to Fed · 3 positions' })
+  await add.getByLabel('Target scenario').selectOption({ label: 'Trim crypto, add to Fed (3 positions)' })
   await expect(add.getByText('Already in this scenario: left as it is')).toBeVisible()
   await expect(add.getByRole('button', { name: 'Nothing to add' })).toBeDisabled()
   await add.getByRole('button', { name: 'Cancel' }).click()
@@ -598,10 +598,10 @@ test('constraints and fee settings are per scenario; a scratch scenario shows no
   await page.getByRole('button', { name: 'New scenario' }).click()
   await page.getByRole('menuitem', { name: /Current portfolio/ }).click()
   await page.keyboard.press('Enter')
-  await expect(page.locator('.assume-bar')).toContainText('provider estimate · taker')
+  await expect(page.locator('.assume-bar')).toContainText('provider estimate, taker')
   await view(page, 'Compare')
   await expect(page.locator('#c-table')).toContainText('Excluded')
-  await expect(page.locator('#c-table')).toContainText('Provider estimate · taker')
+  await expect(page.locator('#c-table')).toContainText('Provider estimate, taker')
 })
 
 test('unavailable values stay unavailable: beyond the event limit and without a reference price', async ({ page }) => {
@@ -620,7 +620,7 @@ test('unavailable values stay unavailable: beyond the event limit and without a 
   await expect(summary(page, 'Settlement range')).toHaveText('Unavailable')
   await expect(summary(page, 'Value at reference marks')).toHaveText('Unavailable')
   await view(page, 'Analyze')
-  await expect(page.locator('#a-summary')).toContainText('above 16 events')
+  await expect(page.locator('#a-summary')).toContainText('More than 16 events')
   await expect(page.locator('#a-bridge')).toContainText('Unavailable')
   await expect(page.locator('#a-alloc')).toContainText('Allocation is unavailable')
   await view(page, 'Compare')
@@ -649,7 +649,7 @@ test('hand-off into an empty-portfolio scenario adds from zero unless quantities
   await page.goto(`/scenario-lab?add=shut&from=Test&req=t1`)
   const add = page.getByRole('dialog', { name: 'Add to a scenario' })
   await expect(add).toContainText('starts from an empty portfolio')
-  await expect(add).toContainText('Added from zero; you enter the quantity')
+  await expect(add).toContainText('Added from zero. You enter the quantity')
   await add.getByRole('button', { name: 'Add 1 position' }).click()
   await expect(target(page, POS_BY_ID.shut.market)).toHaveValue('')
   await expect(page.getByRole('status')).toContainText('from zero')
@@ -733,7 +733,7 @@ test('multi-select add: several holdings and markets at once, outcome by outcome
   await dlg.getByLabel(`Select ${POS_BY_ID.cel.market} YES`).check()
   await dlg.getByRole('tab', { name: 'Search markets' }).click()
   await dlg.getByLabel('Search markets').fill('Fed')
-  await expect(dlg).toContainText('2 markets · pick each one you want') // a multi-market event lists each market
+  await expect(dlg).toContainText('2 markets, pick any') // a multi-market event lists each market
   await dlg.getByRole('button', { name: /Select Fed cuts rates at Jan 2027 FOMC YES/ }).click()
   await dlg.getByLabel('Search markets').fill('Bitcoin')
   await expect(dlg.getByRole('button', { name: /^Deselect Bitcoin above \$150k on Dec 31 YES/ })).toHaveAttribute('aria-pressed', 'true') // same instrument as the picked holding
@@ -838,20 +838,20 @@ test('portfolio records: filter, select across pages, preview and confirm a bulk
   await scope.getByRole('button', { name: /Select all 21 matching/ }).click()
   await expect(scope).toContainText('21 selected')
   // Changing the filters clears the selection instead of keeping hidden records selected.
-  await page.getByRole('search', { name: 'Filter records' }).getByLabel('Account').selectOption({ label: 'Polymarket · Wallet B' })
+  await page.getByRole('search', { name: 'Filter records' }).getByLabel('Account').selectOption({ label: 'Wallet B on Polymarket' })
   await expect(scope).toContainText('Selection cleared because the filters changed')
   await page.getByLabel('Select all records on this page').check()
   await scope.getByRole('button', { name: 'Exclude…' }).click()
   const confirm = page.getByRole('dialog', { name: /Exclude: 4 selected records/ })
   await expect(confirm).toContainText('source records aren’t deleted')
   await expect(confirm).toContainText('Unknown amounts') // fees not reported are counted, not zero
-  await expect(confirm).toContainText('Polymarket · Wallet B')
+  await expect(confirm).toContainText('Wallet B on Polymarket')
   await confirm.getByRole('button', { name: 'Cancel' }).click()
   await expect(page.locator('.rec-table tr.excluded')).toHaveCount(0)
   await scope.getByRole('button', { name: 'Exclude…' }).click()
-  await page.getByRole('dialog', { name: /Exclude: 4 selected records/ }).getByRole('button', { name: 'Exclude · 4' }).click()
+  await page.getByRole('dialog', { name: /Exclude: 4 selected records/ }).getByRole('button', { name: 'Exclude (4)' }).click()
   await expect(page.locator('.rec-table tr.excluded')).toHaveCount(4)
-  await page.getByRole('button', { name: /Undo: Exclude · 4 records/ }).click()
+  await page.getByRole('button', { name: /Undo: Exclude 4 records/ }).click()
   await expect(page.locator('.rec-table tr.excluded')).toHaveCount(0)
   await page.goto('/overview')
   const a = account('all'), [i] = a.totalValue.toFixed(2).split('.')
@@ -874,7 +874,7 @@ test('imports: a supplement keeps overlaps for review; duplicate links, membersh
   await expect(page).toHaveURL(/status=review/)
   await expect(page.locator('.rec-table tbody tr')).toHaveCount(2)
   await page.locator('.rec-table tbody tr').filter({ hasText: 'Bitcoin' }).getByRole('button', { name: /Bitcoin/ }).click()
-  const drawer = page.getByRole('dialog', { name: /Buy · Bitcoin/ })
+  const drawer = page.getByRole('dialog', { name: /Buy: Bitcoin/ })
   await drawer.getByRole('button', { name: /Duplicate of a-002/ }).click()
   await expect(drawer).toContainText('Duplicate of a-002')
   await drawer.getByRole('button', { name: 'Exclude' }).click()
@@ -930,7 +930,7 @@ test('manual records: explicit outcome, any account (including a connected one),
   await fresh(page, '/portfolio/transactions')
   await page.getByRole('button', { name: 'Add record…' }).click()
   const dlg = page.getByRole('dialog', { name: 'Add a record' })
-  await dlg.getByLabel('Record account').selectOption({ label: 'Kalshi · Main account' })
+  await dlg.getByLabel('Record account').selectOption({ label: 'Main account on Kalshi' })
   await dlg.getByLabel('Market', { exact: true }).selectOption({ label: 'Fed cuts rates at Dec 2026 FOMC' })
   await expect(dlg.getByRole('button', { name: 'Add record' })).toBeDisabled() // no outcome yet
   await dlg.getByRole('radiogroup', { name: 'Outcome' }).getByRole('radio', { name: 'NO' }).click()
@@ -983,7 +983,7 @@ test('settings: workspace preferences take effect; a section reset keeps the oth
   await dlg.getByRole('radiogroup', { name: 'Resolution alerts' }).getByRole('radio', { name: 'Off' }).click()
   await dlg.getByRole('button', { name: 'Done' }).click()
   await page.goto('/overview')
-  await expect(page.getByText('Sample portfolio: Kalshi only')).toBeVisible() // the Notifications reset kept General
+  await expect(page.getByText('Sample portfolio, Kalshi only')).toBeVisible() // the Notifications reset kept General
   await page.getByRole('button', { name: /^Notifications/ }).click()
   await expect(page.getByRole('menu', { name: 'Notifications' })).not.toContainText('scheduled to resolve')
   await page.keyboard.press('Escape')
@@ -991,7 +991,7 @@ test('settings: workspace preferences take effect; a section reset keeps the oth
   await expect(page.locator('main')).toContainText('30% guardrail') // and kept Risk
   await page.getByRole('button', { name: 'Settings' }).click()
   await dlg.getByRole('button', { name: 'Reset all…' }).click()
-  await expect(dlg).toContainText('Scenarios and records aren’t affected')
+  await expect(dlg).toContainText('Your scenarios and records stay as they are.')
   await dlg.getByRole('button', { name: 'Reset all preferences' }).click()
   await dlg.getByRole('button', { name: 'Done' }).click()
   await expect(page.locator('main')).toContainText('15% guardrail')
@@ -1029,7 +1029,7 @@ test('search: workspace content and actions, grouped, with context that tells sa
   await expect(dlg).toContainText('Suggested')
   await box.fill('bitcoin')
   await expect(dlg.locator('.palette-g')).toContainText(['Positions', 'Events', 'Transactions'])
-  const recs = dlg.getByRole('option', { name: /Buy · Bitcoin above \$150k on Dec 31 YES/ })
+  const recs = dlg.getByRole('option', { name: /Buy: Bitcoin above \$150k on Dec 31 YES/ })
   await expect(recs).toHaveCount(2)
   await expect(recs.nth(0)).toContainText(/Wallet 0x7a…c2|Wallet B/)
   await expect(recs.nth(1)).toContainText(/Wallet 0x7a…c2|Wallet B/)
@@ -1061,7 +1061,7 @@ test('account: guest state is honest; data clearing is grouped, confirmed and le
   await expect(dlg).toContainText('Your other data stays')
   await dlg.getByRole('button', { name: 'Clear preferences', exact: true }).click()
   await page.goto('/overview')
-  await expect(page.getByText('Sample portfolio: Polymarket only')).toHaveCount(0) // preference gone
+  await expect(page.getByText('Sample portfolio, Polymarket only')).toHaveCount(0) // preference gone
   await page.goto('/scenario-lab')
   await expect(page.getByRole('listbox', { name: 'Scenarios' })).toContainText('Hedge the shutdown') // scenario kept
 })
@@ -1083,18 +1083,18 @@ test('records: a refused storage write keeps the in-memory changes and says they
   await page.evaluate(() => { const orig = Storage.prototype.setItem; Storage.prototype.setItem = function (k: string, v: string) { if (k === 'scevia-records-v2') throw new Error('quota'); return orig.call(this, k, v) } })
   await page.getByLabel('Select record a-005').check()
   await page.getByRole('toolbar', { name: 'Selected records' }).getByRole('button', { name: 'Exclude…' }).click()
-  await page.getByRole('dialog', { name: /Exclude: 1 selected record/ }).getByRole('button', { name: 'Exclude · 1' }).click()
+  await page.getByRole('dialog', { name: /Exclude: 1 selected record/ }).getByRole('button', { name: 'Exclude (1)' }).click()
   await expect(page.locator('main')).toContainText('Changes aren’t being saved')
   await page.getByLabel('Select record a-004').check() // a second change: the first one is still there
   await page.getByRole('toolbar', { name: 'Selected records' }).getByRole('button', { name: 'Exclude…' }).click()
-  await page.getByRole('dialog', { name: /Exclude: 1 selected record/ }).getByRole('button', { name: 'Exclude · 1' }).click()
+  await page.getByRole('dialog', { name: /Exclude: 1 selected record/ }).getByRole('button', { name: 'Exclude (1)' }).click()
   await expect(page.locator('.rec-table tr.excluded')).toHaveCount(2)
 })
 
 test('records: excluding an original shows its linked duplicate as indirectly affected', async ({ page }) => {
   await fresh(page, '/portfolio/transactions?q=Fed%20rate%20cut')
   await page.locator('.rec-table tbody tr', { hasText: 'Fed rate cut' }).first().getByRole('button', { name: /Fed rate cut/ }).click()
-  const drawer = page.getByRole('dialog', { name: /Buy · Fed rate cut/ })
+  const drawer = page.getByRole('dialog', { name: /Buy: Fed rate cut/ })
   await drawer.getByRole('button', { name: /^Duplicate of/ }).click()
   await expect(drawer).toContainText('Duplicate of a-007') // the first row (a-006) is linked to a-007
   await page.keyboard.press('Escape')
@@ -1103,7 +1103,7 @@ test('records: excluding an original shows its linked duplicate as indirectly af
   const dlg = page.getByRole('dialog', { name: /Exclude: 1 selected record/ })
   await expect(dlg).toContainText('Also affected')
   await expect(dlg).toContainText('1 will need review')
-  await dlg.getByRole('button', { name: 'Exclude · 1' }).click()
+  await dlg.getByRole('button', { name: 'Exclude (1)' }).click()
   await expect(page.locator('.rec-table tbody tr', { hasText: 'Needs review' })).toHaveCount(1)
 })
 
@@ -1137,7 +1137,7 @@ test('records: filters changed by search clear the selection; an undone import r
   const dlg = page.getByRole('dialog', { name: 'Import a CSV file' })
   await dlg.getByText('wallet-c-export.csv').click()
   await dlg.getByRole('button', { name: 'Continue' }).click()
-  await dlg.getByLabel('Account for import').selectOption({ label: 'Polymarket · Wallet B (imported)' })
+  await dlg.getByLabel('Account for import').selectOption({ label: 'Wallet B on Polymarket (imported)' })
   await dlg.getByRole('radiogroup', { name: 'Import relationship' }).getByRole('radio', { name: 'Independent records' }).click()
   await dlg.getByRole('button', { name: 'Continue' }).click(); await dlg.getByRole('button', { name: 'Continue' }).click()
   await dlg.getByRole('button', { name: 'Import 3 rows' }).click(); await dlg.getByRole('button', { name: 'Done' }).click()

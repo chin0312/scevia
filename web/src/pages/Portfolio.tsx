@@ -35,7 +35,7 @@ const SOURCE_LABEL = { api: 'API sync', csv: 'CSV import', manual: 'Manual' } as
 const KIND_LABEL = { connected: 'Connected', imported: 'Imported', manual: 'Manual' } as const
 const when = (iso: string) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
 const newId = (p: string) => `${p}-${Date.now().toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`
-const acctName = (ws: Workspace, id: string) => { const a = ws.accounts.find((x) => x.id === id); return a ? `${PLATFORM_NAME[a.venue]} · ${a.label}` : 'Unknown account' }
+const acctName = (ws: Workspace, id: string) => { const a = ws.accounts.find((x) => x.id === id); return a ? `${a.label} on ${PLATFORM_NAME[a.venue]}` : 'Unknown account' }
 
 export default function Portfolio() {
   useHashScroll()
@@ -74,7 +74,7 @@ export default function Portfolio() {
       </aside>
       <main>
         <section className="page-head anchor" id="summary">
-          <div><div className="caps"><span className="accent">Portfolio</span> · <WorkspaceLabel /> · {ws.accounts.length} accounts</div><h1>{title}</h1></div>
+          <div><div className="caps"><span className="accent">Portfolio</span></div><h1>{title}</h1></div>
           <div className="actions">
             <Button icon="download" onClick={() => setImporting({})}>Import CSV…</Button>
             <Button icon="plus" onClick={() => setManual('')}>Add record…</Button>
@@ -89,7 +89,7 @@ export default function Portfolio() {
         {section === 'transactions' && <Transactions ws={ws} commit={commit} />}
         {section === 'imports' && <Imports ws={ws} reviewCount={reviewCount} onImport={(file, accountId) => setImporting({ file, accountId })} />}
         {section === 'coverage' && <Coverage ws={ws} />}
-        <div className="footer-note"><span>Original records stay inspectable; decisions are reversible and never delete source data.</span><span><WorkspaceLabel /></span></div>
+        <div className="footer-note"><span>Original records stay available. Decisions can be undone and never delete source data.</span><span><WorkspaceLabel /></span></div>
       </main>
       {importing && <ImportFlow ws={ws} preset={importing} onClose={() => setImporting(null)} onDone={(label, next, review, batchId) => {
         commit(label, next); setImporting(null)
@@ -107,7 +107,7 @@ function Accounts({ ws, onRename, onImport, onManual }: { ws: Workspace; onRenam
   const [renaming, setRenaming] = useState<WorkspaceAccount | null>(null)
   return (<>
     <Card id="accounts">
-      <CardHeader title="Financial accounts" sub="One wallet or venue login each. Several can share a venue; one account can have several sources." info="A venue (Polymarket, Kalshi) is where positions are held. An account is one wallet or login there. A source (API sync, CSV file, manual entry) is how its records arrive. Being connected doesn’t mean the history is complete." />
+      <CardHeader title="Financial accounts" sub="One wallet or venue login each. Several can share a platform, and one account can have several sources." info="A venue (Polymarket, Kalshi) is where positions are held. An account is one wallet or login there. A source (API sync, CSV file, manual entry) is how its records arrive. Being connected doesn’t mean the history is complete." />
       <div className="card-b acct-grid">
         {ws.accounts.map((a) => {
           const rs = ws.records.filter((r) => r.accountId === a.id), times = rs.map((r) => R.effective(r).time).sort()
@@ -119,13 +119,13 @@ function Accounts({ ws, onRename, onImport, onManual }: { ws: Workspace; onRenam
               <div className="row"><PlatformBadge p={a.venue} size={20} /><b className="acct-name" title={a.label}>{a.label}</b><Chip tone={a.kind === 'connected' ? 'info' : undefined}>{KIND_LABEL[a.kind]}</Chip></div>
               <dl className="kv kv-sm">
                 <dt>Venue</dt><dd>{PLATFORM_NAME[a.venue]}</dd>
-                <dt>Sources</dt><dd>{srcs.map((s) => SOURCE_LABEL[s]).join(' + ')}{a.connection ? ` · ${a.connection}` : ''}</dd>
+                <dt>Sources</dt><dd>{srcs.map((s) => SOURCE_LABEL[s]).join(' + ')}{a.connection ? `, ${a.connection}` : ''}</dd>
                 <dt>Last observed</dt><dd>{a.lastObserved ? when(a.lastObserved) : 'No connection'}</dd>
-                <dt>Records</dt><dd>{rs.length}{times.length ? ` · ${when(times[0])} – ${when(times.at(-1)!)}` : ''}</dd>
+                <dt>Records</dt><dd>{rs.length}{times.length ? `, ${when(times[0])} – ${when(times.at(-1)!)}` : ''}</dd>
                 <dt>Opening state</dt><dd className={cx(!a.openingDeclared && 'warn-fg')}>{a.openingDeclared ? 'Declared' : 'Unknown before first record'}</dd>
                 <dt>In figures</dt><dd>{a.inAnalytics ? 'Portfolio figures' : 'Records only'}</dd>
               </dl>
-              {(review > 0 || unknown > 0) && <small className="stale">{[review ? `${review} need review` : '', unknown ? `${unknown} with unknown amounts` : ''].filter(Boolean).join(' · ')}</small>}
+              {(review > 0 || unknown > 0) && <small className="stale">{[review ? `${review} need review` : '', unknown ? `${unknown} with unknown amounts` : ''].filter(Boolean).join(', ')}</small>}
               <div className="row acct-actions">
                 <Button size="sm" onClick={() => nav(`/portfolio/transactions?account=${encodeURIComponent(a.id)}`)}>Transactions</Button>
                 <Button size="sm" variant="ghost" onClick={() => onImport(a.id)}>Import…</Button>
@@ -143,7 +143,7 @@ function Accounts({ ws, onRename, onImport, onManual }: { ws: Workspace; onRenam
 function RenameAccount({ a, onClose, onSave }: { a: WorkspaceAccount; onClose: () => void; onSave: (label: string) => void }) {
   const [v, setV] = useState(a.label)
   return (
-    <Modal title="Rename account" sub="The name is a label; the account’s identity and records don’t change" onClose={onClose}
+    <Modal title="Rename account" sub="The name is only a label. The account’s identity and records don’t change" onClose={onClose}
       footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" disabled={!v.trim()} onClick={() => onSave(v.trim())}>Save</Button></>}>
       <label className="add-field"><span className="l">Account name</span><input data-autofocus className="text-input" value={v} maxLength={60} onChange={(e) => setV(e.target.value)} aria-label="Account name" /></label>
     </Modal>
@@ -160,21 +160,21 @@ function Sources({ ws, onImport, onManual }: { ws: Workspace; onImport: () => vo
       <div className="src-list">
         {connected.map((a) => (
           <div className="src-row" key={a.id}><PlatformBadge p={a.venue} />
-            <div><b>{a.connection === 'public address tracking' ? 'Public wallet tracking' : 'Read-only account access'}</b><small className="t3">{PLATFORM_NAME[a.venue]} · {a.label} · sample data, last observed {a.lastObserved ? when(a.lastObserved) : '—'}</small></div>
+            <div><b>{a.connection === 'public address tracking' ? 'Public wallet tracking' : 'Read-only account access'}</b><small className="t3">{a.label} on {PLATFORM_NAME[a.venue]}. Last observed {a.lastObserved ? when(a.lastObserved) : 'never'}</small></div>
             <Chip>Sample</Chip></div>
         ))}
         <div className="src-row"><span className="plat file" aria-hidden="true"><Icon name="download" size={13} /></span>
-          <div><b>CSV import</b><small className="t3">{csv.length} active batch{csv.length === 1 ? '' : 'es'} across {new Set(csv.map((b) => b.accountId)).size} account{new Set(csv.map((b) => b.accountId)).size === 1 ? '' : 's'} · sample files</small></div>
+          <div><b>CSV import</b><small className="t3">{csv.length} active batch{csv.length === 1 ? '' : 'es'} across {new Set(csv.map((b) => b.accountId)).size} account{new Set(csv.map((b) => b.accountId)).size === 1 ? '' : 's'}, sample files</small></div>
           <Button size="sm" onClick={onImport}>Import…</Button></div>
         <div className="src-row"><span className="plat file" aria-hidden="true"><Icon name="edit" size={13} /></span>
-          <div><b>Manual entry</b><small className="t3">{manual.length} manual record{manual.length === 1 ? '' : 's'} · can supplement any account</small></div>
+          <div><b>Manual entry</b><small className="t3">{manual.length} manual record{manual.length === 1 ? '' : 's'}, can supplement any account</small></div>
           <Button size="sm" onClick={onManual}>Add record…</Button></div>
       </div>
     </Card>
     <Card id="add-source" flush>
       <CardHeader pad title="Add a source" sub="You choose which sources Scevia reads. It never places trades, moves funds, or asks for private keys or seed phrases." />
       <div className="src-list">
-        <div className="src-row"><PlatformBadge p="pm" /><div><b>Track a Polymarket wallet</b><small className="t3">Read-only, by public address. An address identifies a wallet; it isn’t proof you own it.</small></div><Button size="sm" disabled title="Not available yet">Connect</Button></div>
+        <div className="src-row"><PlatformBadge p="pm" /><div><b>Track a Polymarket wallet</b><small className="t3">Read-only, by public address. An address identifies a wallet. It isn’t proof you own it.</small></div><Button size="sm" disabled title="Not available yet">Connect</Button></div>
         <div className="src-row"><PlatformBadge p="ks" /><div><b>Connect a Kalshi account</b><small className="t3">Read-only access, with your explicit consent.</small></div><Button size="sm" disabled title="Not available yet">Connect</Button></div>
       </div>
       <div className="foot"><span>Connections aren’t available yet. CSV import and manual entry work with the sample records.</span><span /></div>
@@ -211,10 +211,10 @@ function Transactions({ ws, commit }: { ws: Workspace; commit: (label: string, w
   const active = JSON.stringify(f) !== JSON.stringify(R.NO_FILTER)
   return (<>
     <Card id="transactions" flush>
-      <CardHeader pad title="Records" sub="Original records from each source with your decisions applied. Search here filters records; use ⌘K to find anything else." />
+      <CardHeader pad title="Records" sub="Original records from each source with your decisions applied. Search here filters records. Use ⌘K to find anything else." />
       <div className="rec-filters" role="search" aria-label="Filter records">
         <input className="text-input" type="search" placeholder="Search market, outcome, type, reference…" aria-label="Search records" value={f.q} onChange={(e) => setFilter({ q: e.target.value })} />
-        <select className="select" aria-label="Account" value={f.account} onChange={(e) => setFilter({ account: e.target.value })}><option value="all">All accounts</option>{ws.accounts.map((a) => <option key={a.id} value={a.id}>{PLATFORM_NAME[a.venue]} · {a.label}</option>)}</select>
+        <select className="select" aria-label="Account" value={f.account} onChange={(e) => setFilter({ account: e.target.value })}><option value="all">All accounts</option>{ws.accounts.map((a) => <option key={a.id} value={a.id}>{a.label} on {PLATFORM_NAME[a.venue]}</option>)}</select>
         <select className="select" aria-label="Venue" value={f.venue} onChange={(e) => setFilter({ venue: e.target.value })}><option value="all">All venues</option><option value="pm">Polymarket</option><option value="ks">Kalshi</option></select>
         <select className="select" aria-label="Source" value={f.source} onChange={(e) => setFilter({ source: e.target.value })}><option value="all">All sources</option>{(Object.keys(SOURCE_LABEL) as (keyof typeof SOURCE_LABEL)[]).map((s) => <option key={s} value={s}>{SOURCE_LABEL[s]}</option>)}</select>
         <select className="select" aria-label="Type" value={f.type} onChange={(e) => setFilter({ type: e.target.value })}><option value="all">All types</option>{(Object.keys(R.TYPE_LABEL) as RecordType[]).map((t) => <option key={t} value={t}>{R.TYPE_LABEL[t]}</option>)}</select>
@@ -240,7 +240,7 @@ function Transactions({ ws, commit }: { ws: Workspace; commit: (label: string, w
         <table className="dt rec-table">
           <thead><tr>
             <th scope="col" className="rec-c"><input type="checkbox" aria-label="Select all records on this page" checked={allVisible} onChange={(e) => { setCleared(false); setSel((s) => { const n = new Set(s); visible.forEach((r) => (e.target.checked ? n.add(r.key) : n.delete(r.key))); return n }) }} /></th>
-            <th scope="col">Date</th><th scope="col">Account</th><th scope="col">Type</th><th scope="col">Market · outcome</th><th scope="col" className="r">Qty</th><th scope="col" className="r">Price</th><th scope="col" className="r">Cash effect</th><th scope="col" className="r">Fee</th><th scope="col">Source</th><th scope="col">Status</th>
+            <th scope="col">Date</th><th scope="col">Account</th><th scope="col">Type</th><th scope="col">Market and outcome</th><th scope="col" className="r">Qty</th><th scope="col" className="r">Price</th><th scope="col" className="r">Cash effect</th><th scope="col" className="r">Fee</th><th scope="col">Source</th><th scope="col">Status</th>
           </tr></thead>
           <tbody>
             {visible.length === 0 && <tr><td colSpan={11}><div className="empty"><p>No records match these filters.</p>{active && <button type="button" className="link" onClick={() => setFilter(R.NO_FILTER)}>Clear filters</button>}</div></td></tr>}
@@ -252,7 +252,7 @@ function Transactions({ ws, commit }: { ws: Workspace; commit: (label: string, w
                   <td className="tnum">{when(e.time)}</td>
                   <td><span className="row">{a && <PlatformBadge p={a.venue} size={16} />}<span className="acct-name" title={a?.label}>{a?.label ?? 'Unknown account'}</span></span></td>
                   <td>{R.TYPE_LABEL[e.type]}</td>
-                  <td className="mkt"><button type="button" className="link pb-link" onClick={() => setDetail(r.key)}>{e.instrument ?? R.TYPE_LABEL[e.type]}</button>{e.side && <small className="t3"> {e.side}</small>}{e.instrument && !e.marketId && <small className="t3"> · local</small>}</td>
+                  <td className="mkt"><button type="button" className="link pb-link" onClick={() => setDetail(r.key)}>{e.instrument ?? R.TYPE_LABEL[e.type]}</button>{e.side && <small className="t3"> {e.side}</small>}{e.instrument && !e.marketId && <small className="t3"> (local)</small>}</td>
                   <td className="r">{e.quantity == null ? '—' : qty(e.quantity)}</td>
                   <td className="r">{e.price == null ? '—' : e.price.toFixed(2)}</td>
                   <td className="r">{c == null ? <span className="stale">Unknown</span> : Math.abs(c) < 0.005 ? '$0' : sfmt(c, 2)}</td>
@@ -265,11 +265,11 @@ function Transactions({ ws, commit }: { ws: Workspace; commit: (label: string, w
           </tbody>
         </table>
       </div>
-      <div className="foot"><span>{rows.length} matching of {ws.records.length} records · page {pg + 1} of {pages}</span>
+      <div className="foot"><span>{rows.length} matching of {ws.records.length} records, page {pg + 1} of {pages}</span>
         <span className="row"><Button size="sm" variant="ghost" disabled={pg === 0} onClick={() => setPage(pg - 1)}>Previous</Button><Button size="sm" variant="ghost" disabled={pg >= pages - 1} onClick={() => setPage(pg + 1)}>Next</Button></span></div>
     </Card>
     {confirm && <ConfirmBulk action={confirm} keys={picked} ws={ws} onCancel={() => setConfirm(null)}
-      onConfirm={(p) => { commit(`${R.ACTION_LABEL[confirm]} · ${p.changed.length} record${p.changed.length === 1 ? '' : 's'}`, { ...ws, records: R.applyPreview(ws.records, p, confirm) }); setSel(new Set()); setConfirm(null); toast(`${R.ACTION_LABEL[confirm]}: ${p.changed.length} record${p.changed.length === 1 ? '' : 's'} changed`) }} />}
+      onConfirm={(p) => { commit(`${R.ACTION_LABEL[confirm]} ${p.changed.length} record${p.changed.length === 1 ? '' : 's'}`, { ...ws, records: R.applyPreview(ws.records, p, confirm) }); setSel(new Set()); setConfirm(null); toast(`${R.ACTION_LABEL[confirm]}: ${p.changed.length} record${p.changed.length === 1 ? '' : 's'} changed`) }} />}
     {detail && ws.records.some((r) => r.key === detail) && <RecordDetail r={ws.records.find((x) => x.key === detail)!} ws={ws} dups={dups[detail] ?? []} onClose={() => setDetail(null)} onChange={(label, records) => { commit(label, { ...ws, records }); toast(label) }} />}
   </>)
 }
@@ -279,7 +279,7 @@ function ConfirmBulk({ action, keys, ws, onCancel, onConfirm }: { action: R.Acti
   const cash = Object.entries(p.cash), q = Object.values(p.qty)
   return (
     <Modal title={`${R.ACTION_LABEL[action]}: ${keys.length} selected record${keys.length === 1 ? '' : 's'}?`} sub="Preview in this sample workspace" onClose={onCancel}
-      footer={<><Button variant="ghost" onClick={onCancel}>Cancel</Button><Button variant="primary" disabled={p.changed.length === 0} onClick={() => onConfirm(p)}>{p.changed.length ? `${R.ACTION_LABEL[action]} · ${p.changed.length}` : 'Nothing to change'}</Button></>}>
+      footer={<><Button variant="ghost" onClick={onCancel}>Cancel</Button><Button variant="primary" disabled={p.changed.length === 0} onClick={() => onConfirm(p)}>{p.changed.length ? `${R.ACTION_LABEL[action]} (${p.changed.length})` : 'Nothing to change'}</Button></>}>
       <p className="t2">{R.ACTION_HELP[action]}</p>
       <div className="effect">
         <div>Selected<b>{p.selected}</b></div><div>Will change<b>{p.changed.length}</b></div><div>Already in that state<b>{p.unchanged}</b></div>
@@ -289,8 +289,8 @@ function ConfirmBulk({ action, keys, ws, onCancel, onConfirm }: { action: R.Acti
       {p.indirect.length > 0 && <Callout tone="warn" icon="alert"><b>{p.indirect.length} other record{p.indirect.length === 1 ? '' : 's'} change as a result</b> ({p.indirect.join(', ')}): {p.indirect.length === 1 ? 'it links' : 'they link'} to a selected record as a duplicate. No decision is applied to {p.indirect.length === 1 ? 'it' : 'them'}{p.toReview.some((k) => p.indirect.includes(k)) ? `; ${p.toReview.filter((k) => p.indirect.includes(k)).length} will need review` : ''}. Effects below include {p.indirect.length === 1 ? 'it' : 'them'}.</Callout>}
       <small className="t3">Accounts: {p.accounts.map((a) => acctName(ws, a)).join(', ')}</small>
       {(cash.length > 0 || q.length > 0) && <dl className="kv">
-        {cash.map(([a, v]) => <Fragment key={a}><dt>Included cash · {acctName(ws, a)}</dt><dd>{sfmt(v, 2)}</dd></Fragment>)}
-        {q.map((x) => <Fragment key={`${x.accountId}${x.label}`}><dt>Shares · {x.label} · {ws.accounts.find((a) => a.id === x.accountId)?.label}</dt><dd>{x.delta > 0 ? '+' : '−'}{qty(Math.abs(x.delta))}</dd></Fragment>)}
+        {cash.map(([a, v]) => <Fragment key={a}><dt>Included cash, {acctName(ws, a)}</dt><dd>{sfmt(v, 2)}</dd></Fragment>)}
+        {q.map((x) => <Fragment key={`${x.accountId}${x.label}`}><dt>Shares of {x.label} in {ws.accounts.find((a) => a.id === x.accountId)?.label}</dt><dd>{x.delta > 0 ? '+' : '−'}{qty(Math.abs(x.delta))}</dd></Fragment>)}
       </dl>}
       <small className="t3">Effects are the change in included cash and shares of these records only, not recalculated balances or P&amp;L.{p.unknown ? ' Records with unreported fees are counted separately, not as $0.' : ''}</small>
     </Modal>
@@ -307,27 +307,27 @@ function RecordDetail({ r, ws, dups, onClose, onChange }: { r: R.ManagedRecord; 
   const cands = dups.map((k) => ws.records.find((x) => x.key === k)!).filter(Boolean)
   const run = (a: R.Action, label: string) => onChange(label, R.apply(ws.records, [r.key], a))
   return (
-    <Drawer title={`${R.TYPE_LABEL[e.type]} · ${e.instrument ?? acctName(ws, r.accountId)}`} sub={`${r.key} · ${SOURCE_LABEL[r.source]}${r.batchId ? ` · batch ${r.batchId}` : ''}`} onClose={onClose}>
+    <Drawer title={`${R.TYPE_LABEL[e.type]}: ${e.instrument ?? acctName(ws, r.accountId)}`} sub={`${r.key} from ${SOURCE_LABEL[r.source]}${r.batchId ? `, batch ${r.batchId}` : ''}`} onClose={onClose}>
       <dl className="kv">
         <dt>Account</dt><dd>{acctName(ws, r.accountId)}</dd>
-        <dt>Status</dt><dd>{R.STATUS_LABEL[st]}{st === 'review' && r.duplicateOf ? ` · ${linkProblem(r, ws.records)}` : ''}</dd>
+        <dt>Status</dt><dd>{R.STATUS_LABEL[st]}{st === 'review' && r.duplicateOf ? `, ${linkProblem(r, ws.records)}` : ''}</dd>
         <dt>Membership</dt><dd>{r.membership ? `${r.membership === 'include' ? 'Included' : 'Excluded'} by you` : 'As delivered'}</dd>
         <dt>Identity</dt><dd>{r.identity === 'distinct' ? 'Accepted as a separate transaction' : r.duplicateOf ? `Duplicate of ${r.duplicateOf}` : '—'}</dd>
         <dt>Source reference</dt><dd className="mono-s">{r.sourceRef}</dd>
         <dt>Time</dt><dd>{when(e.time)}</dd>
-        {e.instrument && <><dt>Market</dt><dd>{e.instrument} {e.side}{e.marketId ? '' : ' · local instrument (not matched to a catalog market)'}</dd></>}
-        {e.quantity != null && <><dt>Quantity</dt><dd>{qty(e.quantity)}{r.correction?.quantity !== undefined && <small className="t3"> · originally {r.quantity == null ? '—' : qty(r.quantity)}</small>}</dd></>}
-        {e.price != null && <><dt>Price</dt><dd>{e.price.toFixed(3)}{r.correction?.price !== undefined && <small className="t3"> · originally {r.price?.toFixed(3)}</small>}</dd></>}
+        {e.instrument && <><dt>Market</dt><dd>{e.instrument} {e.side}{e.marketId ? '' : ' (not matched to a catalog market)'}</dd></>}
+        {e.quantity != null && <><dt>Quantity</dt><dd>{qty(e.quantity)}{r.correction?.quantity !== undefined && <small className="t3">, originally {r.quantity == null ? '—' : qty(r.quantity)}</small>}</dd></>}
+        {e.price != null && <><dt>Price</dt><dd>{e.price.toFixed(3)}{r.correction?.price !== undefined && <small className="t3">, originally {r.price?.toFixed(3)}</small>}</dd></>}
         {e.amount != null && <><dt>Amount</dt><dd>{fmt(e.amount, 2)}</dd></>}
-        {trade && <><dt>Fee</dt><dd>{e.fee == null ? 'Not reported (unknown, not $0)' : fmt(e.fee, 2)}{r.correction && 'fee' in r.correction && <small className="t3"> · originally {r.fee == null ? 'not reported' : fmt(r.fee, 2)}</small>}</dd></>}
-        <dt>Cash effect</dt><dd>{R.cashEffect(e) == null ? 'Unknown' : sfmt(R.cashEffect(e)!, 2)}{e.type === 'settlement' ? ' · creates an entitlement; cash arrives with the redemption' : ''}</dd>
+        {trade && <><dt>Fee</dt><dd>{e.fee == null ? 'Not reported (unknown, not $0)' : fmt(e.fee, 2)}{r.correction && 'fee' in r.correction && <small className="t3">, originally {r.fee == null ? 'not reported' : fmt(r.fee, 2)}</small>}</dd></>}
+        <dt>Cash effect</dt><dd>{R.cashEffect(e) == null ? 'Unknown' : sfmt(R.cashEffect(e)!, 2)}{e.type === 'settlement' ? '. Cash arrives when it’s redeemed' : ''}</dd>
       </dl>
       {cands.length > 0 && !r.duplicateOf && r.identity !== 'distinct' && (
         <fieldset className="setup-f drawer-sec"><legend className="l">Possible duplicate of {cands.length > 1 ? `${cands.length} records` : 'another record'}</legend>
           <small className="t3">Same account, type and terms. It may be one transaction recorded twice, or two real identical trades.</small>
           {cands.map((c) => { const ce = R.effective(c), eligible = R.statusOf(c, ws.records) === 'included' && !c.duplicateOf; return (
             <label key={c.key} className={cx('choice', dupTarget === c.key && 'on')} style={eligible ? undefined : { opacity: 0.6 }} title={eligible ? undefined : 'Only an included record can be the original'}><input type="radio" name="dup" disabled={!eligible} checked={dupTarget === c.key} onChange={() => setDupTarget(c.key)} />
-              <span>{c.key} · {SOURCE_LABEL[c.source]}{c.batchId ? ` · batch ${c.batchId}` : ''}<small>{when(ce.time)} · {ce.quantity != null ? `${qty(ce.quantity)} @ ${ce.price?.toFixed(2)}` : ce.amount != null ? fmt(ce.amount, 2) : '—'} · {R.STATUS_LABEL[R.statusOf(c, ws.records)]}</small></span></label>
+              <span>{c.key}, {SOURCE_LABEL[c.source]}{c.batchId ? `, batch ${c.batchId}` : ''}<small>{when(ce.time)}, {ce.quantity != null ? `${qty(ce.quantity)} @ ${ce.price?.toFixed(2)}` : ce.amount != null ? fmt(ce.amount, 2) : '—'}, {R.STATUS_LABEL[R.statusOf(c, ws.records)]}</small></span></label>
           ) })}
           <div className="row" style={{ flexWrap: 'wrap' }}>
             <Button size="sm" disabled={!dupTarget} onClick={() => { const n = R.markDuplicate(ws.records, r.key, dupTarget); if (n) onChange(`Marked ${r.key} as a duplicate of ${dupTarget}`, n) }}>Duplicate of {dupTarget || '…'}</Button>
@@ -370,7 +370,7 @@ function Imports({ ws, reviewCount, onImport }: { ws: Workspace; reviewCount: nu
     <div className="grid g-2 anchor" id="review">
       <Card><CardHeader title="Needs review" sub="Overlapping or unresolved rows that don’t count until you decide" />
         <div className="card-b"><div className="big-n">{reviewCount}</div><Button size="sm" disabled={!reviewCount} onClick={() => nav('/portfolio/transactions?status=review')}>Review records</Button></div></Card>
-      <Card><CardHeader title="Possible duplicates" sub="Same account, type and terms; you decide whether they are one transaction" />
+      <Card><CardHeader title="Possible duplicates" sub="Same account, type and terms. You decide whether they are one transaction" />
         <div className="card-b"><div className="big-n">{dups}</div><Button size="sm" disabled={!dups} onClick={() => nav('/portfolio/transactions?duplicates=1')}>Review duplicates</Button></div></Card>
     </div>
     <Card id="imports" flush>
@@ -383,7 +383,7 @@ function Imports({ ws, reviewCount, onImport }: { ws: Workspace; reviewCount: nu
             const rs = ws.records.filter((r) => r.batchId === b.id)
             return (
               <tr key={b.id} className={cx(b.status === 'superseded' && 'excluded')}>
-                <td><span className="mono-s">{b.file}</span><small className="t3 cell-sub">batch {b.id}{b.replaces ? ` · replaces ${b.replaces}` : ''}</small></td>
+                <td><span className="mono-s">{b.file}</span><small className="t3 cell-sub">batch {b.id}{b.replaces ? `, replaces ${b.replaces}` : ''}</small></td>
                 <td>{acctName(ws, b.accountId)}</td><td>{b.mode === 'supplement' ? 'Supplements history' : 'Independent'}</td><td className="tnum">{when(b.importedAt)}</td>
                 <td className="r">{b.rows}</td><td className="r">{b.status === 'active' ? rs.filter((r) => R.statusOf(r, ws.records) === 'included').length : '—'}</td>
                 <td className="r">{b.status === 'active' ? rs.filter((r) => R.statusOf(r, ws.records) === 'review').length : '—'}</td>
@@ -429,12 +429,12 @@ function ImportFlow({ ws, preset, onClose, onDone }: { ws: Workspace; preset: { 
         {step === 4 && <Button variant="primary" onClick={() => onDone(`Imported ${sf.name} into ${isNew ? newLabel.trim() : ws.accounts.find((a) => a.id === accountId)?.label}`, result!.ws, review, p.batchId)}>Done</Button>}</>}>
       <ol className="steps" aria-label="Import steps">{STEPS.map((s, i) => <li key={s} className={cx(i === step && 'on', i < step && 'done')} aria-current={i === step ? 'step' : undefined}>{s}</li>)}</ol>
       {step === 0 && <fieldset className="add-list"><legend className="l">Choose a file</legend>
-        {SAMPLE_FILES.map((x) => <label key={x.name} className={cx('choice', file === x.name && 'on')}><input type="radio" name="file" checked={file === x.name} onChange={() => setFile(x.name)} /><span>{x.name} <Chip>Sample file</Chip><small>{x.about} · {x.rows.length} rows</small></span></label>)}
+        {SAMPLE_FILES.map((x) => <label key={x.name} className={cx('choice', file === x.name && 'on')}><input type="radio" name="file" checked={file === x.name} onChange={() => setFile(x.name)} /><span>{x.name} <Chip>Sample file</Chip><small>{x.about}, {x.rows.length} rows</small></span></label>)}
         <small className="t3">Importing your own files needs a Scevia account, which isn’t available yet.</small></fieldset>}
       {step === 1 && <>
         <label className="add-field"><span className="l">Account these records belong to</span>
           <select className="select" style={{ maxWidth: 'none' }} value={target} onChange={(e) => setTarget(e.target.value)} aria-label="Account for import">
-            {ws.accounts.map((a) => <option key={a.id} value={a.id}>{PLATFORM_NAME[a.venue]} · {a.label} ({KIND_LABEL[a.kind].toLowerCase()})</option>)}
+            {ws.accounts.map((a) => <option key={a.id} value={a.id}>{a.label} on {PLATFORM_NAME[a.venue]} ({KIND_LABEL[a.kind].toLowerCase()})</option>)}
             <option value="new">New imported account…</option></select></label>
         {isNew ? <div className="row" style={{ flexWrap: 'wrap', alignItems: 'flex-end' }}>
           <label className="add-field"><span className="l">Venue</span><Seg label="Venue" options={['Polymarket', 'Kalshi'] as const} value={PLATFORM_NAME[newVenue] as 'Polymarket'} onChange={(v) => setNewVenue(v === 'Kalshi' ? 'ks' : 'pm')} /></label>
@@ -442,7 +442,7 @@ function ImportFlow({ ws, preset, onClose, onDone }: { ws: Workspace; preset: { 
         </div> : (
           <fieldset className="setup-f"><legend className="l">How does this file relate to the account?</legend>
             <Seg label="Import relationship" options={['Supplements its history', 'Independent records'] as const} value={mode === 'supplement' ? 'Supplements its history' : 'Independent records'} onChange={(v) => setMode(v === 'Independent records' ? 'independent' : 'supplement')} />
-            <small className="t3">{mode === 'supplement' ? 'Rows that exactly match records the account already has are flagged for review; nothing is merged automatically.' : 'Every row is added as its own record in this account, without overlap checks.'}</small></fieldset>
+            <small className="t3">{mode === 'supplement' ? 'Rows that exactly match records the account already has are flagged for review. Nothing is merged automatically.' : 'Every row is added as its own record in this account, without overlap checks.'}</small></fieldset>
         )}
         {p.replaces && <Callout tone="warn" icon="alert">This file is already imported into this account (batch {p.replaces.id}). Continuing replaces that batch; your decisions carry over to matching rows.</Callout>}
         {isNew && <small className="t3">A new imported account is independent: its records aren’t matched against other accounts, even on the same venue.</small>}
@@ -450,7 +450,7 @@ function ImportFlow({ ws, preset, onClose, onDone }: { ws: Workspace; preset: { 
       {step === 2 && <>
         <div className="effect"><div>Rows<b>{p.rows.length}</b></div><div>Overlap with existing<b>{overlaps}</b></div><div>Fees not reported<b>{feeUnknown}</b></div>{p.replaces && <div>Decisions carried<b>{carried}</b></div>}</div>
         <div className="dt-wrap"><table className="dt"><thead><tr><th scope="col">#</th><th scope="col">Date</th><th scope="col">Type</th><th scope="col">Market</th><th scope="col" className="r">Qty</th><th scope="col" className="r">Price / amount</th><th scope="col">Notes</th></tr></thead>
-          <tbody>{p.rows.map((x) => <tr key={x.n}><td>{x.n}</td><td className="tnum">{when(x.rec.time)}</td><td>{R.TYPE_LABEL[x.rec.type]}</td><td>{x.rec.instrument ? `${x.rec.instrument} ${x.rec.side}` : '—'}</td><td className="r">{x.rec.quantity == null ? '—' : qty(x.rec.quantity)}</td><td className="r">{x.rec.price != null ? x.rec.price.toFixed(2) : x.rec.amount != null ? fmt(x.rec.amount, 2) : '—'}</td><td>{x.warnings.length ? <span className="stale">{x.warnings.join(' · ')}</span> : <span className="t3">—</span>}</td></tr>)}</tbody></table></div>
+          <tbody>{p.rows.map((x) => <tr key={x.n}><td>{x.n}</td><td className="tnum">{when(x.rec.time)}</td><td>{R.TYPE_LABEL[x.rec.type]}</td><td>{x.rec.instrument ? `${x.rec.instrument} ${x.rec.side}` : '—'}</td><td className="r">{x.rec.quantity == null ? '—' : qty(x.rec.quantity)}</td><td className="r">{x.rec.price != null ? x.rec.price.toFixed(2) : x.rec.amount != null ? fmt(x.rec.amount, 2) : '—'}</td><td>{x.warnings.length ? <span className="stale">{x.warnings.join('. ')}</span> : <span className="t3">—</span>}</td></tr>)}</tbody></table></div>
       </>}
       {step === 3 && <>
         <p className="t2">{effMode === 'independent' ? `All ${p.rows.length} rows will be added to ${isNew ? newLabel.trim() : acctName(ws, accountId)} as its own records.` : `${overlaps} overlapping row${overlaps === 1 ? '' : 's'} will wait for your review (duplicate or separate). ${p.rows.length - overlaps} row${p.rows.length - overlaps === 1 ? ' has' : 's have'} no match.`}</p>
@@ -502,7 +502,7 @@ function ManualRecord({ ws, preset, onClose, onAdd }: { ws: Workspace; preset: s
   return (
     <Modal title="Add a record" sub="A manual record supplements any account, including a connected one" onClose={onClose} width={560}
       footer={<><small className="t3" style={{ marginRight: 'auto' }}>{errs[0] ?? ''}</small><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" disabled={errs.length > 0} onClick={add}>Add record</Button></>}>
-      <label className="add-field"><span className="l">Account</span><select data-autofocus className="select" style={{ maxWidth: 'none' }} value={acct} onChange={(e) => { setAcct(e.target.value); setMarketId('') }} aria-label="Record account">{ws.accounts.map((a) => <option key={a.id} value={a.id}>{PLATFORM_NAME[a.venue]} · {a.label}</option>)}<option value="new">New manual account…</option></select></label>
+      <label className="add-field"><span className="l">Account</span><select data-autofocus className="select" style={{ maxWidth: 'none' }} value={acct} onChange={(e) => { setAcct(e.target.value); setMarketId('') }} aria-label="Record account">{ws.accounts.map((a) => <option key={a.id} value={a.id}>{a.label} on {PLATFORM_NAME[a.venue]}</option>)}<option value="new">New manual account…</option></select></label>
       {acct === 'new' && <div className="row" style={{ flexWrap: 'wrap', alignItems: 'flex-end' }}>
         <label className="add-field"><span className="l">Venue</span><Seg label="Venue" options={['Polymarket', 'Kalshi'] as const} value={PLATFORM_NAME[newVenue] as 'Polymarket'} onChange={(v) => { setNewVenue(v === 'Kalshi' ? 'ks' : 'pm'); setMarketId('') }} /></label>
         <label className="add-field" style={{ flex: 1 }}><span className="l">Account name</span><input className="text-input" value={newLabel} maxLength={60} onChange={(e) => setNewLabel(e.target.value)} aria-label="New account name" /></label></div>}
@@ -535,12 +535,12 @@ function Coverage({ ws }: { ws: Workspace }) {
   const review = ws.records.filter((r) => R.statusOf(r, ws.records) === 'review').length
   return (<>
     <Card id="coverage" flush>
-      <CardHeader pad title={<WorkspaceLabel />} sub={`What Overview, Analytics and Risk are based on · history from ${fmtDate(HISTORY_START, { month: 'short', day: 'numeric', year: 'numeric' })}`} />
+      <CardHeader pad title={<WorkspaceLabel />} sub={`What Overview, Analytics and Risk are based on. History from ${fmtDate(HISTORY_START, { month: 'short', day: 'numeric', year: 'numeric' })}`} />
       <div className="dt-wrap"><table className="dt">
         <thead><tr><th scope="col">Account</th><th scope="col">Source</th><th scope="col">Observed</th><th scope="col" className="r">Open positions</th><th scope="col" className="r">Fills</th><th scope="col" className="r">Settlements</th><th scope="col" className="r">Estimated fees</th><th scope="col">Opening state</th></tr></thead>
         <tbody>{ws.accounts.filter((x) => x.inAnalytics).map((x) => { const c = coverage(x.venue), s = sourceOf(x.venue); return (
           <tr key={x.id}><td><span className="row"><PlatformBadge p={x.venue} size={16} />{x.label}</span></td><td>{x.connection ?? SOURCE_LABEL[x.sources[0]]}</td>
-            <td className={cx(s.stale ? 'stale' : 't2')}>{fmtDate(s.asOf)}{s.stale ? ' · stale' : ''}</td><td className="r">{c.open}</td><td className="r">{c.fills}</td><td className="r">{c.settlements}</td>
+            <td className={cx(s.stale ? 'stale' : 't2')}>{fmtDate(s.asOf)}{s.stale ? ' (out of date)' : ''}</td><td className="r">{c.open}</td><td className="r">{c.fills}</td><td className="r">{c.settlements}</td>
             <td className={cx('r', c.feeEstimates > 0 && 'warn-fg')}>{c.feeEstimates}</td><td>{x.openingDeclared ? 'Declared' : 'Unknown'}</td></tr>) })}</tbody>
       </table></div>
       <div className="foot"><span>Figures are reconstructed from the sample records at {fmtDate(TODAY)} marks; value {fmt(a.totalValue)}. Estimated fees are labelled where they’re used.</span><span /></div>
@@ -549,12 +549,12 @@ function Coverage({ ws }: { ws: Workspace }) {
       <Card><CardHeader title="How values are labelled" sub="The same states are used wherever a figure appears" />
         <div className="card-b"><dl className="kv">
           <dt>Known</dt><dd>From complete source records.</dd>
-          <dt>Estimated</dt><dd>A source didn’t report it (e.g. a fee); shown as an estimate and counted.</dd>
+          <dt>Estimated</dt><dd>A source didn’t report it, such as a fee. It’s estimated and counted.</dd>
           <dt>Provider-reported</dt><dd>As the venue reports it, before your decisions.</dd>
           <dt>Reconstructed</dt><dd>Derived from records with your decisions applied.</dd>
-          <dt>Partial</dt><dd>Some components are known; the total isn’t complete.</dd>
+          <dt>Partial</dt><dd>Some parts are known, but the total isn’t complete.</dd>
           <dt>Stale</dt><dd>The source’s latest observation is older than 24 hours.</dd>
-          <dt>Unavailable</dt><dd>Can’t be computed honestly; never shown as $0.</dd>
+          <dt>Unavailable</dt><dd>Can’t be calculated reliably. Never shown as $0.</dd>
         </dl></div></Card>
       <Card><CardHeader title="Record-management sample" sub="The sample records in Transactions and Imports" />
         <div className="card-b"><div className="cov-mini"><div><b>{ws.records.length}</b>records</div><div><b>{ws.batches.filter((b) => b.status === 'active').length}</b>active imports</div><div><b className={cx(est > 0 && 'warn-fg')}>{est}</b>included with unknown amounts</div><div><b className={cx(review > 0 && 'warn-fg')}>{review}</b>need review</div></div>

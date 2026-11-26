@@ -115,3 +115,5 @@
 .fx-legs { list-style: none; margin: var(--space-2) 0 0; padding: 0; display: grid; gap: var(--space-1); font-size: var(--font-size-xs); color: var(--color-text-tertiary); }
 .fx-legs li { display: flex; justify-content: space-between; gap: var(--space-3); }
 .set-adv > p { font-size: var(--font-size-xs); margin: var(--space-2) 0; }
+.lab-intro { margin: var(--space-2) 0 0; }
+.lab-note { margin: 0 0 var(--space-3); font-size: var(--font-size-xs); }

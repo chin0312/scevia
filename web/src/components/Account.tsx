@@ -11,7 +11,7 @@ export function AccountMenu({ onPrivacy }: { onPrivacy: () => void }) {
   return (
     <Menu label="Account" width={280} trigger={(t) => <button type="button" className="avatar" aria-label="Account" {...t}><Icon name="user" size={16} /></button>}>
       {(close) => (<>
-        <div className="menu-h"><span>Guest<small>Not signed in · workspace kept in this browser tab</small></span></div>
+        <div className="menu-h"><span>Guest<small>Not signed in. Your workspace is kept in this tab</small></span></div>
         <button type="button" role="menuitem" className="menu-i" onClick={() => { close(); onPrivacy() }}><Icon name="shield" />Data &amp; privacy</button>
         <div className="menu-sep" />
         <button type="button" role="menuitem" className="menu-i" disabled title="Scevia accounts aren’t available yet"><Icon name="user" />Sign in<small className="t3" style={{ marginLeft: 'auto' }}>not available yet</small></button>

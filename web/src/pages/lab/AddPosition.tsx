@@ -3,6 +3,7 @@
    whole event. Nothing is traded or stored as a holding: the result is hypothetical rows in the scenario. */
 import { useEffect, useRef, useState } from 'react'
 import { useMarketCatalog } from '../../lib/marketContext'
+import { assetLabel } from '../../lib/fx'
 import { evidenceOf, type CatalogMarket } from '../../lib/markets'
 import { Modal } from '../../components/overlays'
 import { Button, Callout, Chip, PlatformBadge, Seg, SideChip, Tabs, cx } from '../../components/ui'
@@ -42,7 +43,7 @@ export function AddPositionModal({ baseline, present, onAdd, onClose }: { baseli
   const toggle = (p: Pick) => setPicked((xs) => (xs.some((x) => same(x, p)) ? xs.filter((x) => !same(x, p)) : [...xs, p]))
   const add = () => { onAdd(picked.filter((p) => !inScenario(p)).map((p) => rowFor(Fin, p.i, baseline, p.held))); onClose() }
   return (
-    <Modal title="Add markets" sub="Pick one or more outcomes, then add them together. Hypothetical only: nothing is traded." onClose={onClose} width={720}
+    <Modal title="Add markets" sub="Pick one or more outcomes, then add them together." onClose={onClose} width={720}
       footer={<div className="addpos-foot">
         <div className="addpos-basket" aria-live="polite">
           {picked.length === 0 ? <span className="t3">Nothing selected yet</span> : picked.map((p) => (
@@ -86,7 +87,7 @@ function Holdings({ baseline, inScenario, isPicked, toggle }: PickProps & { base
           <label className={cx('addpos-item', 'pickable', on && 'on', already && 'is-disabled')} role="listitem" key={pk.key}>
             <input type="checkbox" checked={already || on} disabled={already} onChange={() => toggle(pk)} aria-label={`Select ${p.market} ${p.side}`} />
             <PlatformBadge p={p.platform} />
-            <span className="addpos-t"><b>{p.market}</b><small className="t3"><SideChip side={p.side} /> {qty(p.shares)} shares · mark {p.mark.toFixed(2)} · {PLATFORM_NAME[p.platform]} · {accountName(p.accountId)}</small></span>
+            <span className="addpos-t"><b>{p.market}</b><small className="t3"><SideChip side={p.side} /> {qty(p.shares)} shares at {p.mark.toFixed(2)}, {accountName(p.accountId)} on {PLATFORM_NAME[p.platform]}</small></span>
             <small className="t3">{already ? 'In scenario' : ''}</small>
           </label>
         )
@@ -188,11 +189,11 @@ function EventCard({ ev, inScenario, isPicked, toggle }: PickProps & { ev: Catal
   const { holdingsOfInstrument } = useFinance()
   return (
     <div className="addpos-event">
-      <div className="row"><PlatformBadge p={ev.provider} /><b>{ev.eventTitle}</b>{ev.markets.length > 1 && <small className="t3">{ev.markets.length} markets · pick each one you want</small>}</div>
+      <div className="row"><PlatformBadge p={ev.provider} /><b>{ev.eventTitle}</b>{ev.markets.length > 1 && <small className="t3">{ev.markets.length} markets, pick any</small>}</div>
       {ev.markets.map((m) => (
         <div className="addpos-market" key={m.marketId}>
           <div className="addpos-t"><span>{m.marketTitle}</span>
-            <small className="t3">{PLATFORM_NAME[m.provider]}{m.denomination ? ` · settles in ${m.denomination}` : ''} · {m.category} · resolves {fmtDate(m.resolves, { month: 'short', day: 'numeric', year: 'numeric' })} · {m.status === 'open' ? (m.refAsOf ? `reference as of ${fmtDate(m.refAsOf)}` : 'found, not priced yet') : m.status === 'closed' ? 'trading closed' : 'resolved'}</small>
+            <small className="t3">{PLATFORM_NAME[m.provider]}{m.denomination ? `, settles in ${assetLabel(m.denomination)}` : ''}. Resolves {fmtDate(m.resolves, { month: 'short', day: 'numeric', year: 'numeric' })}. {m.status === 'open' ? (m.refAsOf ? `Price as of ${fmtDate(m.refAsOf)}` : 'No price yet') : m.status === 'closed' ? 'Trading closed' : 'Resolved'}</small>
             <EvidenceBadges m={m} /></div>
           <div className="addpos-outcomes">
             {m.outcomes.map((o) => {
