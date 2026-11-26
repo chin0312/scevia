@@ -1,5 +1,5 @@
 import { sharedTrackingEvidence } from '../src/tracking/evidence.js'
-import { TrackingWorker } from '../src/tracking/worker.js'
+import { nextTime, TrackingWorker } from '../src/tracking/worker.js'
 import { initializeTrackedAccounts } from '../src/tracking/routes.js'
 import { kalshiMarketChoice } from '../src/providers/kalshi/market-data.js'
 import { kalshiCredentialSourceId } from '../src/providers/kalshi/live.js'
@@ -16,7 +16,7 @@ import { Pool } from 'pg'
 import { createDatabase, type Database } from '../src/db/client.js'
 import { runMigrations } from '../src/db/migrate.js'
 import {
-  accountTracking, marketTracking, sharedMarketObservations,
+  accountTracking, marketLifecycleEvidence, marketTracking, sharedMarketObservations,
   activityFactOccurrences,
   cashMovements,
   reviewedBinaryRules,
@@ -206,6 +206,18 @@ describe('migrations and canonical persistence', () => {
     const firstValue = await app.inject({ method: 'GET', url, headers })
     expect(firstValue.statusCode, firstValue.body).toBe(200)
     const firstRevision = firstValue.json()
+    const timed = performance.now()
+
+    const workspace = await app.inject({ method: 'GET', url: url + '?asset=USD', headers })
+    expect(workspace.statusCode, workspace.body).toBe(200)
+    expect(workspace.json()).toMatchObject({ financialRevision: firstRevision.financialRevision,
+      exposure: { reportedExposure: { portfolioNav: null } } })
+    if (process.env.TRACKING_BENCHMARK === 'YES') process.stdout.write(JSON.stringify({
+      fixtureWorkspaceMs: Math.round(performance.now() - timed),
+    }) + '\n')
+    const coherent304 = await app.inject({ method: 'GET', url: url + '?asset=USD',
+      headers: { ...headers, 'if-none-match': workspace.headers.etag! } })
+    expect(coherent304.statusCode).toBe(304)
     const conditional = await app.inject({ method: 'GET', url, headers: { ...headers, 'if-none-match': firstValue.headers.etag! } })
     expect(conditional.statusCode).toBe(304)
     quoteAt = new Date().toISOString()
@@ -239,19 +251,57 @@ describe('migrations and canonical persistence', () => {
     const batch = { batchId: 'fixture', row: 1, observation: { venue: 'kalshi', account: 'fixture', id: 'buy', asset: 'USD',
       type: 'buy' as const, instrument: leg!.id, canonicalInstrumentId: leg!.id, timestamp: storedAt.replace('Z', '.000Z'),
       sequence: null, quantity: '1', amount: null, fee: '0', feeAsset: 'USD', price: '0.4' } }
-    for (const [days, from] of [[30, '2026-03-02'], [90, '2026-01-01'], [180, '2025-10-03']] as const) {
+    const flows = Array.from({ length: 42 }, (_, index) => ({ ...batch, row: 2 + index, observation: {
+      ...batch.observation, id: 'flow:' + index, type: 'deposit' as const,
+      timestamp: new Date(Date.UTC(2026, 2, 3 + Math.floor(index / 2), index % 2 ? 12 : 13, 3)).toISOString(),
+      instrument: null, amount: '1',
+    } }))
+    for (const [days, from] of [[30, '2026-03-02'], [90, '2026-01-01'], [180, '2025-10-03'], [365, '2025-04-01']] as const) {
       const started = performance.now()
-      const history = await sharedTrackingEvidence(database, [batch], '2026-04-01T00:00:00.000Z', from + 'T00:00:00.000Z')
+      const history = await sharedTrackingEvidence(database, [batch, ...flows], '2026-04-01T00:00:00.000Z', from + 'T00:00:00.000Z')
       if (process.env.TRACKING_BENCHMARK === 'YES') process.stdout.write(JSON.stringify({
         fixtureObservations: 25921, days, projected: history.evidence.length, queryMs: Math.round(performance.now() - started),
       }) + '\n')
       expect(history.truncated).toBe(false)
-      expect(history.evidence.length).toBeLessThan(100)
+      expect(history.evidence.length).toBeLessThan(150)
+      const fullStart = performance.now()
+      const analytics = await other.inject({ method: 'GET', headers, url: roots[1] + '/analytics/performance?'
+        + new URLSearchParams({ asset: 'USD', accounts: 'tracked', from: from + 'T00:00:00Z', asOf: '2026-04-01T00:00:00Z' }) })
+      expect(analytics.statusCode, analytics.body).toBe(200)
+      if (process.env.TRACKING_BENCHMARK === 'YES') process.stdout.write(JSON.stringify({
+        fixtureAnalyticsDays: days, responseMs: Math.round(performance.now() - fullStart),
+      }) + '\n')
       expect(history.evidence).toContainEqual(expect.objectContaining({ observation: expect.objectContaining({
         timestamp: (from < '2026-01-01' ? '2026-01-01T23:55:00.000Z' : from + 'T00:00:00.000Z'),
       }) }))
     }
 
+  })
+
+  it('builds a scratch scenario in an empty workspace with independent virtual capital', async () => {
+    const [workspace] = await database.insert(portfolios).values({ ownerId: OWNER_ID, name: 'Empty user workspace' }).returning()
+    const app = await createTestApp()
+    const headers = { authorization: `Bearer ${TOKEN}` }
+    const root = '/v1/portfolios/' + workspace!.id + '/scenarios'
+    const preview = await app.inject({ method: 'POST', url: root + '/baseline', headers, payload: {
+      mode: 'scratch', asset: 'USD', asOf: '2026-01-01T00:00:00Z',
+      buckets: [{ id: 'virtual', account: 'virtual', venue: 'kalshi', cash: '50' }],
+      local: [{ id: 'local:test-outcome', mark: '0.4' }],
+    } })
+    expect(preview.statusCode, preview.body).toBe(200)
+    const evaluated = await app.inject({ method: 'POST', url: root + '/evaluate', headers, payload: {
+      baselineToken: preview.json().baselineToken, input: { operations: [{ bucket: 'virtual', instrument: 'local:test-outcome',
+        kind: 'buy', amount: '10', price: '0.4', fee: { mode: 'fixed', value: '0' } }] },
+    } })
+    expect(evaluated.statusCode, evaluated.body).toBe(200)
+    expect(evaluated.json()).toMatchObject({ funding: [{ endingCash: '46' }] })
+    expect(await database.select().from(providerAccounts).where(eq(providerAccounts.portfolioId, workspace!.id))).toEqual([])
+  })
+
+  it('keeps a healthy account-history interval separate from the retry ceiling', () => {
+    const now = new Date(0)
+    expect(nextTime(now, 4 * 3_600_000, 0, 0).getTime()).toBe(4 * 3_600_000)
+    expect(nextTime(now, 4 * 3_600_000, 1, 0.9).getTime()).toBe(3_600_000)
   })
 
   it('schedules only locally approved, enabled account sources and resumes an expired job lease', async () => {
@@ -282,15 +332,19 @@ describe('migrations and canonical persistence', () => {
       const tradeAt = '2026-01-02T00:00:00.000Z'
       const closedAt = '2026-01-04T00:00:00.000Z'
       const resolvedAt = '2026-01-05T00:00:00.000Z'
+      const verifiedAt = '2026-01-06T00:00:00.000Z'
       const market = { provider: 'kalshi', asset: 'USD', nativeMarket: 'FIXTURE-TRACK', nativeEvent: 'FIXTURE-EVENT',
         title: 'Fixture tracked market', eventTitle: 'Fixture event', category: null, lifecycle: 'open', resolvesAt: null,
         retrievedAt: capturedAt, source: 'authorized_capture',
         outcomes: [{ instrument: 'FIXTURE-TRACK:yes', name: 'YES' }, { instrument: 'FIXTURE-TRACK:no', name: 'NO' }] }
-      await writeFile(path, JSON.stringify({ evidenceKind: 'authorized_capture', capturedAt, markets: [market],
+      await writeFile(path, JSON.stringify({ evidenceKind: 'authorized_capture', capturedAt, markets: [market, { ...market, nativeMarket: 'FIXTURE-STALE',
+        outcomes: [{ instrument: 'FIXTURE-STALE:yes', name: 'YES' }, { instrument: 'FIXTURE-STALE:no', name: 'NO' }] }],
         capital: [{ provider: 'kalshi', asset: 'USD', amount: '100', openedAt: '2026-01-01T00:00:00.000Z' }],
         quotes: [{ provider: 'kalshi', nativeMarket: market.nativeMarket, instrument: 'FIXTURE-TRACK:yes', price: '0.4',
+          method: 'historical_close', source: 'authorized_capture', observedAt: tradeAt, retrievedAt: capturedAt },
+        { provider: 'kalshi', nativeMarket: 'FIXTURE-STALE', instrument: 'FIXTURE-STALE:yes', price: '0.4',
           method: 'historical_close', source: 'authorized_capture', observedAt: tradeAt, retrievedAt: capturedAt }],
-        trades: [{ id: 'buy', quoteIndex: 0, quantity: '10', direction: 'buy', assumedFee: '0' }],
+        trades: [{ id: 'buy', quoteIndex: 0, quantity: '10', direction: 'buy', assumedFee: '0' }, { id: 'stale', quoteIndex: 1, quantity: '5', direction: 'buy', assumedFee: '0' }],
       }))
       const app = await buildApp({ database, config: { ...testConfig(), demoDataset: { path, cacheMs: 1000, allowFixture: true } } })
       openApps.push(app)
@@ -306,22 +360,38 @@ describe('migrations and canonical persistence', () => {
         .mockResolvedValueOnce({ marketTicker: market.nativeMarket, eventTicker: market.nativeEvent,
           establishedPayoutUnit: '1', lifecycle: 'resolved', retrievedAt: resolvedAt, resolution: null })
         .mockResolvedValueOnce({ marketTicker: market.nativeMarket, eventTicker: market.nativeEvent,
-          establishedPayoutUnit: '1', lifecycle: 'resolved', retrievedAt: resolvedAt,
+          establishedPayoutUnit: '1', lifecycle: 'resolved', retrievedAt: verifiedAt,
           resolution: { knownAt: resolvedAt, winningInstrument: 'FIXTURE-TRACK:yes', unitPayout: '1' } })
       const worker = new TrackingWorker(database, { kalshi: { lookup }, accountIds: [], marketIntervalMs: 300_000, accountIntervalMs: 300_000,
         ingestion: { syncProviderAccount: vi.fn() } })
+      const [watched] = await database.select({ id: markets.id }).from(markets)
+        .where(eq(markets.externalId, market.nativeMarket))
+      await database.update(marketTracking).set({ nextAttemptAt: new Date('2099-01-01T00:00:00Z') })
       const poll = async () => {
-        await database.update(marketTracking).set({ nextAttemptAt: new Date(0) })
+        await database.update(marketTracking).set({ nextAttemptAt: new Date(0) }).where(eq(marketTracking.marketId, watched!.id))
         expect(await worker.market(new AbortController().signal)).toBe(true)
       }
       const state = async (asOf: string) => (await app.inject({ method: 'GET', url: root + '/accounting?view=detail&asOf=' + asOf, headers })).json()
       await poll()
-      expect((await state(closedAt)).cash[0].balance).toBe('96')
+      expect((await state(closedAt)).cash[0].balance).toBe('94')
       await poll()
-      expect((await state(resolvedAt)).cash[0]).toMatchObject({ balance: null, historyCoverage: 'declared_with_unresolved_evidence' })
+      expect((await state(resolvedAt)).cash[0]).toMatchObject({ balance: null, historyCoverage: 'outside_declared_interval' })
       await poll()
-      expect((await state(resolvedAt)).cash[0]).toMatchObject({ balance: '106', realized: '6', historyCoverage: 'simulated_ledger_complete' })
-      expect((await state(closedAt)).cash[0].balance).toBe('96')
+      expect((await state(resolvedAt)).cash[0]).toMatchObject({ balance: null, historyCoverage: 'outside_declared_interval' })
+      expect((await state(verifiedAt)).cash[0]).toMatchObject({ balance: '104', realized: '6', historyCoverage: 'outside_declared_interval' })
+      const journal = await database.select().from(marketLifecycleEvidence).where(eq(marketLifecycleEvidence.marketId, watched!.id))
+      expect(journal).toHaveLength(3)
+      const demo = (await app.inject({ method: 'GET', url: '/v1/demo', headers })).json()
+      expect(demo.trackingCoverage).toEqual(expect.arrayContaining([
+        expect.objectContaining({ nativeMarket: 'FIXTURE-TRACK', lifecycleThrough: verifiedAt, resolutionObservedAt: verifiedAt }),
+        expect.objectContaining({ nativeMarket: 'FIXTURE-STALE', lifecycleThrough: capturedAt, resolutionStatus: 'pending' }),
+      ]))
+      await database.insert(marketLifecycleEvidence).values({ marketId: watched!.id, revision: 'manual-fixture-conflict',
+        lifecycle: 'resolved', retrievedAt: new Date('2026-01-07T00:00:00Z'), conflict: true,
+        resolution: { knownAt: verifiedAt, winningInstrument: 'FIXTURE-TRACK:no', unitPayout: '1' } })
+      expect((await app.inject({ method: 'GET', url: '/v1/demo', headers })).json().trackingCoverage)
+        .toContainEqual(expect.objectContaining({ nativeMarket: 'FIXTURE-TRACK', resolutionStatus: 'conflict' }))
+      expect((await state(closedAt)).cash[0].balance).toBe('94')
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 

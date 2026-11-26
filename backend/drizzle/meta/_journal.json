@@ -127,6 +127,13 @@
       "when": 1795675792284,
       "tag": "0017_tracking_demand_and_lifecycle",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1795677297381,
+      "tag": "0018_lifecycle_and_receipt_evidence",
+      "breakpoints": true
     }
   ]
 }

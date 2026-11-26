@@ -39,6 +39,8 @@ export interface ServerConfig extends DatabaseConfig {
   demoDataset?: { path: string; cacheMs: number; allowFixture: boolean }
   polymarketLiveEnabled?: boolean
   polymarketPolygonRpc?: URL
+  polymarketResolutionRpcAuthorized?: boolean
+  polymarketStreamAuthorized?: boolean
   nodeEnv: 'development' | 'test' | 'production'
   host: string
   port: number
@@ -103,11 +105,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   }
   return {
     ...database,
-    ...(polymarketPolygonRpc ? { polymarketPolygonRpc } : {}),
+    ...(polymarketPolygonRpc ? { polymarketPolygonRpc,
+      polymarketResolutionRpcAuthorized: env.POLYMARKET_CTF_RESOLUTION_AUTHORIZED === 'YES' } : {}),
     kalshi,
+    polymarketStreamAuthorized: localDevelopment && env.POLYMARKET_MARKET_STREAM_AUTHORIZED === 'YES',
     ...(localDevelopment && env.CONTINUOUS_TRACKING_ENABLED === 'YES' ? { tracking: {
       accountIds: z.array(z.uuid()).max(20).parse((env.TRACKED_PROVIDER_ACCOUNT_IDS ?? '').split(',').map((id) => id.trim()).filter(Boolean)),
-      retentionDays: z.coerce.number().int().min(1).max(90).parse(env.MARKET_TRACKING_RETENTION_DAYS),
+      retentionDays: z.coerce.number().int().min(1).max(366).parse(env.MARKET_TRACKING_RETENTION_DAYS),
       marketIntervalMs: z.coerce.number().int().min(60_000).max(3_600_000).parse(env.MARKET_TRACKING_INTERVAL_MS ?? '300000'),
       accountIntervalMs: z.coerce.number().int().min(300_000).max(3_600_000).parse(env.ACCOUNT_TRACKING_INTERVAL_MS ?? '900000'),
     } } : {}),

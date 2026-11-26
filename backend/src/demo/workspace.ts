@@ -1,3 +1,4 @@
+import { conflictingResolution } from '../tracking/lifecycle.js'
 import { trackedDemoCapture } from '../tracking/demand.js'
 import { and, desc, eq, isNotNull } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
@@ -24,7 +25,7 @@ export function registerDemoRoutes(app: FastifyInstance, db: Database, settings?
     return {
       status: 'available', portfolioId: row.id, mode: row.demo.dataset.evidenceKind === 'fixture' ? 'fixture' : 'demo',
       revision: row.demo.revision, catalogRevision: row.demo.catalogRevision ?? row.demo.revision, capturedAt: row.demo.dataset.capturedAt,
-      marketEvidence: 'captured', transactions: 'hypothetical', trackedHistoryThrough: current.dataset.capturedAt, markets: current.dataset.markets.map((market) => ({
+      marketEvidence: 'captured', transactions: 'hypothetical', trackingCoverage: current.trackingCoverage, markets: current.dataset.markets.map((market) => ({
         ...market, latestRetrievedAt: row.demo.marketRetrievedAt?.[marketKey(market)] ?? market.retrievedAt,
       })),
       trades: row.demo.dataset.trades.map((trade) => {
@@ -67,6 +68,11 @@ export function registerDemoRoutes(app: FastifyInstance, db: Database, settings?
       const matches = (original: typeof demo.dataset.markets[number], incoming: typeof demo.dataset.markets[number]) =>
         incoming.asset === original.asset && incoming.nativeEvent === original.nativeEvent
         && original.outcomes.every((leg) => incoming.outcomes.some((item) => item.instrument === leg.instrument && item.name === leg.name))
+      const tracked = await trackedDemoCapture(tx, demo, new Date().toISOString())
+      if (tracked.dataset.markets.some((market) => {
+        const incoming = capturedMarkets.get(marketKey(market))
+        return incoming && matches(market, incoming) && conflictingResolution(market.resolution, incoming.resolution)
+      })) return { status: 'resolution_conflict' as const }
       const marketRetrievedAt = { ...demo.marketRetrievedAt }
       for (const original of demo.dataset.markets) {
         const incoming = capturedMarkets.get(marketKey(original))

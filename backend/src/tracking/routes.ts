@@ -9,7 +9,7 @@ const portfolioParam = z.object({ portfolioId: z.uuid() })
 const watchBody = z.object({ markets: z.array(z.uuid()).max(20) }).strict()
 
 export function registerTrackingRoutes(app: FastifyInstance, db: Database, reconcile: (portfolioId: string) => Promise<void>,
-  operational: () => { running: boolean; accountIds: string[] }) {
+  operational: () => { running: boolean; accountIds: string[]; stream: { status: string; heartbeatAt: string | null } }) {
   const path = '/portfolios/:portfolioId/tracking'
   const owner = (id: string, principal: string) => and(eq(portfolios.id, id), eq(portfolios.ownerId, principal))
   const marketStatus = { marketId: markets.id, provider: markets.providerCode, nativeMarket: markets.externalId,
@@ -46,7 +46,7 @@ export function registerTrackingRoutes(app: FastifyInstance, db: Database, recon
         inArray(instruments.marketId, holdingsMarkets.map((row) => row.marketId))))
       .orderBy(instruments.id, sharedMarketObservations.asset, desc(sharedMarketObservations.effectiveAt)).limit(100)
     const runtime = operational()
-    return { portfolioId, workerRunning: runtime.running, markets: marketsStatus, holdingsMarkets, observations,
+    return { portfolioId, workerRunning: runtime.running, stream: runtime.stream, markets: marketsStatus, holdingsMarkets, observations,
       accounts: accounts.map((row) => ({ ...row, active: runtime.running && row.scope !== null
         && row.disabledAt === null && runtime.accountIds.includes(row.accountId) })), valuation: { mechanism: 'read_through_accounting' } }
   })

@@ -72,7 +72,7 @@ export type FrozenDenominationScenario = {
 }
 
 type Scope = { portfolioId: string; scenarioId?: string }
-type Read = Pick<Database, 'select' | 'selectDistinctOn'>
+type Read = Pick<Database, 'select' | 'selectDistinctOn' | 'execute'>
 
 const assumptionDigest = ({ operations, ...assumptions }: ScenarioInput) => digest({
   ...assumptions, execution: operations.map(({ bucket, instrument, price, fee }) => ({ bucket, instrument, price, fee }))

@@ -1,3 +1,4 @@
+import { startPolymarketStream } from '../tracking/polymarket-stream.js'
 import { setTimeout as delay } from 'node:timers/promises'
 import { initializeTrackedAccounts, registerTrackingRoutes } from '../tracking/routes.js'
 import { TrackingWorker } from '../tracking/worker.js'
@@ -541,7 +542,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 
   // Kalshi remains unavailable in production and in the default development server.
   const kalshiMarketData = options.config.nodeEnv === 'test' ? options.kalshiMarketData : kalshiLive?.marketData
-  const trackingRuntime = { running: false, accountIds: [] as string[] }
+  const trackingRuntime = { running: false, accountIds: [] as string[],
+    stream: { status: 'disabled', heartbeatAt: null as string | null } }
   let reconcileTracking: ReturnType<typeof registerAccountingRoutes>
   const tracking = options.config.tracking
   if (tracking && options.config.nodeEnv === 'development' && ['127.0.0.1', '::1'].includes(options.config.host)) {
@@ -550,7 +552,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     trackingRuntime.accountIds = accountIds
     const worker = new TrackingWorker(options.database, { ...tracking, accountIds, ingestion,
       kalshi: options.config.kalshi?.environment === 'production' ? kalshiMarketData : undefined,
-      polymarket: liveAllowed ? marketData : undefined })
+      polymarket: liveAllowed ? marketData : undefined,
+      ctf: polygonRpc && options.config.polymarketResolutionRpcAuthorized ? new PolymarketCollateralReader(polygonRpc) : undefined })
     const stopping = new AbortController()
     const loop = async (run: (signal: AbortSignal) => Promise<unknown>, interval = 5000) => {
       while (!stopping.signal.aborted) {
@@ -575,6 +578,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     app.addHook('onListen', async () => { trackingRuntime.running = true; running = Promise.all([
       loop((signal) => Promise.all(Array.from({ length: 3 }, () => worker.market(signal)))),
       loop(reconcile, 30_000),
+      ...(liveAllowed && options.config.polymarketStreamAuthorized
+        ? [startPolymarketStream(options.database, stopping.signal, trackingRuntime.stream)] : []),
       loop((signal) => worker.account(signal)),
       loop(() => worker.pruneObservations(tracking.retentionDays), 60_000),
     ]) })

@@ -625,6 +625,28 @@ export const portfolioScenarioBundles = scevia.table('portfolio_scenario_bundles
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [index('portfolio_scenario_bundles_portfolio_idx').on(table.portfolioId)])
 
+export type TrackedResolution = {
+  knownAt: string
+  winningInstrument: string
+  unitPayout: '1'
+  source?: 'kalshi_trade_api' | 'polygon_ctf'
+  finalizedBlockHash?: string
+  finalizedBlockAt?: string
+  settlementTime?: string | null
+}
+
+export const marketLifecycleEvidence = scevia.table('market_lifecycle_evidence', {
+  marketId: uuid('market_id').notNull().references(() => markets.id, { onDelete: 'cascade' }),
+  revision: text('revision').primaryKey(),
+  retrievedAt: timestamp('retrieved_at', { withTimezone: true }).notNull(),
+  lifecycle: text('lifecycle').notNull(),
+  tradingOpensAt: timestamp('trading_opens_at', { withTimezone: true }),
+  tradingClosesAt: timestamp('trading_closes_at', { withTimezone: true }),
+  expectedResolutionAt: timestamp('expected_resolution_at', { withTimezone: true }),
+  resolution: jsonb('resolution').$type<TrackedResolution>(),
+  conflict: boolean('conflict').default(false).notNull(),
+}, (table) => [index('market_lifecycle_cutoff_idx').on(table.marketId, table.retrievedAt)])
+
 export const marketTracking = scevia.table('market_tracking', {
   marketId: uuid('market_id').primaryKey().references(() => markets.id, { onDelete: 'cascade' }),
   nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).defaultNow().notNull(),
@@ -639,7 +661,7 @@ export const marketTracking = scevia.table('market_tracking', {
   metadataAt: timestamp('metadata_at', { withTimezone: true }),
   quoteAt: timestamp('quote_at', { withTimezone: true }),
   quoteStatus: text('quote_status'),
-  resolution: jsonb('resolution').$type<{ knownAt: string; winningInstrument: string; unitPayout: '1' }>(),
+  resolution: jsonb('resolution').$type<TrackedResolution>(),
 }, (table) => [index('market_tracking_due_idx').on(table.nextAttemptAt)])
 
 export const marketWatches = scevia.table('market_watches', {
@@ -689,3 +711,10 @@ export const accountTracking = scevia.table('account_tracking', {
   uniqueIndex('account_tracking_source_scope_unique').on(table.accountId, table.scope),
   index('account_tracking_due_idx').on(table.nextAttemptAt),
 ])
+
+export const polymarketReceiptReviews = scevia.table('polymarket_receipt_reviews', {
+  accountId: uuid('account_id').notNull().references(() => providerAccounts.id, { onDelete: 'cascade' }),
+  transactionHash: text('transaction_hash').notNull(),
+  evidence: jsonb('evidence').$type<Awaited<ReturnType<import('../providers/polymarket/collateral.js').PolymarketCollateralReader['transferEvidence']>>>().notNull(),
+  retrievedAt: timestamp('retrieved_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [uniqueIndex('polymarket_receipt_reviews_scope_unique').on(table.accountId, table.transactionHash)])

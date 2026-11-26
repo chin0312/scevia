@@ -1,3 +1,4 @@
+import { lifecycleAt } from '../tracking/lifecycle.js'
 import { reconcileHoldingDemand, trackedDemoCapture } from '../tracking/demand.js'
 import { sharedTrackingEvidence } from '../tracking/evidence.js'
 import { demoMarketAt } from '../demo/dataset.js'
@@ -30,7 +31,7 @@ const auth = { security: [{ bearerAuth: [] }] }
 const prefix = '/portfolios/:portfolioId'
 const maxBatches = 25
 const maxRetainedBatches = 250
-type AccountingRead = Pick<Database, 'select' | 'selectDistinctOn'>
+type AccountingRead = Pick<Database, 'select' | 'selectDistinctOn' | 'execute'>
 const operationalCutoff = '9999-12-31T23:59:59.999Z'
 const adjustmentItem = z.object({
   key: z.string().min(1).max(120), action: z.enum(['include', 'distinct', 'exclude', 'restore', 'correct', 'duplicate', 'reset_correction', 'reset_identity', 'reset_duplicate', 'reset_all']),
@@ -338,6 +339,26 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       rawEvidence.filter((item) => !('batchId' in item) || item.batchId !== preview?.id), decisionMap)
       : { changes: new Map<string, PortfolioDecision>(), report: [] }
     const applied = applyDecisions(rawEvidence, new Map([...decisionMap, ...replacement.changes]))
+    if (demoCapture && demoCapture.trackingCoverage.some((market) => market.lifecycleThrough > demoCapture.dataset.capturedAt)) {
+      const portfolioState = replayAccounting([...applied.evidence.filter((row) => row.observation.type !== 'mark'), ...resolutions], cutoff)
+      const holdings = portfolioState.holdings.filter((row) => new Decimal(row.quantity).gt(0))
+      const ids = [...new Set(holdings.map((row) => row.instrument))]
+      const canonical = ids.length ? await read.select({ instrument: instruments.id, market: markets.externalId }).from(instruments)
+        .innerJoin(markets, eq(markets.id, instruments.marketId)).where(inArray(instruments.id, ids)) : []
+      const namespace = 'simulation:' + (demoCapture.catalogRevision ?? demoCapture.revision) + ':'
+      for (const item of applied.evidence) {
+        if (item.acquisition !== 'demo' || item.observation.type !== 'history_complete') continue
+        const row = item.observation
+        const relevant = holdings.filter((holding) => holding.account === row.account && holding.asset === row.asset)
+        const coverage = demoCapture.trackingCoverage.filter((entry) => entry.provider === row.venue && entry.asset === row.asset)
+        const held = relevant.map((holding) => {
+          const market = canonical.find((entry) => entry.instrument === holding.instrument)?.market
+          return coverage.find((entry) => namespace + entry.nativeMarket === market)?.lifecycleThrough ?? demoCapture.dataset.capturedAt
+        })
+        const observed = held.length ? held.sort()[0] : coverage.map((entry) => entry.lifecycleThrough).sort().at(-1)
+        if (observed && row.coveredThrough && observed > row.coveredThrough) item.observation = { ...row, coveredThrough: observed }
+      }
+    }
     const tracking = await sharedTrackingEvidence(read, applied.evidence, cutoff, trackingFrom, demoCapture, trackingFrom ? [] : provider.positions)
     return { ...provider, ...applied, evidence: [...applied.evidence, ...resolutions, ...tracking.evidence], tracking, resolutions, demoCapture, rawEvidence, decisionMap, decisionRevision, replacement,
       recordDecisionRevisions: new Map(latest.map(({ key, revision }) => [key, revision])),
@@ -792,14 +813,15 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
   }
 
   async function loadExposureInputs(tx: AccountingRead, portfolioId: string, asOf: string, asset: string,
-    scope: Pick<z.infer<typeof analyticsQuery>, 'accounts' | 'venue'>, selected: string[] = []) {
-    const input = await loadEvidence(portfolioId, asOf, undefined, tx, undefined, scope.accounts?.split(','))
+    scope: Pick<z.infer<typeof analyticsQuery>, 'accounts' | 'venue'>, selected: string[] = [],
+    current?: { input: Awaited<ReturnType<typeof loadEvidence>>; state: ReturnType<typeof replayAccounting> }) {
+    const input = current?.input ?? await loadEvidence(portfolioId, asOf, undefined, tx, undefined, scope.accounts?.split(','))
     if (input.tracking.truncated) throw new ScenarioError('analytics_replay_limit')
     if (input.truncated) throw new ScenarioError('provider_evidence_limit')
     const accounts = selectAccounts(input, scope.accounts, scope.venue)
     if (!accounts) throw new ScenarioError('invalid_analytics_accounts')
     const { context, evidence } = analyticalContext(input, accounts, asOf, asset, scope.venue)
-    const state = replayAccounting(evidence, asOf)
+    const state = current?.state ?? replayAccounting(evidence, asOf)
     const snapshots = input.positions.filter((row) => accounts.includes(row.account) && row.asset === asset && (!scope.venue || row.venue === scope.venue))
       .map((row) => {
         const quote = input.tracking.reportedMarks.get(JSON.stringify([row.instrument, row.asset]))
@@ -821,9 +843,14 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
     const { rules, effective, reported } = catalog
     const marketIds = [...new Set(catalog.metadata.map((row) => row.market))]
     const liveRows = marketIds.length ? await tx.select().from(marketTracking).where(inArray(marketTracking.marketId, marketIds)) : []
-    const activeLifecycle = new Map(liveRows.filter((row) => row.lifecycleAt && row.lifecycleAt.toISOString() <= asOf)
-      .map((row) => [row.marketId, row]))
-    const verified = new Set(liveRows.filter((row) => row.resolution && row.resolution.knownAt <= asOf).map((row) => row.marketId))
+    const journal = await lifecycleAt(tx, marketIds, asOf)
+    const activeLifecycle = new Map(liveRows.flatMap((row) => {
+      const history = journal.get(row.marketId)?.filter((item) => !item.conflict) ?? []
+      const lifecycle = history.at(-1)?.lifecycle ?? (row.lifecycleAt && row.lifecycleAt.toISOString() <= asOf ? row.lifecycle : null)
+      return lifecycle ? [[row.marketId, lifecycle] as const] : []
+    }))
+    const verified = new Set(liveRows.filter((row) => journal.get(row.marketId)?.some((item) => item.resolution && !item.conflict)
+      || row.resolution && row.metadataAt && row.metadataAt.toISOString() <= asOf && !journal.has(row.marketId)).map((row) => row.marketId))
     const marketByInstrument = new Map(catalog.metadata.map((row) => [row.instrument, row.market]))
     const observed = snapshots.map((row) => verified.has(marketByInstrument.get(row.instrument) ?? '')
       ? { ...row, mark: null, markAt: null, marketReference: null } : row)
@@ -831,7 +858,7 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
       const view = input.demoCapture ? demoMarketAt(input.demoCapture, row.provider, row.providerMarket, asOf) : null
       return view ? { ...row, lifecycle: view.lifecycle, title: view.asOf?.title ?? row.title,
         resolvesAt: view.asOf?.resolvesAt ? new Date(view.asOf.resolvesAt) : null }
-        : { ...row, lifecycle: activeLifecycle.get(row.market)?.lifecycle ?? row.lifecycle }
+        : { ...row, lifecycle: activeLifecycle.get(row.market) ?? row.lifecycle }
     })
     const edgeOrder = (left: { left: string; right: string }, right: { left: string; right: string }) =>
       left.left.localeCompare(right.left) || left.right.localeCompare(right.right)
@@ -1219,28 +1246,40 @@ export function registerAccountingRoutes(app: FastifyInstance, database: Databas
 
   })
   const valuationCache = new Map<string, { revision: string; prepared: ReturnType<typeof prepareAccounting> }>()
-  app.get<{ Params: { portfolioId: string } }>(prefix + '/tracking/valuation', { schema: { ...auth, params: portfolioParams } }, async (request, reply) => {
+  app.get<{ Params: { portfolioId: string }; Querystring: unknown }>(prefix + '/tracking/valuation', { schema: { ...auth, params: portfolioParams } }, async (request, reply) => {
     const { portfolioId } = request.params
     if (!await owned(portfolioId, request.principalId!)) return reply.code(404).send(missing)
-    const asOf = new Date().toISOString()
-    const input = await loadEvidence(portfolioId, asOf)
-    if (input.truncated || input.tracking.truncated) return reply.code(422).send({ error: { code: 'valuation_work_limit' } })
-    const financial = input.evidence.filter((row) => (!row.marketReference || row.observation.terminalMarketReference) && row.observation.timestamp <= asOf)
-    const financialRevision = digest(financial.filter((row) => row.observation.type !== 'mark' || row.observation.simulatedResolution))
-    const preparedRevision = digest(financial)
-    const overlays = input.tracking.evidence.filter((row) => row.marketReference && !row.observation.terminalMarketReference)
-    const marketRevision = digest([...financial.filter((row) => row.observation.type === 'mark' && !row.observation.simulatedResolution), ...input.tracking.evidence])
-    const cached = valuationCache.get(portfolioId)
-    const prepared = cached?.revision === preparedRevision ? cached.prepared : prepareAccounting(financial, asOf)
-    valuationCache.delete(portfolioId)
-    valuationCache.set(portfolioId, { revision: preparedRevision, prepared })
-    if (valuationCache.size > 10) valuationCache.delete(valuationCache.keys().next().value!)
-    const state = prepared(asOf, overlays) ?? replayAccounting(input.evidence, asOf)
-    const result = { status: state.status, cash: state.cash, holdings: state.holdings }
-    const revision = digest([financialRevision, marketRevision, result])
-    reply.header('etag', '"' + revision + '"').header('cache-control', 'private, no-cache')
-    if (request.headers['if-none-match'] === '"' + revision + '"') return reply.code(304).send()
-    return { asOf, financialRevision, marketRevision, revision, ...result }
+    const query = z.object({ asset: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$/).optional() }).strict().safeParse(request.query)
+    if (!query.success) return reply.code(422).send({ error: { code: 'invalid_tracking_scope' } })
+    return database.transaction(async (tx) => {
+      const asOf = new Date().toISOString()
+      const input = await loadEvidence(portfolioId, asOf, undefined, tx)
+      if (input.truncated || input.tracking.truncated) return reply.code(422).send({ error: { code: 'valuation_work_limit' } })
+      const financial = input.evidence.filter((row) => (!row.marketReference || row.observation.terminalMarketReference) && row.observation.timestamp <= asOf)
+      const financialRevision = digest([financial.filter((row) => row.observation.type !== 'mark' || row.observation.simulatedResolution),
+        input.positions.map(({ mark: _mark, markAt: _time, ...row }) => ({ ...row, observedAt: row.observedAt.toISOString() })),
+        input.balances.map((row) => ({ ...row, observedAt: row.observedAt.toISOString() }))])
+      const preparedRevision = digest(financial)
+      const overlays = input.tracking.evidence.filter((row) => row.marketReference && !row.observation.terminalMarketReference)
+      const marketRevision = digest([financial.filter((row) => row.observation.type === 'mark' && !row.observation.simulatedResolution),
+        input.positions.map((row) => [row.instrument, row.mark, row.markAt?.toISOString()]),
+        input.tracking.evidence, [...input.tracking.reportedMarks.values()].map((row) => row.revision).sort()])
+      const cached = valuationCache.get(portfolioId)
+      const prepared = cached?.revision === preparedRevision ? cached.prepared : prepareAccounting(financial, asOf)
+      valuationCache.delete(portfolioId)
+      valuationCache.set(portfolioId, { revision: preparedRevision, prepared })
+      if (valuationCache.size > 10) valuationCache.delete(valuationCache.keys().next().value!)
+      const state = prepared(asOf, overlays) ?? replayAccounting(input.evidence, asOf)
+      const exposure = query.data.asset ? (await loadExposureInputs(tx, portfolioId, asOf, query.data.asset, {}, [], { input, state })).response : null
+      const result = { status: state.status, cash: state.cash, holdings: state.holdings,
+        ...(exposure ? { exposure, accountFreshness: input.coverage, demoMarketCoverage: input.demoCapture?.trackingCoverage ?? [] } : {}) }
+      const exposureDigest = exposure ? { ...exposure, context: { ...exposure.context, asOf: null } } : null
+      const revision = digest([financialRevision, marketRevision, state.status, state.cash, state.holdings,
+        exposureDigest, exposure ? input.coverage : null, exposure ? input.demoCapture?.trackingCoverage : null])
+      reply.header('etag', '"' + revision + '"').header('cache-control', 'private, no-cache')
+      if (request.headers['if-none-match'] === '"' + revision + '"') return reply.code(304).send()
+      return { asOf, financialRevision, marketRevision, revision, ...result }
+    }, { isolationLevel: 'repeatable read', accessMode: 'read only' })
   })
 
   return async (portfolioId: string, asOf = new Date().toISOString()) => reconcileHoldingDemand(database, portfolioId, async (tx) => {

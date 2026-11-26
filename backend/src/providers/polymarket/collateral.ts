@@ -107,6 +107,34 @@ export class PolymarketCollateralReader {
       transactionHash: receipt.transactionHash, blockHash: canonical.hash, blockNumber: canonical.number, observedAt, items, fills }
   }
 
+  async standardCtfResolution(condition: string, positions: readonly string[], signal: AbortSignal) {
+    if (!word.safeParse(condition).success || positions.length !== 2 || new Set(positions).size !== 2
+      || positions.some((token) => !/^\d{1,78}$/.test(token))) return null
+    const chain = quantity.parse(await this.read('eth_chainId', [], signal))
+    if (BigInt(chain) !== 137n) throw new ProviderAdapterError('polymarket_polygon_chain_mismatch', false)
+    const block = z.object({ hash: word, number: quantity, timestamp: quantity })
+      .parse(await this.read('eth_getBlockByNumber', ['finalized', false], signal))
+    const ctf = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045'
+    const legacyCollateral = '2791bca1f2de4661ed88a30c99a7a9449aa84174'
+    const arg = condition.slice(2)
+    const uint = (value: number) => value.toString(16).padStart(64, '0')
+    const call = async (data: string) => word.parse(await this.read('eth_call',
+      [{ to: ctf, data: '0x' + data }, { blockHash: block.hash, requireCanonical: true }], signal))
+    const [slots, denominator] = await Promise.all([call('d42dc0c2' + arg), call('dd34de67' + arg)])
+    if (BigInt(slots) !== 2n || BigInt(denominator) <= 0n) return null
+    const [first, second] = await Promise.all([call('0504c814' + arg + uint(0)), call('0504c814' + arg + uint(1))])
+    const payout = BigInt(denominator)
+    const winningIndex = BigInt(first) === payout && BigInt(second) === 0n ? 0 : BigInt(first) === 0n && BigInt(second) === payout ? 1 : -1
+    if (winningIndex < 0) return null
+    const ids = await Promise.all([1, 2].map(async (indexSet) => {
+      const collection = await call('856296f7' + uint(0) + arg + uint(indexSet))
+      return BigInt(await call('39dd7530' + legacyCollateral.padStart(64, '0') + collection.slice(2))).toString()
+    }))
+    if (ids.some((id, index) => id !== positions[index])) return null
+    return { knownAt: new Date().toISOString(), winningInstrument: ids[winningIndex]!, unitPayout: '1' as const,
+      source: 'polygon_ctf' as const, finalizedBlockHash: block.hash, finalizedBlockAt: blockTime(block.timestamp), settlementTime: null }
+  }
+
   async balance(wallet: string, signal: AbortSignal) {
     if (!address.test(wallet)) throw new ProviderAdapterError('invalid_polymarket_wallet_address', false)
     const chain = quantity.safeParse(await this.read('eth_chainId', [], signal))

@@ -1,3 +1,4 @@
+import type { PolymarketCollateralReader } from './collateral.js'
 import { Decimal } from 'decimal.js'
 import { z } from 'zod'
 import { decimalString, PolymarketHttpClient, PolymarketRequestError, parseProviderJson } from './http.js'
@@ -143,7 +144,8 @@ export class PolymarketMarketDataService {
     }
   }
 
-  async trackingSnapshot(conditionId: string, signal: AbortSignal) {
+  async trackingSnapshot(conditionId: string, signal: AbortSignal,
+    ctf?: Pick<PolymarketCollateralReader, 'standardCtfResolution'>) {
     if (!/^0x[0-9a-f]{64}$/i.test(conditionId)) throw new PublicMarketError('invalid_condition_id', 400)
     const rows = z.array(recordSchema).max(2).parse(await this.client.getGamma('markets',
       new URLSearchParams({ condition_ids: conditionId, closed: 'any', limit: '2' }), signal))
@@ -157,7 +159,16 @@ export class PolymarketMarketDataService {
     const positions = version === 'v1' ? assets : version === 'v2' ? parseStringArray(row.positionIds) : []
     const nativeIdsValid = positions.length === 2 && assets.length === 2 && new Set(assets).size === 2
       && new Set(positions).size === 2 && [...assets, ...positions].every((id) => TOKEN_ID_PATTERN.test(id))
-    if (lifecycle !== 'open' || !nativeIdsValid) return { lifecycle, quotes: [] }
+    if (lifecycle !== 'open' || !nativeIdsValid) {
+      if (ctf && nativeIdsValid && version === 'v1' && row.negRisk === false
+        && (lifecycle === 'closed' || lifecycle === 'resolved')) {
+        try {
+          const resolution = await ctf.standardCtfResolution(conditionId, positions, signal)
+          if (resolution) return { lifecycle: 'resolved', quotes: [], resolution }
+        } catch { signal.throwIfAborted() }
+      }
+      return { lifecycle, quotes: [] }
+    }
     const result = recordSchema.parse(await this.client.postClob('midpoints', assets.map((token_id) => ({ token_id })), signal))
     const retrievedAt = new Date()
     return { lifecycle, quotes: positions.flatMap((id, index) => {

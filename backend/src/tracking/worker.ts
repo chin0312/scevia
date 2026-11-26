@@ -1,9 +1,11 @@
+import type { PolymarketCollateralReader } from '../providers/polymarket/collateral.js'
+import { conflictingResolution } from './lifecycle.js'
 import { lifecycleRank } from './demand.js'
 import { Decimal } from 'decimal.js'
 import { randomUUID } from 'node:crypto'
 import { and, asc, eq, exists, inArray, isNull, lt, lte, or } from 'drizzle-orm'
 import type { Database } from '../db/client.js'
-import { accountTracking, automaticMarketWatches, events, instruments, markets, marketTracking, marketWatches, providerAccounts, sharedMarketObservations } from '../db/schema.js'
+import { accountTracking, automaticMarketWatches, events, instruments, markets, marketLifecycleEvidence, marketTracking, marketWatches, providerAccounts, sharedMarketObservations } from '../db/schema.js'
 import { digest } from '../accounting/decisions.js'
 import type { IngestionService } from '../ingestion/sync.js'
 import type { KalshiMarketDataService } from '../providers/kalshi/market-data.js'
@@ -12,6 +14,7 @@ import type { PolymarketMarketDataService } from '../providers/polymarket/market
 type Inputs = {
   kalshi?: Pick<KalshiMarketDataService, 'lookup'> | undefined
   polymarket?: Pick<PolymarketMarketDataService, 'trackingSnapshot'> | undefined
+  ctf?: Pick<PolymarketCollateralReader, 'standardCtfResolution'> | undefined
   accountIds: string[]
   marketIntervalMs: number
   accountIntervalMs: number
@@ -21,8 +24,11 @@ type Inputs = {
 const available = (now: Date, row: { nextAttemptAt: typeof marketTracking.nextAttemptAt | typeof accountTracking.nextAttemptAt; leaseUntil: typeof marketTracking.leaseUntil | typeof accountTracking.leaseUntil }) =>
   and(lte(row.nextAttemptAt, now), or(isNull(row.leaseUntil), lte(row.leaseUntil, now)))
 const leaseEnd = (now: Date) => new Date(now.getTime() + 180_000)
-const nextTime = (now: Date, interval: number, failures: number) =>
-  new Date(now.getTime() + Math.floor(Math.min(3_600_000, interval * 2 ** Math.min(failures, 5)) * (1 + 0.15 * Math.random())))
+export const nextTime = (now: Date, interval: number, failures: number, jitter = Math.random()) => {
+  const qualified = failures === 0 ? interval * (1 + 0.15 * jitter)
+    : Math.min(3_600_000, interval * (1 + 0.15 * jitter) * 2 ** Math.min(failures, 5))
+  return new Date(now.getTime() + Math.floor(qualified))
+}
 
 export class TrackingWorker {
   constructor(private readonly db: Database, private readonly input: Inputs) {}
@@ -35,7 +41,7 @@ export class TrackingWorker {
       const [candidate] = await tx.select({ job: marketTracking, provider: markets.providerCode, native: markets.externalId, event: events.externalId, asset: markets.settlementAssetCode })
         .from(marketTracking).innerJoin(markets, eq(markets.id, marketTracking.marketId))
         .innerJoin(events, eq(events.id, markets.eventId))
-        .where(and(available(now, marketTracking), inArray(markets.providerCode, providers),
+        .where(and(available(now, marketTracking), inArray(markets.providerCode, providers), isNull(marketTracking.resolution),
           or(exists(tx.select({ id: marketWatches.portfolioId }).from(marketWatches).where(eq(marketWatches.marketId, marketTracking.marketId))),
             exists(tx.select({ id: automaticMarketWatches.portfolioId }).from(automaticMarketWatches).where(eq(automaticMarketWatches.marketId, marketTracking.marketId))))))
         .orderBy(asc(marketTracking.nextAttemptAt), asc(marketTracking.marketId)).limit(1).for('update', { skipLocked: true })
@@ -50,6 +56,9 @@ export class TrackingWorker {
     try {
       let lifecycle: string
       let metadataAt = new Date()
+      let tradingOpensAt: Date | null = null
+      let tradingClosesAt: Date | null = null
+      let expectedResolutionAt: Date | null = null
       let resolution: typeof marketTracking.$inferSelect.resolution = null
       let quotes: Array<{ id: string; price: string; retrievedAt: Date; asset: string }>
       if (job.provider === 'kalshi' && this.input.kalshi) {
@@ -57,11 +66,18 @@ export class TrackingWorker {
         if (market.marketTicker !== job.native || market.eventTicker !== job.event || market.establishedPayoutUnit !== '1') throw new Error('tracking_market_scope')
         lifecycle = market.lifecycle
         metadataAt = new Date(market.retrievedAt)
-        resolution = market.resolution
+        resolution = market.resolution ? { ...market.resolution, source: 'kalshi_trade_api', settlementTime: market.resolution.knownAt } : null
+        tradingOpensAt = market.tradingOpensAt ? new Date(market.tradingOpensAt) : null
+        tradingClosesAt = market.tradingClosesAt ? new Date(market.tradingClosesAt) : null
+        expectedResolutionAt = market.expectedResolutionAt ? new Date(market.expectedResolutionAt) : null
         quotes = lifecycle === 'open' ? market.outcomes.flatMap((leg) => leg.quote?.provenance.includes('midpoint')
           ? [{ id: leg.id, price: leg.quote.value, retrievedAt: new Date(leg.quote.retrievedAt), asset: 'USD' }] : []) : []
       } else if (this.input.polymarket) {
-        ({ lifecycle, quotes } = await this.input.polymarket.trackingSnapshot(job.native, taskSignal))
+        const result = await this.input.polymarket.trackingSnapshot(job.native, taskSignal, job.asset === 'USDC' ? this.input.ctf : undefined)
+        lifecycle = result.lifecycle
+        quotes = result.quotes
+        resolution = 'resolution' in result ? result.resolution ?? null : null
+        metadataAt = new Date(resolution?.knownAt ?? metadataAt)
       } else throw new Error('tracking_provider_unavailable')
       taskSignal.throwIfAborted()
       await this.db.transaction(async (tx) => {
@@ -69,10 +85,18 @@ export class TrackingWorker {
         if (!claimed) return
         const monotonic = (!claimed.metadataAt || metadataAt >= claimed.metadataAt)
           && lifecycleRank(lifecycle) >= lifecycleRank(claimed.lifecycle)
-        if (resolution && claimed.resolution && digest(resolution) !== digest(claimed.resolution)) throw new Error('tracking_resolution_conflict')
+
         const effectiveLifecycle = monotonic ? lifecycle : claimed.lifecycle
         const native = await tx.select().from(instruments).where(eq(instruments.marketId, claimed.marketId)).limit(100)
         if (resolution && !native.some((row) => row.externalId === resolution!.winningInstrument)) throw new Error('tracking_resolution_identity')
+        const conflict = conflictingResolution(claimed.resolution, resolution)
+        if (lifecycleRank(lifecycle) > 0 && (monotonic || conflict)) {
+          const proof = conflict ? resolution : claimed.resolution ?? resolution
+          const revision = digest([claimed.marketId, metadataAt.toISOString().slice(0, 10), lifecycle, tradingOpensAt?.toISOString(),
+            tradingClosesAt?.toISOString(), expectedResolutionAt?.toISOString(), proof?.winningInstrument, conflict])
+          await tx.insert(marketLifecycleEvidence).values({ marketId: claimed.marketId, revision, retrievedAt: metadataAt,
+            lifecycle, tradingOpensAt, tradingClosesAt, expectedResolutionAt, resolution: proof, conflict }).onConflictDoNothing()
+        }
         let newest = claimed.quoteAt
         const eligible = new Set<string>()
         for (const quote of effectiveLifecycle === 'open' ? quotes : []) {
@@ -92,7 +116,7 @@ export class TrackingWorker {
         }
         const interval = effectiveLifecycle === 'open' ? this.input.marketIntervalMs : 3_600_000
         await tx.update(marketTracking).set({ lifecycle: effectiveLifecycle, failures: 0, lastSuccessAt: new Date(),
-          ...(monotonic ? { metadataAt, closedAt: claimed.closedAt ?? (lifecycle === 'closed' ? metadataAt : null), lifecycleAt: claimed.lifecycle !== lifecycle
+          ...(monotonic && !conflict ? { metadataAt, closedAt: claimed.closedAt ?? (lifecycle === 'closed' ? metadataAt : null), lifecycleAt: claimed.lifecycle !== lifecycle
             ? metadataAt : claimed.lifecycleAt, resolution: claimed.resolution ?? resolution } : {}),
           quoteAt: newest, quoteStatus: effectiveLifecycle !== 'open' ? 'inactive'
             : eligible.size === 0 ? 'missing' : eligible.size < native.length ? 'partial' : 'observed',
