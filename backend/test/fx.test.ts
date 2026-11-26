@@ -48,6 +48,18 @@ describe('reporting performance', () => {
     expect(selectRate([archived], 'EUR', 'USD', '2026-01-01T00:00:00.000Z', { mode: 'retrospective' }).rate).toBeNull()
   })
 
+  it('uses the previous ECB business-day reference over a weekend without backdating retrieval', () => {
+    const weekend = '2026-11-22T00:00:00.000Z'
+    const friday = { revision: 'friday', base: 'EUR', quote: 'GBP', rate: '0.83735', source: 'ecb_euro_reference',
+      methodology: 'fiat_reference', observedAt: new Date('2026-11-20T00:00:00.000Z'),
+      retrievedAt: new Date('2026-11-26T03:00:00.000Z') }
+    const monday = { ...friday, revision: 'monday', rate: '0.84', observedAt: new Date('2026-11-23T00:00:00.000Z') }
+    expect(selectRate([monday, friday], 'EUR', 'GBP', weekend, { mode: 'retrospective' })).toMatchObject({
+      rate: '0.83735', legs: [{ revision: 'friday', retrievedAt: '2026-11-26T03:00:00.000Z' }],
+    })
+    expect(selectRate([monday, friday], 'EUR', 'GBP', weekend, { mode: 'knowledge' }).rate).toBeNull()
+  })
+
   it('prefers an eligible daily pUSD reference over a newer stale current observation', () => {
     const asOf = '2026-01-02T12:00:00.000Z'
     const common = { base: 'PUSD', quote: 'USD', methodology: 'stablecoin_market_reference',

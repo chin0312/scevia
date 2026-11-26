@@ -4,7 +4,7 @@ Scevia owns accounting, reconciliation, analytics, risk and simulation. Select p
 
 ## Capability matrix
 
-Implementation and coverage below describe documented interfaces and fixture-tested behavior. No provider API, RPC, populated account or streaming session was validated for this patch.
+Implementation and coverage below describe the selected strategy and fixture-tested paths. The [Phase 9 validation report](PHASE9_VALIDATION.md) separately records live findings, usage rights and access blockers.
 
 | Evidence | Preferred source and fallback | Evidence, cadence and coverage | Rights, cost and status |
 | --- | --- | --- | --- |
