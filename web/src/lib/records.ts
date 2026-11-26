@@ -23,6 +23,9 @@ export interface ManagedRecord extends FinRecord {
   identity: 'distinct' | null
   /** Duplicate relationship: this observation duplicates the named record. */
   duplicateOf: string | null
+  /** Fingerprint of the target's effective economic terms when the link was made. If the target is later corrected
+   *  or replaced with different terms, the link no longer holds and the record needs review. */
+  duplicateFp: string | null
   /** A correction is kept beside the original values (never overwrites them). */
   correction: Correction | null
 }
@@ -33,14 +36,19 @@ export const STATUS_LABEL: Record<Status, string> = { included: 'Included', excl
  *  needs review); an explicit include or a distinct-identity decision resolves an unresolved overlap. */
 export function statusOf(r: ManagedRecord, all: ManagedRecord[]): Status {
   if (r.membership === 'exclude') return 'excluded'
-  if (r.duplicateOf) {
-    const t = all.find((x) => x.key === r.duplicateOf)
-    return t && !t.duplicateOf && t.membership !== 'exclude' ? 'duplicate' : 'review'
-  }
+  if (r.duplicateOf) return duplicateHolds(r, all) ? 'duplicate' : 'review'
   if (r.membership === 'include' || r.identity === 'distinct') return 'included'
   return r.initial
 }
 export const effective = (r: ManagedRecord): FinRecord => ({ ...r, ...(r.correction ?? {}) })
+/** Economic terms of a record (what makes two observations the same transaction), independent of its key. */
+export const fingerprint = (r: FinRecord) => JSON.stringify([r.accountId, r.type, r.time, r.marketId ?? r.instrument, r.side, r.quantity, r.price, r.amount, r.fee])
+/** A duplicate link holds only while its target exists, isn't itself a duplicate, is included (not excluded and not
+ *  awaiting review), and still has the economic terms it had when the link was made. */
+export function duplicateHolds(r: ManagedRecord, all: ManagedRecord[]): boolean {
+  const t = all.find((x) => x.key === r.duplicateOf)
+  return !!t && !t.duplicateOf && statusOf(t, all) === 'included' && (r.duplicateFp == null || r.duplicateFp === fingerprint(effective(t)))
+}
 const isAdjusted = (r: ManagedRecord) => !!(r.membership || r.identity || r.duplicateOf || r.correction)
 
 /** Same account, type and normalized economic terms. A hint for review, never an automatic merge. */
@@ -88,33 +96,44 @@ function apply1(r: ManagedRecord, a: Action): ManagedRecord {
     case 'include': return { ...r, membership: 'include' }
     case 'exclude': return { ...r, membership: 'exclude' }
     case 'restore': return { ...r, membership: null }
-    case 'distinct': return { ...r, identity: 'distinct', duplicateOf: null }
+    case 'distinct': return { ...r, identity: 'distinct', duplicateOf: null, duplicateFp: null }
     case 'reset_identity': return { ...r, identity: null }
-    case 'reset_duplicate': return { ...r, duplicateOf: null }
+    case 'reset_duplicate': return { ...r, duplicateOf: null, duplicateFp: null }
     case 'reset_correction': return r.source === 'api' ? r : { ...r, correction: null }
-    case 'reset_all': return { ...r, membership: null, identity: null, duplicateOf: null, correction: null }
+    case 'reset_all': return { ...r, membership: null, identity: null, duplicateOf: null, duplicateFp: null, correction: null }
   }
 }
 export const apply = (rs: ManagedRecord[], keys: string[], a: Action) => { const set = new Set(keys); return rs.map((r) => (set.has(r.key) ? apply1(r, a) : r)) }
 
-/** What a change would do before it is confirmed: which records change, which accounts are involved, and the change
- *  in included cash per account and shares per account + market + outcome. Unknown amounts are counted, never 0. */
+/** What a change would do before it is confirmed, computed on the actual resulting sample state:
+ *  - direct: selected records whose status or values change;
+ *  - indirect: other records whose status changes as a consequence (e.g. a duplicate whose target is excluded or
+ *    corrected); no decision is applied to them, they are only reported, and those that end up needing review are
+ *    listed separately;
+ *  - known cash per account and shares per account + market + outcome over every changed record, with unknown amounts
+ *    counted, never treated as 0. */
 export interface Preview {
-  selected: number; changed: string[]; unchanged: number; accounts: string[]
+  selected: number; changed: string[]; unchanged: number; indirect: string[]; toReview: string[]; accounts: string[]
   cash: Record<string, number>; qty: Record<string, { label: string; accountId: string; delta: number }>; unknown: number
 }
 export function preview(rs: ManagedRecord[], keys: string[], a: Action): Preview {
   const set = new Set(keys), after = apply(rs, keys, a)
-  const out: Preview = { selected: set.size, changed: [], unchanged: 0, accounts: [], cash: {}, qty: {}, unknown: 0 }
+  const out: Preview = { selected: set.size, changed: [], unchanged: 0, indirect: [], toReview: [], accounts: [], cash: {}, qty: {}, unknown: 0 }
   const accounts = new Set<string>()
   rs.forEach((r, i) => {
-    if (!set.has(r.key)) return
-    accounts.add(r.accountId)
     const n = after[i], b = statusOf(r, rs), s = statusOf(n, after)
-    const be = effective(r), ae = effective(n)
-    // Unchanged = same status and same effective values (the decision is already in that state).
-    if (b === s && JSON.stringify(be) === JSON.stringify(ae) && (a !== 'reset_duplicate' || !r.duplicateOf) && (a !== 'reset_identity' || !r.identity)) { out.unchanged++; return }
-    out.changed.push(r.key)
+    const be = effective(r), ae = effective(n), same = b === s && JSON.stringify(be) === JSON.stringify(ae)
+    if (set.has(r.key)) {
+      accounts.add(r.accountId)
+      // Unchanged = same status and values, and the selected decision is already in that state.
+      if (same && (a !== 'reset_duplicate' || !r.duplicateOf) && (a !== 'reset_identity' || !r.identity)) { out.unchanged++; return }
+      out.changed.push(r.key)
+    } else {
+      if (same) return
+      out.indirect.push(r.key); accounts.add(r.accountId)
+    }
+    if (s === 'review' && b !== 'review') out.toReview.push(r.key)
+    if (same) return
     // Included before / after, with the values that apply on each side.
     for (const [rec, sign] of [[be, b === 'included' ? -1 : 0], [ae, s === 'included' ? 1 : 0]] as const) {
       if (!sign) continue
@@ -133,13 +152,15 @@ export function preview(rs: ManagedRecord[], keys: string[], a: Action): Preview
   out.accounts = [...accounts]
   return out
 }
+/** Apply a confirmed preview: the action goes to the directly changed records only. */
+export const applyPreview = (rs: ManagedRecord[], p: Preview, a: Action) => apply(rs, p.changed, a)
 
 /** Link a record to the observation it duplicates. Both must be in the same account and of the same type, and the
  *  target can't itself be a duplicate. Returns null when the link isn't allowed. */
 export function markDuplicate(rs: ManagedRecord[], key: string, of: string): ManagedRecord[] | null {
   const r = rs.find((x) => x.key === key), t = rs.find((x) => x.key === of)
-  if (!r || !t || r.key === t.key || r.accountId !== t.accountId || r.type !== t.type || t.duplicateOf) return null
-  return rs.map((x) => (x.key === key ? { ...x, duplicateOf: of, identity: null } : x))
+  if (!r || !t || r.key === t.key || r.accountId !== t.accountId || r.type !== t.type || t.duplicateOf || statusOf(t, rs) !== 'included') return null
+  return rs.map((x) => (x.key === key ? { ...x, duplicateOf: of, duplicateFp: fingerprint(effective(t)), identity: null } : x))
 }
 /** Corrections apply to imported and manual records; provider records are excluded or supplemented instead. */
 export const correct = (rs: ManagedRecord[], key: string, patch: Correction) => rs.map((r) => (r.key === key && r.source !== 'api' ? { ...r, correction: { ...(r.correction ?? {}), ...patch } } : r))
@@ -167,7 +188,9 @@ export function filterRecords(rs: ManagedRecord[], f: RecordFilter, accounts: Wo
 
 /* ── Imports (sample files only) ───────────────────────────── */
 export type ImportMode = 'independent' | 'supplement'
-export interface ImportRow { n: number; rec: FinRecord; match: string | null; carried: string | null; warnings: string[] }
+/** `carried`: the replaced row with the same source reference. `changed`: its source values differ, so only an exclusion
+ *  carries over and the row needs review; corrections, identity and duplicate decisions don't carry. */
+export interface ImportRow { n: number; rec: FinRecord; match: string | null; carried: string | null; changed: boolean; warnings: string[] }
 export interface ImportPreview { batchId: string; file: string; accountId: string; mode: ImportMode; replaces: ImportBatch | null; rows: ImportRow[] }
 /** Normalize a sample file for an account. Rows get keys from a new batch id, so the same file imported into two
  *  accounts never collides. If the file is already active in this account, the import is a replacement: rows are
@@ -181,12 +204,13 @@ export function previewImport(file: SampleFile, accountId: string, mode: ImportM
     const rec: FinRecord = { ...row, key: `${batchId}#${i + 1}`, accountId, source: 'csv', batchId, sourceRef }
     const prior = replaces ? existing.find((x) => x.batchId === replaces.id && x.sourceRef === sourceRef) : undefined
     const match = mode === 'supplement' ? others.find((x) => terms(effective(x)) === terms(rec))?.key ?? null : null
+    const changed = !!prior && fingerprint(prior) !== fingerprint(rec)
     const warnings = [
       ...(row.fee == null && (row.type === 'buy' || row.type === 'sell') ? ['Fee not reported'] : []),
       ...(match ? [`Matches ${match}`] : []),
-      ...(prior && isAdjusted(prior) ? ['Your decisions carry over'] : []),
+      ...(changed ? ['Changed since the last import: needs review'] : prior && isAdjusted(prior) ? ['Your decisions carry over'] : []),
     ]
-    return { n: i + 1, rec, match, carried: prior?.key ?? null, warnings }
+    return { n: i + 1, rec, match, carried: prior?.key ?? null, changed, warnings }
   })
   return { batchId, file: file.name, accountId, mode, replaces, rows }
 }
@@ -198,38 +222,63 @@ export function confirmImport(rs: ManagedRecord[], batches: ImportBatch[], p: Im
   const remap = new Map(p.rows.filter((x) => x.carried).map((x) => [x.carried!, x.rec.key]))
   const added = p.rows.map((x): ManagedRecord => {
     const prior = old.find((o) => o.key === x.carried)
-    const initial = p.mode === 'independent' ? 'included' : x.match ? 'review' : acceptUnmatched ? 'included' : 'review'
-    return { ...x.rec, initial, membership: prior?.membership ?? null, identity: prior?.identity ?? null, duplicateOf: prior?.duplicateOf ? remap.get(prior.duplicateOf) ?? prior.duplicateOf : null, correction: prior?.correction ?? null }
+    const initial = x.changed ? 'review' : p.mode === 'independent' ? 'included' : x.match ? 'review' : acceptUnmatched ? 'included' : 'review'
+    if (prior && x.changed) return { ...x.rec, initial, membership: prior.membership === 'exclude' ? 'exclude' : null, identity: null, duplicateOf: null, duplicateFp: null, correction: null }
+    return { ...x.rec, initial, membership: prior?.membership ?? null, identity: prior?.identity ?? null, duplicateOf: prior?.duplicateOf ? remap.get(prior.duplicateOf) ?? prior.duplicateOf : null, duplicateFp: prior?.duplicateFp ?? null, correction: prior?.correction ?? null }
   })
   const kept = rs.filter((r) => !old.includes(r)).map((r) => (r.duplicateOf && remap.has(r.duplicateOf) ? { ...r, duplicateOf: remap.get(r.duplicateOf)! } : r))
   const batch: ImportBatch = { id: p.batchId, file: p.file, accountId: p.accountId, mode: p.mode, importedAt: at, rows: p.rows.length, status: 'active', replaces: p.replaces?.id ?? null }
   return { records: [...kept, ...added], batches: [...batches.map((b) => (b.id === p.replaces?.id ? { ...b, status: 'superseded' as const } : b)), batch], added }
 }
-export const fromRecords = (rs: FinRecord[]): ManagedRecord[] => rs.map((r) => ({ ...r, initial: 'included', membership: null, identity: null, duplicateOf: null, correction: null }))
+export const fromRecords = (rs: FinRecord[]): ManagedRecord[] => rs.map((r) => ({ ...r, initial: 'included', membership: null, identity: null, duplicateOf: null, duplicateFp: null, correction: null }))
 export const TYPE_LABEL: Record<RecordType, string> = { deposit: 'Deposit', withdrawal: 'Withdrawal', buy: 'Buy', sell: 'Sell', fee: 'Fee', settlement: 'Settlement', redemption: 'Redemption' }
 
 /* ── Stored workspace validation ───────────────────────────── */
 const TYPES: RecordType[] = ['deposit', 'withdrawal', 'buy', 'sell', 'fee', 'settlement', 'redemption']
 const numOrNull = (v: unknown) => v === null || (typeof v === 'number' && Number.isFinite(v))
 const str = (v: unknown) => typeof v === 'string' && v.length > 0
+const iso = (v: unknown) => typeof v === 'string' && v.length >= 10 && !Number.isNaN(Date.parse(v))
+const nonNeg = (v: unknown) => v === null || (typeof v === 'number' && Number.isFinite(v) && v >= 0)
+/** A stored correction is accepted only with known keys and valid values; anything else is dropped (the record keeps
+ *  its original source values). Returns undefined when the correction is invalid. */
+export function readCorrection(v: unknown): Correction | null | undefined {
+  if (v == null) return null
+  if (typeof v !== 'object' || Array.isArray(v)) return undefined
+  const out: Correction = {}
+  for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+    if (k === 'quantity' || k === 'amount' || k === 'fee') { if (!nonNeg(x)) return undefined; out[k] = x as number | null }
+    else if (k === 'price') { if (!(x === null || (typeof x === 'number' && x > 0 && x < 1))) return undefined; out.price = x as number | null }
+    else if (k === 'time') { if (!iso(x)) return undefined; out.time = x as string }
+    else return undefined
+  }
+  return Object.keys(out).length ? out : null
+}
 /** Validate a stored workspace record by record: malformed entries and records pointing at unknown accounts are
- *  dropped (and counted); a duplicate link to a missing record is kept and shows as needing review. */
-export function readWorkspace(raw: unknown): { accounts: WorkspaceAccount[]; records: ManagedRecord[]; batches: ImportBatch[]; dropped: number } | null {
+ *  dropped; invalid corrections, unknown batch references and malformed links are repaired (counted in `repaired`)
+ *  without discarding the record. A duplicate link to a missing record is kept and shows as needing review. */
+export function readWorkspace(raw: unknown): { accounts: WorkspaceAccount[]; records: ManagedRecord[]; batches: ImportBatch[]; dropped: number; repaired: number } | null {
   if (!raw || typeof raw !== 'object') return null
   const o = raw as Record<string, unknown>
   if (o.v !== 2 || !Array.isArray(o.accounts) || !Array.isArray(o.records) || !Array.isArray(o.batches)) return null
-  const accounts = (o.accounts as WorkspaceAccount[]).filter((a) => a && str(a.id) && (a.venue === 'pm' || a.venue === 'ks') && typeof a.label === 'string' && ['connected', 'imported', 'manual'].includes(a.kind) && Array.isArray(a.sources))
+  const accountIds = new Set<string>()
+  const accounts = (o.accounts as WorkspaceAccount[]).filter((a) => a && str(a.id) && !accountIds.has(a.id) && (a.venue === 'pm' || a.venue === 'ks') && typeof a.label === 'string' && ['connected', 'imported', 'manual'].includes(a.kind) && Array.isArray(a.sources) && accountIds.add(a.id))
   if (!accounts.length) return null
-  const ids = new Set(accounts.map((a) => a.id)), keys = new Set<string>()
-  let dropped = 0
-  const records = (o.records as ManagedRecord[]).filter((r) => {
-    const ok = r && str(r.key) && !keys.has(r.key) && ids.has(r.accountId) && ['api', 'csv', 'manual'].includes(r.source) && TYPES.includes(r.type) && str(r.time) && !Number.isNaN(Date.parse(r.time))
+  const batches = (o.batches as ImportBatch[]).filter((b) => b && str(b.id) && str(b.file) && accountIds.has(b.accountId) && (b.status === 'active' || b.status === 'superseded'))
+  const batchIds = new Set(batches.map((b) => b.id)), keys = new Set<string>()
+  let dropped = 0, repaired = 0
+  const records: ManagedRecord[] = []
+  for (const r of o.records as ManagedRecord[]) {
+    const ok = r && str(r.key) && !keys.has(r.key) && accountIds.has(r.accountId) && ['api', 'csv', 'manual'].includes(r.source) && TYPES.includes(r.type) && iso(r.time)
       && numOrNull(r.quantity) && numOrNull(r.price) && numOrNull(r.amount) && numOrNull(r.fee) && (r.side === null || r.side === 'YES' || r.side === 'NO')
       && (r.initial === 'included' || r.initial === 'review') && [null, 'include', 'exclude'].includes(r.membership) && [null, 'distinct'].includes(r.identity)
-    if (!ok) { dropped++; return false }
-    keys.add(r.key); return true
-  }).map((r) => ({ ...r, sourceRef: str(r.sourceRef) ? r.sourceRef : r.key, marketId: typeof r.marketId === 'string' ? r.marketId : null, batchId: typeof r.batchId === 'string' ? r.batchId : null, duplicateOf: typeof r.duplicateOf === 'string' ? r.duplicateOf : null, correction: r.correction && typeof r.correction === 'object' ? r.correction : null }))
-  const batches = (o.batches as ImportBatch[]).filter((b) => b && str(b.id) && str(b.file) && ids.has(b.accountId) && (b.status === 'active' || b.status === 'superseded'))
-  return { accounts, records, batches, dropped }
+    if (!ok) { dropped++; continue }
+    keys.add(r.key)
+    const correction = readCorrection(r.correction)
+    const batchId = typeof r.batchId === 'string' && batchIds.has(r.batchId) ? r.batchId : null
+    const duplicateOf = typeof r.duplicateOf === 'string' && r.duplicateOf !== r.key ? r.duplicateOf : null
+    if (correction === undefined || (r.batchId != null && batchId == null) || (r.duplicateOf != null && duplicateOf == null)) repaired++
+    records.push({ ...r, sourceRef: str(r.sourceRef) ? r.sourceRef : r.key, marketId: typeof r.marketId === 'string' ? r.marketId : null, batchId, duplicateOf, duplicateFp: typeof r.duplicateFp === 'string' ? r.duplicateFp : null, correction: correction ?? null })
+  }
+  return { accounts, records, batches, dropped, repaired }
 }
 export type { Outcome }

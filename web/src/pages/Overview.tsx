@@ -15,6 +15,7 @@ import { CATEGORIES, CAT_COLOR, PLATFORM_NAME } from '../data/labels'
 import type { Category, Platform } from '../data/types'
 import { PERIODS, account, accountsOn, allocation, coverage, sourceOf, exposures, fmtDate, netPnlAt, periodRange, positionsFor, series, tradeNet, type Period, type PlatformFilter, type Position } from '../lib/finance'
 import { fmt, int, kfmt, pct, sfmt } from '../lib/format'
+import { accountName } from '../lib/useWorkspace'
 
 const RAIL: RailSection[] = [
   { id: 'summary', label: 'Summary', icon: 'home' },
@@ -245,7 +246,7 @@ export default function Overview() {
               <p className="t3" style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--space-2)' }}>Sample portfolio. No account is connected.</p>
               {(['pm', 'ks'] as Platform[]).filter((p) => f === 'all' || p === f).map((p) => {
                 const c = coverage(p), src = sourceOf(p)
-                return <div className="cov" key={p}><PlatformBadge p={p} /><span>{accountsOn(p).map((a) => a.label).join(', ')} · {c.fills} fills · {c.settlements} settlements</span><span className={src.stale ? 'stale' : 't3'} title={src.stale ? 'Older than 24 hours' : undefined}>as of {fmtDate(src.asOf)}{src.stale ? ' · stale' : ''}</span></div>
+                return <div className="cov" key={p}><PlatformBadge p={p} /><span>{accountsOn(p).map((a) => accountName(a.id)).join(', ')} · {c.fills} fills · {c.settlements} settlements</span><span className={src.stale ? 'stale' : 't3'} title={src.stale ? 'Older than 24 hours' : undefined}>as of {fmtDate(src.asOf)}{src.stale ? ' · stale' : ''}</span></div>
               })}
               {(() => { const ps = (['pm', 'ks'] as Platform[]).filter((p) => f === 'all' || p === f).map(coverage); const t = (k: keyof (typeof ps)[number]) => ps.reduce((a, c) => a + c[k], 0)
                 return <div className="cov-mini"><div><b>{t('open')}</b>open positions</div><div><b>{t('fills')}</b>fills</div><div><b>{t('settlements')}</b>settlements</div><div><b>{t('feeEstimates')}</b>fee estimates</div></div> })()}

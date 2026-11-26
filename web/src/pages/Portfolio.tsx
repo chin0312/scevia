@@ -43,7 +43,7 @@ export default function Portfolio() {
   const nav = useNavigate()
   const toast = useToast()
   const [params, setParams] = useSearchParams()
-  const [ws, setWs] = useWorkspace()
+  const [ws, setWs, persisted] = useWorkspace()
   const [history, setHistory] = useState<{ label: string; ws: Workspace }[]>([])
   const [importing, setImporting] = useState<{ file?: string; accountId?: string } | null>(null)
   const [manual, setManual] = useState<string | null>(null)
@@ -79,18 +79,20 @@ export default function Portfolio() {
             <Button icon="plus" onClick={() => setManual('')}>Add record…</Button>
           </div>
         </section>
+        {!persisted && <Callout tone="warn" icon="alert"><b>Changes aren’t being saved.</b> This browser refused to keep them in this tab, so they’ll be lost when you reload or leave. Everything you change still applies until then.</Callout>}
         {(section === 'transactions' || section === 'imports') && <Callout icon="shield"><b>Record-management sample.</b> These records are fictional. Including, excluding or correcting them doesn’t change Overview, Analytics, Risk or Scenario Lab, and nothing is uploaded.</Callout>}
+        {history.length > 0 && <div className="undo-line" role="status"><span>Last change: {history.at(-1)!.label}.</span><button type="button" className="link" onClick={undo}>Undo: {history.at(-1)!.label}</button></div>}
         {section === 'accounts' && <Accounts ws={ws} onRename={(id, label) => commit(`Renamed account to ${label}`, { ...ws, accounts: ws.accounts.map((a) => (a.id === id ? { ...a, label } : a)) })}
           onImport={(id) => setImporting({ accountId: id })} onManual={(id) => setManual(id)} />}
         {section === 'sources' && <Sources ws={ws} onImport={() => setImporting({})} onManual={() => setManual('')} />}
-        {section === 'transactions' && <Transactions ws={ws} commit={commit} history={history} undo={undo} />}
+        {section === 'transactions' && <Transactions ws={ws} commit={commit} />}
         {section === 'imports' && <Imports ws={ws} reviewCount={reviewCount} onImport={(file, accountId) => setImporting({ file, accountId })} />}
         {section === 'coverage' && <Coverage ws={ws} />}
         <div className="footer-note"><span>Original records stay inspectable; decisions are reversible and never delete source data.</span><span>Sample portfolio · fictional data</span></div>
       </main>
-      {importing && <ImportFlow ws={ws} preset={importing} onClose={() => setImporting(null)} onDone={(label, next, review) => {
+      {importing && <ImportFlow ws={ws} preset={importing} onClose={() => setImporting(null)} onDone={(label, next, review, batchId) => {
         commit(label, next); setImporting(null)
-        pushLocalEvent({ id: newId('evt'), at: new Date().toISOString(), category: 'imports', title: label, body: review ? `${review} row${review === 1 ? '' : 's'} need review before they count` : 'All rows included', to: review ? '/portfolio/transactions?status=review' : '/portfolio/imports' })
+        pushLocalEvent({ id: `import:${batchId}`, batchId, at: new Date().toISOString(), category: 'imports', title: label, body: review ? `${review} row${review === 1 ? '' : 's'} need review before they count` : 'All rows included', to: review ? `/portfolio/transactions?status=review&batch=${encodeURIComponent(batchId)}` : '/portfolio/imports' })
         nav(review ? '/portfolio/transactions?status=review' : '/portfolio/imports')
       }} />}
       {manual != null && <ManualRecord ws={ws} preset={manual} onClose={() => setManual(null)} onAdd={(next, label) => { commit(label, next); setManual(null); toast(label); nav('/portfolio/transactions') }} />}
@@ -180,7 +182,7 @@ function Sources({ ws, onImport, onManual }: { ws: Workspace; onImport: () => vo
 }
 
 /* ── Transactions ─────────────────────────────────────────── */
-function Transactions({ ws, commit, history, undo }: { ws: Workspace; commit: (label: string, ws: Workspace) => void; history: { label: string }[]; undo: () => void }) {
+function Transactions({ ws, commit }: { ws: Workspace; commit: (label: string, ws: Workspace) => void }) {
   const toast = useToast()
   const [params, setParams] = useSearchParams()
   const f: R.RecordFilter = { ...R.NO_FILTER, ...Object.fromEntries(Object.keys(R.NO_FILTER).filter((k) => params.has(k)).map((k) => [k, k === 'duplicates' ? params.get(k) === '1' : params.get(k)])) } as R.RecordFilter
@@ -197,9 +199,11 @@ function Transactions({ ws, commit, history, undo }: { ws: Workspace; commit: (l
   const setFilter = (patch: Partial<R.RecordFilter>) => {
     const next = { ...f, ...patch }, p = new URLSearchParams()
     for (const [k, v] of Object.entries(next)) if (v !== (R.NO_FILTER as unknown as Record<string, unknown>)[k]) p.set(k, typeof v === 'boolean' ? '1' : String(v))
-    setParams(p, { replace: true }); setPage(0)
-    if (sel.size) { setSel(new Set()); setCleared(true) }
+    setParams(p, { replace: true })
   }
+  const fKey = JSON.stringify(f)
+  const [lastF, setLastF] = useState(fKey)
+  if (fKey !== lastF) { setLastF(fKey); setPage(0); if (sel.size) { setSel(new Set()); setCleared(true) } }
   const picked = [...sel].filter((k) => rows.some((r) => r.key === k))
   const allVisible = visible.length > 0 && visible.every((r) => sel.has(r.key)), allMatching = rows.length > 0 && rows.every((r) => sel.has(r.key))
   const toggle = (k: string, on: boolean) => { setCleared(false); setSel((s) => { const n = new Set(s); if (on) n.add(k); else n.delete(k); return n }) }
@@ -230,7 +234,6 @@ function Transactions({ ws, commit, history, undo }: { ws: Workspace; commit: (l
           <select className="select" aria-label="More actions" value="" onChange={(e) => e.target.value && setConfirm(e.target.value as R.Action)}>
             <option value="">More…</option>{(['reset_correction', 'reset_duplicate', 'reset_identity', 'reset_all'] as R.Action[]).map((a) => <option key={a} value={a}>{R.ACTION_LABEL[a]}…</option>)}</select>
         </> : <span className="t3">{cleared ? 'Selection cleared because the filters changed.' : `${rows.length} record${rows.length === 1 ? '' : 's'}${active ? ' match these filters' : ''}. Select records to change several at once.`}</span>}
-        {history.length > 0 && <button type="button" className="link" onClick={undo}>Undo: {history.at(-1)!.label}</button>}
       </div>
       <div className="dt-wrap">
         <table className="dt rec-table">
@@ -265,7 +268,7 @@ function Transactions({ ws, commit, history, undo }: { ws: Workspace; commit: (l
         <span className="row"><Button size="sm" variant="ghost" disabled={pg === 0} onClick={() => setPage(pg - 1)}>Previous</Button><Button size="sm" variant="ghost" disabled={pg >= pages - 1} onClick={() => setPage(pg + 1)}>Next</Button></span></div>
     </Card>
     {confirm && <ConfirmBulk action={confirm} keys={picked} ws={ws} onCancel={() => setConfirm(null)}
-      onConfirm={(p) => { commit(`${R.ACTION_LABEL[confirm]} · ${p.changed.length} record${p.changed.length === 1 ? '' : 's'}`, { ...ws, records: R.apply(ws.records, p.changed, confirm) }); setSel(new Set()); setConfirm(null); toast(`${R.ACTION_LABEL[confirm]}: ${p.changed.length} record${p.changed.length === 1 ? '' : 's'} changed`) }} />}
+      onConfirm={(p) => { commit(`${R.ACTION_LABEL[confirm]} · ${p.changed.length} record${p.changed.length === 1 ? '' : 's'}`, { ...ws, records: R.applyPreview(ws.records, p, confirm) }); setSel(new Set()); setConfirm(null); toast(`${R.ACTION_LABEL[confirm]}: ${p.changed.length} record${p.changed.length === 1 ? '' : 's'} changed`) }} />}
     {detail && ws.records.some((r) => r.key === detail) && <RecordDetail r={ws.records.find((x) => x.key === detail)!} ws={ws} dups={dups[detail] ?? []} onClose={() => setDetail(null)} onChange={(label, records) => { commit(label, { ...ws, records }); toast(label) }} />}
   </>)
 }
@@ -279,8 +282,10 @@ function ConfirmBulk({ action, keys, ws, onCancel, onConfirm }: { action: R.Acti
       <p className="t2">{R.ACTION_HELP[action]}</p>
       <div className="effect">
         <div>Selected<b>{p.selected}</b></div><div>Will change<b>{p.changed.length}</b></div><div>Already in that state<b>{p.unchanged}</b></div>
+        {p.indirect.length > 0 && <div>Also affected<b>{p.indirect.length}</b></div>}
         {p.unknown > 0 && <div>Unknown amounts<b className="warn-fg">{p.unknown}</b></div>}
       </div>
+      {p.indirect.length > 0 && <Callout tone="warn" icon="alert"><b>{p.indirect.length} other record{p.indirect.length === 1 ? '' : 's'} change as a result</b> ({p.indirect.join(', ')}): {p.indirect.length === 1 ? 'it links' : 'they link'} to a selected record as a duplicate. No decision is applied to {p.indirect.length === 1 ? 'it' : 'them'}{p.toReview.some((k) => p.indirect.includes(k)) ? `; ${p.toReview.filter((k) => p.indirect.includes(k)).length} will need review` : ''}. Effects below include {p.indirect.length === 1 ? 'it' : 'them'}.</Callout>}
       <small className="t3">Accounts: {p.accounts.map((a) => acctName(ws, a)).join(', ')}</small>
       {(cash.length > 0 || q.length > 0) && <dl className="kv">
         {cash.map(([a, v]) => <Fragment key={a}><dt>Included cash · {acctName(ws, a)}</dt><dd>{sfmt(v, 2)}</dd></Fragment>)}
@@ -294,7 +299,7 @@ function ConfirmBulk({ action, keys, ws, onCancel, onConfirm }: { action: R.Acti
 function RecordDetail({ r, ws, dups, onClose, onChange }: { r: R.ManagedRecord; ws: Workspace; dups: string[]; onClose: () => void; onChange: (label: string, records: R.ManagedRecord[]) => void }) {
   const e = R.effective(r), st = R.statusOf(r, ws.records)
   const [edit, setEdit] = useState<{ quantity: string; price: string; fee: string; unknownFee: boolean } | null>(null)
-  const [dupTarget, setDupTarget] = useState(dups[0] ?? '')
+  const [dupTarget, setDupTarget] = useState(() => dups.find((k) => { const t = ws.records.find((x) => x.key === k); return t && !t.duplicateOf && R.statusOf(t, ws.records) === 'included' }) ?? '')
   const editable = r.source !== 'api', trade = e.type === 'buy' || e.type === 'sell'
   const parsed = edit && { q: parseShares(edit.quantity), p: parsePrice(edit.price), f: parseMoney(edit.fee) }
   const okEdit = parsed && (!trade || (parsed.q.state === 'ok' && parsed.p.state === 'ok')) && (edit!.unknownFee || parsed.f.state === 'ok')
@@ -304,7 +309,7 @@ function RecordDetail({ r, ws, dups, onClose, onChange }: { r: R.ManagedRecord; 
     <Drawer title={`${R.TYPE_LABEL[e.type]} · ${e.instrument ?? acctName(ws, r.accountId)}`} sub={`${r.key} · ${SOURCE_LABEL[r.source]}${r.batchId ? ` · batch ${r.batchId}` : ''}`} onClose={onClose}>
       <dl className="kv">
         <dt>Account</dt><dd>{acctName(ws, r.accountId)}</dd>
-        <dt>Status</dt><dd>{R.STATUS_LABEL[st]}{st === 'review' && r.duplicateOf ? ' (its duplicate target is no longer included)' : ''}</dd>
+        <dt>Status</dt><dd>{R.STATUS_LABEL[st]}{st === 'review' && r.duplicateOf ? ` · ${linkProblem(r, ws.records)}` : ''}</dd>
         <dt>Membership</dt><dd>{r.membership ? `${r.membership === 'include' ? 'Included' : 'Excluded'} by you` : 'As delivered'}</dd>
         <dt>Identity</dt><dd>{r.identity === 'distinct' ? 'Accepted as a separate transaction' : r.duplicateOf ? `Duplicate of ${r.duplicateOf}` : '—'}</dd>
         <dt>Source reference</dt><dd className="mono-s">{r.sourceRef}</dd>
@@ -319,8 +324,8 @@ function RecordDetail({ r, ws, dups, onClose, onChange }: { r: R.ManagedRecord; 
       {cands.length > 0 && !r.duplicateOf && r.identity !== 'distinct' && (
         <fieldset className="setup-f drawer-sec"><legend className="l">Possible duplicate of {cands.length > 1 ? `${cands.length} records` : 'another record'}</legend>
           <small className="t3">Same account, type and terms. It may be one transaction recorded twice, or two real identical trades.</small>
-          {cands.map((c) => { const ce = R.effective(c); return (
-            <label key={c.key} className={cx('choice', dupTarget === c.key && 'on')}><input type="radio" name="dup" checked={dupTarget === c.key} onChange={() => setDupTarget(c.key)} />
+          {cands.map((c) => { const ce = R.effective(c), eligible = R.statusOf(c, ws.records) === 'included' && !c.duplicateOf; return (
+            <label key={c.key} className={cx('choice', dupTarget === c.key && 'on')} style={eligible ? undefined : { opacity: 0.6 }} title={eligible ? undefined : 'Only an included record can be the original'}><input type="radio" name="dup" disabled={!eligible} checked={dupTarget === c.key} onChange={() => setDupTarget(c.key)} />
               <span>{c.key} · {SOURCE_LABEL[c.source]}{c.batchId ? ` · batch ${c.batchId}` : ''}<small>{when(ce.time)} · {ce.quantity != null ? `${qty(ce.quantity)} @ ${ce.price?.toFixed(2)}` : ce.amount != null ? fmt(ce.amount, 2) : '—'} · {R.STATUS_LABEL[R.statusOf(c, ws.records)]}</small></span></label>
           ) })}
           <div className="row" style={{ flexWrap: 'wrap' }}>
@@ -394,7 +399,7 @@ function Imports({ ws, reviewCount, onImport }: { ws: Workspace; reviewCount: nu
 }
 
 const STEPS = ['File', 'Account', 'Preview', 'Confirm', 'Result'] as const
-function ImportFlow({ ws, preset, onClose, onDone }: { ws: Workspace; preset: { file?: string; accountId?: string }; onClose: () => void; onDone: (label: string, ws: Workspace, review: number) => void }) {
+function ImportFlow({ ws, preset, onClose, onDone }: { ws: Workspace; preset: { file?: string; accountId?: string }; onClose: () => void; onDone: (label: string, ws: Workspace, review: number, batchId: string) => void }) {
   const [step, setStep] = useState(0)
   const [file, setFile] = useState(preset.file ?? SAMPLE_FILES[0].name)
   const [target, setTarget] = useState<string>(preset.accountId ?? 'pm-main')
@@ -420,7 +425,7 @@ function ImportFlow({ ws, preset, onClose, onDone }: { ws: Workspace; preset: { 
       footer={<>{step > 0 && step < 4 && <Button variant="ghost" onClick={() => setStep(step - 1)}>Back</Button>}<span className="spacer" />
         {step < 3 && <Button variant="primary" disabled={step === 1 && isNew && !newLabel.trim()} onClick={() => setStep(step + 1)}>Continue</Button>}
         {step === 3 && <Button variant="primary" onClick={finish}>{p.replaces ? `Replace with ${p.rows.length} rows` : `Import ${p.rows.length} rows`}</Button>}
-        {step === 4 && <Button variant="primary" onClick={() => onDone(`Imported ${sf.name} into ${isNew ? newLabel.trim() : ws.accounts.find((a) => a.id === accountId)?.label}`, result!.ws, review)}>Done</Button>}</>}>
+        {step === 4 && <Button variant="primary" onClick={() => onDone(`Imported ${sf.name} into ${isNew ? newLabel.trim() : ws.accounts.find((a) => a.id === accountId)?.label}`, result!.ws, review, p.batchId)}>Done</Button>}</>}>
       <ol className="steps" aria-label="Import steps">{STEPS.map((s, i) => <li key={s} className={cx(i === step && 'on', i < step && 'done')} aria-current={i === step ? 'step' : undefined}>{s}</li>)}</ol>
       {step === 0 && <fieldset className="add-list"><legend className="l">Choose a file</legend>
         {SAMPLE_FILES.map((x) => <label key={x.name} className={cx('choice', file === x.name && 'on')}><input type="radio" name="file" checked={file === x.name} onChange={() => setFile(x.name)} /><span>{x.name} <Chip>Sample file</Chip><small>{x.about} · {x.rows.length} rows</small></span></label>)}
@@ -554,4 +559,14 @@ function Coverage({ ws }: { ws: Workspace }) {
           <p className="t3 chart-note">These records don’t feed the figures above. With a Scevia account, coverage, discrepancies and provider-reported vs. reconstructed values will come from your own records. <Link to="/portfolio/imports">Imports & reconciliation →</Link></p></div></Card>
     </div>
   </>)
+}
+
+/** Why a duplicate link doesn't hold (shown on a record that needs review). */
+function linkProblem(r: R.ManagedRecord, all: R.ManagedRecord[]) {
+  const t = all.find((x) => x.key === r.duplicateOf)
+  if (!t) return `its original (${r.duplicateOf}) no longer exists`
+  if (t.duplicateOf) return `its original (${t.key}) is itself marked as a duplicate`
+  const st = R.statusOf(t, all)
+  if (st !== 'included') return `its original (${t.key}) is ${R.STATUS_LABEL[st].toLowerCase()}`
+  return `its original (${t.key}) has changed since you linked it`
 }

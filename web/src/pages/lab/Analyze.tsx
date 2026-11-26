@@ -13,7 +13,8 @@ import { fmt, pct, qty, sfmt } from '../../lib/format'
 import { fmtPrice } from '../../lib/inputs'
 import { PairBars, RangeRows, StackBars, Waterfall, type StackSeg } from './charts'
 import { Dumbbell, OutcomeMatrix } from './Impact'
-import { describe, type Evaluation } from './model'
+import type { Evaluation } from './model'
+import { accountName } from '../../lib/useWorkspace'
 
 const DATA = ['var(--color-data-1)', 'var(--color-data-2)', 'var(--color-data-3)', 'var(--color-data-4)', 'var(--color-data-5)', 'var(--color-data-6)']
 const PLAT_COLOR: Record<Platform, string> = { pm: 'var(--color-data-1)', ks: 'var(--color-data-3)' }
@@ -244,10 +245,9 @@ function PositionDetail({ E, focus, onClear, onEdit }: { E: Evaluation; focus: {
         <thead><tr><th scope="col">Position</th><th scope="col" className="r">Start</th><th scope="col" className="r">Scenario</th><th scope="col" className="r">Trade</th><th scope="col" className="r">Notional</th><th scope="col" className="r">Est. fee</th><th scope="col" className="r">Value at mark</th><th scope="col" className="r">Cost basis</th><th scope="col"><span className="sr-only">Edit</span></th></tr></thead>
         <tbody>{rows.map((r) => {
           const h = r.a ?? r.b, val = r.a && r.a.shares > 0 ? (r.a.mark == null ? null : r.a.shares * r.a.mark) : 0, fs = S.feeStatusBy[r.id]
-          const d = describe({ id: r.id, to: null, price: null, instrument: undefined })
           return (
             <tr key={r.id}>
-              <td className="mkt"><span className="row"><PlatformBadge p={h.platform} size={18} /><span>{h.title}</span><SideChip side={h.side} />{h.isNew && <Chip tone="accent">New</Chip>}</span><small className="t3 cell-sub">{h.accountId ? d.account?.label ?? '' : `${PLATFORM_NAME[h.platform]} · scenario cash`}</small></td>
+              <td className="mkt"><span className="row"><PlatformBadge p={h.platform} size={18} /><span>{h.title}</span><SideChip side={h.side} />{h.isNew && <Chip tone="accent">New</Chip>}</span><small className="t3 cell-sub">{h.accountId ? accountName(h.accountId) : `${PLATFORM_NAME[h.platform]} · scenario cash`}</small></td>
               <td className="r t2">{qty(r.b?.shares ?? 0)}</td><td className="r">{qty(r.a?.shares ?? 0)}</td>
               <td className="r">{r.t ? `${r.t.qty > 0 ? 'Buy' : 'Sell'} ${qty(Math.abs(r.t.qty))} @ ${fmtPrice(r.t.price)}` : <span className="t3">—</span>}</td>
               <td className="r">{r.t ? fmt(Math.abs(r.t.qty) * r.t.price, 2) : '—'}</td>

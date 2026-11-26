@@ -7,9 +7,10 @@ import { Button, Callout, Chip, PlatformBadge, Seg, SideChip, Tabs, cx } from '.
 import { MARKET_CATALOG } from '../../data/markets'
 import { CATEGORIES, PLATFORM_NAME } from '../../data/labels'
 import type { Category, Platform } from '../../data/types'
-import { POSITIONS, accountOf, fmtDate, holdingsOfInstrument, instrumentKey, instrumentOfPosition, type Adjustment, type Baseline, type InstrumentRef, type Position } from '../../lib/finance'
+import { POSITIONS, fmtDate, holdingsOfInstrument, instrumentKey, instrumentOfPosition, type Adjustment, type Baseline, type InstrumentRef, type Position } from '../../lib/finance'
 import { qty } from '../../lib/format'
 import { instrumentFrom, type CatalogEvent, type LinkResolution } from '../../lib/markets'
+import { accountName } from '../../lib/useWorkspace'
 
 type Source = 'Your holdings' | 'Search markets' | 'Paste link'
 /** One pick: an instrument, and the actual holding it refers to when picked from your holdings (account-specific). */
@@ -81,7 +82,7 @@ function Holdings({ baseline, inScenario, isPicked, toggle }: PickProps & { base
           <label className={cx('addpos-item', 'pickable', on && 'on', already && 'is-disabled')} role="listitem" key={pk.key}>
             <input type="checkbox" checked={already || on} disabled={already} onChange={() => toggle(pk)} aria-label={`Select ${p.market} ${p.side}`} />
             <PlatformBadge p={p.platform} />
-            <span className="addpos-t"><b>{p.market}</b><small className="t3"><SideChip side={p.side} /> {qty(p.shares)} shares · mark {p.mark.toFixed(2)} · {PLATFORM_NAME[p.platform]} · {accountOf(p.accountId)?.label ?? 'account unknown'}</small></span>
+            <span className="addpos-t"><b>{p.market}</b><small className="t3"><SideChip side={p.side} /> {qty(p.shares)} shares · mark {p.mark.toFixed(2)} · {PLATFORM_NAME[p.platform]} · {accountName(p.accountId)}</small></span>
             <small className="t3">{already ? 'In scenario' : ''}</small>
           </label>
         )

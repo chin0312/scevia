@@ -18,7 +18,7 @@ export function useNotificationsList() {
   const ws = useWorkspaceSnapshot()
   const [local, setLocal] = useState(readLocalEvents)
   useEffect(() => { const on = () => setLocal(readLocalEvents()); window.addEventListener(WORKSPACE_EVENT, on); return () => window.removeEventListener(WORKSPACE_EVENT, on) }, [])
-  const list = useMemo(() => deriveNotifications(settings, ws.records, local), [settings, ws.records, local])
+  const list = useMemo(() => deriveNotifications(settings, ws.records, local, new Set(ws.batches.map((b) => b.id))), [settings, ws.records, ws.batches, local])
   const [read, setRead] = useSessionState<string[]>('scevia-notif-read', [], (v) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : null))
   const readSet = new Set(read)
   const markRead = (ids: string[]) => setRead((r) => [...new Set([...r, ...ids])].slice(-500))
@@ -48,7 +48,7 @@ export function NotificationCentre() {
             <div key={n.id} className={cx('notif-item', !isRead(n) && 'unread')}>
               <button type="button" role="menuitem" className="menu-i notif" onClick={() => { close(); markRead([n.id]); if (n.detail) details.open(n.detail); else if (n.to) nav(n.to) }}>
                 <span className={`ic ${n.tone}`}><Icon name={n.icon} size={14} /></span>
-                <span><b>{n.title}</b><small>{n.body}</small><small className="notif-meta">{CATEGORY_LABEL[n.category]} · {ago(n.at)}{n.origin === 'sample' ? ' · sample' : ''}</small></span>
+                <span><b>{n.title}</b><small>{n.body}</small><small className="notif-meta">{CATEGORY_LABEL[n.category]} · {ago(n.at)} · {n.origin === 'sample' ? 'sample portfolio' : 'this tab'}</small></span>
               </button>
               {!isRead(n) && <button type="button" role="menuitem" className="icon-btn notif-dot" aria-label={`Mark “${n.title}” as read`} title="Mark as read" onClick={() => markRead([n.id])}><span /></button>}
             </div>

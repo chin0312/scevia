@@ -31,7 +31,7 @@ export interface Notif {
   origin: 'sample' | 'local'
 }
 
-export function deriveNotifications(s: Settings, records: ManagedRecord[], local: LocalEvent[]): Notif[] {
+export function deriveNotifications(s: Settings, records: ManagedRecord[], local: LocalEvent[], batchIds?: Set<string>): Notif[] {
   const out: Notif[] = [], A = s.alerts
   const exps = exposures('all'), total = exps.reduce((a, e) => a + e.cost, 0)
   // One alert per event (not per contract): the same Fed decision on two venues is one resolution.
@@ -52,6 +52,7 @@ export function deriveNotifications(s: Settings, records: ManagedRecord[], local
     const review = records.filter((r) => statusOf(r, records) === 'review').length
     if (review) out.push({ id: `review:${review}:${records.length}`, category: 'imports', title: `${review} record${review === 1 ? ' needs' : 's need'} review`, body: 'Sample records workspace · they don’t count until you decide', at: `${TODAY}T08:00:00Z`, icon: 'list', tone: 'warn', scope: 'account', to: '/portfolio/transactions?status=review', origin: 'local' })
   }
-  if (A.imports) for (const e of local) out.push({ id: e.id, category: 'imports', title: e.title, body: e.body, at: e.at, icon: 'download', tone: 'accent', scope: 'account', to: e.to, origin: 'local' })
+  // Local import activity is shown only while its batch still exists (an undone import takes its event with it).
+  if (A.imports) for (const e of local.filter((x) => !x.batchId || !batchIds || batchIds.has(x.batchId))) out.push({ id: e.id, category: 'imports', title: e.title, body: e.body, at: e.at, icon: 'download', tone: 'accent', scope: 'account', to: e.to, origin: 'local' })
   return out.sort((a, b) => b.at.localeCompare(a.at) || a.id.localeCompare(b.id))
 }

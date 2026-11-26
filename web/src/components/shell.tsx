@@ -5,12 +5,12 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNod
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { TODAY } from '../data/portfolio'
 import { PLATFORM_NAME } from '../data/labels'
-import { ACCOUNTS, POSITIONS, accountOf, exposures, fmtDate, sourceOf } from '../lib/finance'
+import { ACCOUNTS, POSITIONS, exposures, fmtDate, sourceOf } from '../lib/finance'
 import { qty } from '../lib/format'
 import { TYPE_LABEL } from '../lib/records'
 import { SettingsProvider, useSettings, type SettingsTab } from '../lib/settings'
 import { readStored } from '../lib/storage'
-import { useWorkspaceSnapshot } from '../lib/useWorkspace'
+import { accountName, useWorkspaceSnapshot } from '../lib/useWorkspace'
 import { AccountMenu, PrivacyDialog } from './Account'
 import { DetailProvider, useDetails, type Detail } from './details'
 import { HelpCentre, type HelpTab } from './Help'
@@ -60,7 +60,7 @@ function TopNav({ open }: { open: Overlays }) {
           {(close) => (<>
             <div className="menu-h"><span>Sample portfolio<small>Fictional data · valued at {fmtDate(TODAY)} marks · {ACCOUNTS.length} accounts{stale ? ` · ${stale} stale` : ''}</small></span></div>
             {ACCOUNTS.map((a) => { const src = sourceOf(a.venue); return (
-              <div className="menu-row acct-row" key={a.id}><span className="row"><PlatformBadge p={a.venue} size={18} /><span className="acct-name">{a.label}</span></span><small className={src.stale ? 'stale' : 't3'}>{src.stale ? 'stale · ' : ''}{fmtDate(src.asOf)}</small></div>
+              <div className="menu-row acct-row" key={a.id}><span className="row"><PlatformBadge p={a.venue} size={18} /><span className="acct-name">{accountName(a.id)}</span></span><small className={src.stale ? 'stale' : 't3'}>{src.stale ? 'stale · ' : ''}{fmtDate(src.asOf)}</small></div>
             ) })}
             <div className="menu-row t3 menu-note">This is your only portfolio. Separate portfolios come with a Scevia account.</div>
             <div className="menu-sep" />
@@ -122,7 +122,7 @@ function CommandPalette({ onClose, open }: { onClose: () => void; open: Overlays
       ...AREAS.map((a) => ({ id: `page:${a.to}`, group: 'Pages', label: a.label, sub: 'Page', icon: 'home' as IconName, keys: '', go: to(a.to) })),
       ...PORTFOLIO_SECTIONS.map((s) => ({ id: `pf:${s.id}`, group: 'Portfolio', label: s.label, sub: s.sub, icon: s.icon, keys: 'portfolio manage', go: to(`/portfolio/${s.id}`) })),
       ...ws.accounts.map((a) => ({ id: `acct:${a.id}`, group: 'Accounts', label: a.label, sub: `${PLATFORM_NAME[a.venue]} · ${a.kind}${a.inAnalytics ? '' : ' · records only'}`, icon: 'db' as IconName, keys: `${PLATFORM_NAME[a.venue]} ${a.connection ?? ''} account wallet`.toLowerCase(), go: to(`/portfolio/transactions?account=${encodeURIComponent(a.id)}`) })),
-      ...POSITIONS.map((p) => ({ id: `pos:${p.id}`, group: 'Positions', label: p.market, sub: `${p.side} · ${qty(p.shares)} shares · ${PLATFORM_NAME[p.platform]} · ${accountOf(p.accountId)?.label ?? ''}`, icon: 'layers' as IconName, keys: `${p.category} ${p.eventId} ${p.side}`.toLowerCase(), go: det({ kind: 'position', id: p.id }) })),
+      ...POSITIONS.map((p) => ({ id: `pos:${p.id}`, group: 'Positions', label: p.market, sub: `${p.side} · ${qty(p.shares)} shares · ${PLATFORM_NAME[p.platform]} · ${accountName(p.accountId)}`, icon: 'layers' as IconName, keys: `${p.category} ${p.eventId} ${p.side}`.toLowerCase(), go: det({ kind: 'position', id: p.id }) })),
       ...exposures().map((x) => ({ id: `evt:${x.event.id}`, group: 'Events', label: x.event.name, sub: `${x.positions.length} contract${x.positions.length > 1 ? 's' : ''} · resolves ${fmtDate(x.resolves)}`, icon: 'target' as IconName, keys: `${x.event.short} ${x.event.category}`.toLowerCase(), go: det({ kind: 'event', id: x.event.id }) })),
       ...ws.records.map((r) => { const a = ws.accounts.find((x) => x.id === r.accountId); return { id: `rec:${r.key}`, group: 'Transactions', label: `${TYPE_LABEL[r.type]}${r.instrument ? ` · ${r.instrument} ${r.side ?? ''}` : ''}`, sub: `${a?.label ?? ''} · ${fmtDate(r.time.slice(0, 10))} · ${r.key}`, icon: 'list' as IconName, keys: `${r.key} ${r.sourceRef} ${r.batchId ?? ''} record transaction`.toLowerCase(), go: to(`/portfolio/transactions?q=${encodeURIComponent(r.key)}`) } }),
       ...scenarios.map((s) => ({ id: `scn:${s.key}`, group: 'Scenarios', label: s.name, sub: `Scenario · ${s.baseline === 'scratch' ? 'from scratch' : 'from current portfolio'} · ${s.adjs?.length ?? 0} positions`, icon: 'flask' as IconName, keys: 'scenario', go: to(`/scenario-lab?open=${encodeURIComponent(s.key)}`) })),

@@ -112,3 +112,61 @@ describe('stored workspace validation', () => {
     expect(R.readWorkspace({ v: 2, accounts: [], records: [], batches: [] })).toBeNull()
   })
 })
+
+describe('duplicate links hold only against an included, unchanged original', () => {
+  it('an original that still needs review can’t be linked, and a link to one doesn’t count as a duplicate', () => {
+    const p = R.previewImport(SAMPLE_FILES[0], 'pm-main', 'supplement', base(), SAMPLE_BATCHES, 'b2')
+    const rs = R.confirmImport(base(), SAMPLE_BATCHES, p, false, 'now').records // all imported rows in review
+    expect(R.markDuplicate(rs, 'a-002', 'b2#4')).toBeNull()
+    const forced = rs.map((r) => (r.key === 'a-007' ? { ...r, duplicateOf: 'b2#4', duplicateFp: null } : r))
+    expect(st(forced, 'a-007')).toBe('review') // never silently excluded as a duplicate of an unresolved record
+  })
+  it('a material correction of the original sends the duplicate back to review', () => {
+    // Both are Wallet B buys; the user may link them (an included original is required).
+    let rs = R.markDuplicate(base(), 'batch-1#3', 'batch-1#2')!
+    expect(st(rs, 'batch-1#3')).toBe('duplicate')
+    rs = R.correct(rs, 'batch-1#2', { quantity: 2500 })
+    expect(st(rs, 'batch-1#3')).toBe('review')
+    rs = R.apply(rs, ['batch-1#2'], 'reset_correction')
+    expect(st(rs, 'batch-1#3')).toBe('duplicate') // back to the terms it was linked against
+  })
+  it('a replaced original with different source values breaks the link; changed rows don’t inherit corrections or links', () => {
+    const file = { ...SAMPLE_FILES[1], rows: SAMPLE_FILES[1].rows.map((r) => ({ ...r })) }
+    let c = R.confirmImport(base(), SAMPLE_BATCHES, R.previewImport(file, 'acc-x', 'independent', base(), SAMPLE_BATCHES, 'x1'), true, 'now')
+    let rs = R.markDuplicate(R.apply(c.records, ['x1#3'], 'exclude'), 'x1#2', 'x1#1') // a buy can't duplicate a deposit
+    expect(rs).toBeNull()
+    rs = R.correct(R.apply(c.records, ['x1#3'], 'exclude'), 'x1#2', { fee: 1 })
+    const changed = { ...file, rows: file.rows.map((r, i) => (i === 1 ? { ...r, quantity: 2100 } : r)) }
+    const p = R.previewImport(changed, 'acc-x', 'independent', rs, c.batches, 'x2')
+    expect(p.rows.map((r) => r.changed)).toEqual([false, true, false])
+    c = R.confirmImport(rs, c.batches, p, true, 'later')
+    const r2 = c.records.find((r) => r.key === 'x2#2')!
+    expect([r2.correction, r2.initial]).toEqual([null, 'review']) // changed evidence: no inherited correction, review
+    expect(st(c.records, 'x2#3')).toBe('excluded') // unchanged row keeps its exclusion
+  })
+})
+
+describe('bulk preview includes indirect effects', () => {
+  it('excluding an original reports the linked duplicate as indirectly affected, without deciding for it', () => {
+    const rs = R.markDuplicate(base(), 'a-007', 'a-006')!
+    const p = R.preview(rs, ['a-006'], 'exclude')
+    expect(p.changed).toEqual(['a-006']); expect(p.indirect).toEqual(['a-007']); expect(p.toReview).toEqual(['a-007'])
+    const after = R.applyPreview(rs, p, 'exclude')
+    expect(after.find((r) => r.key === 'a-007')!.membership).toBeNull() // no decision applied to it
+    expect(st(after, 'a-007')).toBe('review')
+    expect(p.cash['pm-main']).toBeCloseTo(2000 * 0.58) // the excluded purchase only; the duplicate wasn't counted before or after
+  })
+})
+
+describe('stored corrections are validated', () => {
+  it('malformed corrections are dropped without losing the record; unknown batch references are repaired', () => {
+    const good = R.fromRecords(SAMPLE_RECORDS)
+    const bad = [{ ...good[1], correction: { quantity: -5 } }, { ...good[2], correction: { evil: 1 } }, { ...good[3], correction: { price: 0.4, time: 'not a date' } }, { ...good[4], correction: { fee: 2 } }, { ...good[10], batchId: 'missing' }]
+    const w = R.readWorkspace({ v: 2, accounts: SAMPLE_ACCOUNTS, batches: SAMPLE_BATCHES, records: [...bad, ...good.filter((r) => !bad.some((b) => b.key === r.key))] })!
+    const by = (k: string) => w.records.find((r) => r.key === k)!
+    expect([by(good[1].key).correction, by(good[2].key).correction, by(good[3].key).correction]).toEqual([null, null, null])
+    expect(by(good[4].key).correction).toEqual({ fee: 2 })
+    expect(by(good[10].key).batchId).toBeNull()
+    expect(w.records).toHaveLength(good.length); expect(w.repaired).toBe(4); expect(w.dropped).toBe(0)
+  })
+})

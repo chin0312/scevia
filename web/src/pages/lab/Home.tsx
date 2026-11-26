@@ -12,6 +12,7 @@ import { parseMoney } from '../../lib/inputs'
 import * as SC from '../../lib/scenarios'
 import type { Scenario } from '../../lib/scenarios'
 import { EXAMPLES, type Evaluation } from './model'
+import { accountName } from '../../lib/useWorkspace'
 
 export function LabHome({ scenarios, evals, onCurrent, onScratch, onOpen, onExample }: {
   scenarios: Scenario[]; evals: Record<string, Evaluation>
@@ -38,7 +39,7 @@ export function LabHome({ scenarios, evals, onCurrent, onScratch, onOpen, onExam
             <div><dt>Cash</dt><dd>{fmt(a.cash)}</dd></div>
             <div><dt>Positions</dt><dd>{POSITIONS.length} <small className="t3">in {events} events</small></dd></div>
           </dl>
-          <div className="start-accts">{ACCOUNTS.map((x) => <span key={x.id} className="row"><PlatformBadge p={x.venue} size={16} />{PLATFORM_NAME[x.venue]} · {x.label}</span>)}</div>
+          <div className="start-accts">{ACCOUNTS.map((x) => <span key={x.id} className="row"><PlatformBadge p={x.venue} size={16} />{PLATFORM_NAME[x.venue]} · {accountName(x.id)}</span>)}</div>
           <small className="t3">Sample portfolio as of {fmtDate(TODAY)}. Your actual holdings are never changed.</small>
           <Button variant="primary" icon="layers" onClick={onCurrent}>Modify current portfolio</Button>
         </section>

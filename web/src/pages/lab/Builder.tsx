@@ -14,6 +14,7 @@ import { fmtDate, type Adjustment, type Holding, type Simulation } from '../../l
 import { fmt, pct, qty, sfmt } from '../../lib/format'
 import { fmtPrice, parseMoney, parsePct, parsePrice, parseShares, type Parsed } from '../../lib/inputs'
 import { SIZE_LABEL, describe, type Evaluation, type SizeMode } from './model'
+import { accountName } from '../../lib/useWorkspace'
 
 const valueOf = (p: Parsed) => (p.state === 'ok' ? p.value : p.state === 'invalid' ? Number.NaN : null)
 const PARSE: Record<SizeMode, (t: string) => Parsed> = { shares: parseShares, amount: parseMoney, weight: parsePct }
@@ -83,7 +84,7 @@ export function PositionRow({ a, start, after, sim, error, mode, selected, onSel
         <span className="brow-t"><b title={d.title}>{d.title}</b>
           <small className="t3"><SideChip side={d.side} />{isNew ? <Chip tone="accent">New</Chip> : <Chip>Held</Chip>}
             {d.refPrice != null ? `ref ${fmtPrice(d.refPrice)}${d.sample ? ' (sample)' : ''}` : 'no reference price'}{d.resolves ? ` · resolves ${fmtDate(d.resolves)}` : ''}</small>
-          <small className="t3">{d.account ? `${PLATFORM_NAME[d.platform]} · ${d.account.label}` : `Funded from ${PLATFORM_NAME[d.platform]} cash in this scenario`}</small></span>
+          <small className="t3">{d.account ? `${PLATFORM_NAME[d.platform]} · ${accountName(d.account.id)}` : `Funded from ${PLATFORM_NAME[d.platform]} cash in this scenario`}</small></span>
       </div>
       <div className="brow-n r" role="cell"><span className="brow-l">Current</span>{qty(from)}</div>
       <div className="brow-f" role="cell"><label className="brow-l" htmlFor={`q-${a.id}`}>Target ({SIZE_LABEL[mode]})</label>

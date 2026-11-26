@@ -12,6 +12,7 @@ import { fmt } from '../../lib/format'
 import { parseMoney, parsePct } from '../../lib/inputs'
 import type { Scenario } from '../../lib/scenarios'
 import { eventsIn, type Evaluation } from './model'
+import { accountName } from '../../lib/useWorkspace'
 
 type Patch = Partial<Pick<Scenario, 'baseline' | 'funding' | 'assumptions'>>
 
@@ -44,7 +45,7 @@ export function StartSetup({ s, E, onChange, onBaseline }: { s: Scenario; E: Eva
           <div className="row" style={{ gap: 'var(--space-2)', flexWrap: 'wrap' }}>
             {(['pm', 'ks'] as Platform[]).map((p) => <FundingInput key={p} p={p} value={s.funding[p]} onChange={(v) => onChange({ funding: { ...s.funding, [p]: v } })} />)}
           </div>
-          <small className="t3">Contributed capital, added to {(['pm', 'ks'] as Platform[]).map((p) => `${PLATFORM_NAME[p]} · ${accountsOn(p)[0]?.label ?? 'account'}`).join(' and ')}. It raises cash and the starting value, is never a gain, and isn’t moved between accounts.</small>
+          <small className="t3">Contributed capital, added to {(['pm', 'ks'] as Platform[]).map((p) => `${PLATFORM_NAME[p]} · ${accountName(accountsOn(p)[0]?.id) || 'account'}`).join(' and ')}. It raises cash and the starting value, is never a gain, and isn’t moved between accounts.</small>
         </fieldset>
       </div>
     </Card>
@@ -139,7 +140,7 @@ function FundingInput({ p, value, onChange }: { p: Platform; value?: number; onC
   const invalid = parsed.state === 'invalid' || (value != null && !validFunding(value))
   const acct = accountsOn(p)
   return (
-    <label className={cx('fund', invalid && 'has-error')} title={acct.length === 1 ? `${PLATFORM_NAME[p]} · ${acct[0].label}` : undefined}><PlatformBadge p={p} size={18} />
+    <label className={cx('fund', invalid && 'has-error')} title={acct.length === 1 ? `${PLATFORM_NAME[p]} · ${accountName(acct[0].id)}` : undefined}><PlatformBadge p={p} size={18} />
       <span className="sr-only">Added capital on {PLATFORM_NAME[p]}</span>
       <input className="num-input" inputMode="decimal" placeholder={`${PLATFORM_NAME[p]} $`} aria-label={`Added capital on ${PLATFORM_NAME[p]}`} aria-invalid={invalid} value={text}
         onChange={(e) => { const t = e.target.value; setText(t); const r = parseMoney(t); onChange(r.state === 'empty' ? undefined : r.state === 'ok' ? r.value : Number.NaN) }} />
