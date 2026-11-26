@@ -65,6 +65,12 @@ export class KalshiMarketDataService {
       || from < 0 || through > 8_640_000_000_000 || from >= through || (through - from) / (minutes * 60) > 500) {
       throw new ProviderAdapterError('kalshi_history_range_invalid', false)
     }
+    const detail = z.object({ market: z.unknown() }).parse(
+      await this.client.read('historicalMarket', new URLSearchParams(), signal, marketTicker))
+    const market = normalizeKalshiMarket(detail.market)
+    if (market.kind !== 'market' || market.externalMarketId !== marketTicker) {
+      throw new ProviderAdapterError('kalshi_market_identity_mismatch', false)
+    }
     const query = new URLSearchParams({ start_ts: String(from), end_ts: String(through), period_interval: String(minutes) })
     const response = z.object({ ticker, candlesticks: z.array(z.object({ end_period_ts: z.number().int().safe(),
       price: z.object({ close: decimalTextSchema.nullable() }) })).max(501) })

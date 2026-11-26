@@ -32,6 +32,9 @@ describe('restricted Kalshi contracts', () => {
   })
   it('preserves missing historical closes and labels NO complements', async () => {
     const service = new KalshiMarketDataService(new KalshiClient(async (url) => {
+      if (url.pathname === '/trade-api/v2/historical/markets/KX-V1') return Response.json({ market: {
+        ticker: 'KX-V1', event_ticker: 'KX-EVENT', title: 'Synthetic archive', market_type: 'binary', status: 'finalized',
+      } })
       expect(url.pathname).toBe('/trade-api/v2/historical/markets/KX-V1/candlesticks')
       return Response.json({ ticker: 'KX-V1', candlesticks: [{ end_period_ts: 120, price: { close: '0.41' } },
         { end_period_ts: 180, price: { close: null } }] })
