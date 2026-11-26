@@ -123,6 +123,7 @@ describe('migrations and canonical persistence', () => {
     const fill = { fill_id: 'fixture-fill', market_ticker: nativeMarket.ticker, action: 'buy', side: 'no', outcome_side: 'no',
       count_fp: '2.5', yes_price_dollars: '0.6', no_price_dollars: '0.4', fee_cost: '0.1', created_time: '2026-11-25T01:00:00Z' }
     let emptyPositions = false
+    let interruptPositions = false
     const seen: string[] = []
     const client = new KalshiClient(async (url, request) => {
       expect(request.method).toBe('GET')
@@ -131,10 +132,19 @@ describe('migrations and canonical persistence', () => {
       if (path === '/markets') return Response.json({ markets: [nativeMarket], cursor: '' })
       if (path === '/markets/KX-FIXTURE') return Response.json({ market: nativeMarket })
       if (path === '/portfolio/fills' || path === '/historical/fills') return Response.json({ fills: [fill], cursor: '' })
-      if (path === '/portfolio/positions') return Response.json({ market_positions: emptyPositions ? [] :
+      if (path === '/historical/positions') return Response.json({ market_positions: [{ ticker: nativeMarket.ticker,
+        position_fp: '0', market_exposure_dollars: '0', last_updated_ts: '2026-11-20T00:00:00Z' }], cursor: '' })
+      if (path === '/portfolio/positions' && interruptPositions && url.searchParams.get('settlement_status') === 'unsettled') {
+        return url.searchParams.has('cursor') ? Response.json({}, { status: 400 }) : Response.json({ market_positions: [], cursor: 'next-position' })
+      }
+      if (path === '/portfolio/positions') return Response.json({ market_positions: emptyPositions || url.searchParams.get('settlement_status') === 'settled' ? [] :
         [{ ticker: nativeMarket.ticker, position_fp: '-2.5', market_exposure_dollars: '1' }], cursor: '' })
       if (path === '/portfolio/balance') return Response.json({ balance: 9890, updated_ts: 1795568400 })
       if (path === '/portfolio/settlements') return Response.json({ settlements: [], cursor: '' })
+      if (path === '/portfolio/deposits') return Response.json({ deposits: [{ id: 'pending-cash', status: 'pending', type: 'ach',
+        amount_cents: 250, fee_cents: 0, created_ts: 1795568400 }], cursor: '' })
+      if (path === '/portfolio/withdrawals') return Response.json({ withdrawals: [], cursor: '' })
+      if (path === '/portfolio/credit_history') return Response.json({ credits: [], cursor: '' })
       throw new Error('Unexpected fixture endpoint')
     })
     const app = await buildApp({ config: testConfig(), database, registry: new ProviderRegistry([new KalshiAdapter(() => client)]),
@@ -151,9 +161,18 @@ describe('migrations and canonical persistence', () => {
     const first = await sync()
     expect(first.statusCode, first.body).toBe(200)
     expect(seen).toContain('/trade-api/v2/historical/fills')
+    expect(seen).toContain('/trade-api/v2/historical/positions')
+    expect(await database.select().from(providerActivityFacts).where(eq(providerActivityFacts.providerAccountId, account!.id)))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ activityType: 'HISTORICAL_POSITION' }),
+        expect.objectContaining({ activityType: 'CASH_STATUS_OBSERVATION', amount: '2.500000000000000000' })]))
     expect(await database.select().from(fills).where(eq(fills.providerAccountId, account!.id))).toHaveLength(1)
     const current = await app.inject({ method: 'GET', url: prefix + '/positions', headers })
     expect(current.json().items).toMatchObject([{ quantity: '2.500000000000000000' }])
+    interruptPositions = true
+    const interrupted = await sync()
+    expect(interrupted.json().status).toBe('partial')
+    expect((await app.inject({ method: 'GET', url: prefix + '/positions', headers })).json().items).toMatchObject([{ quantity: '2.500000000000000000' }])
+    interruptPositions = false
     emptyPositions = true
     expect((await sync()).statusCode).toBe(200)
     expect((await app.inject({ method: 'GET', url: prefix + '/positions', headers })).json().items).toEqual([])

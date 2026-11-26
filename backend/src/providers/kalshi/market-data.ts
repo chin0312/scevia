@@ -58,6 +58,26 @@ export class KalshiMarketDataService {
     })
     return { provider: 'kalshi', items, nextCursor: page.cursor || null, partial: items.length !== page.markets.length }
   }
+  async historicalPrices(input: { marketTicker: string; side: 'yes' | 'no'; from: number; through: number; minutes: number }, signal: AbortSignal) {
+    const { marketTicker, side, from, through, minutes } = input
+    ticker.parse(marketTicker)
+    if (![1, 60, 1440].includes(minutes) || !Number.isSafeInteger(from) || !Number.isSafeInteger(through)
+      || from < 0 || through > 8_640_000_000_000 || from >= through || (through - from) / (minutes * 60) > 500) {
+      throw new ProviderAdapterError('kalshi_history_range_invalid', false)
+    }
+    const query = new URLSearchParams({ start_ts: String(from), end_ts: String(through), period_interval: String(minutes) })
+    const response = z.object({ ticker, candlesticks: z.array(z.object({ end_period_ts: z.number().int().safe(),
+      price: z.object({ close: decimalTextSchema.nullable() }) })).max(501) })
+      .parse(await this.client.read('historicalCandles', query, signal, marketTicker))
+    if (response.ticker !== marketTicker) throw new ProviderAdapterError('kalshi_market_identity_mismatch', false)
+    const items = response.candlesticks.filter((row) => row.end_period_ts >= from && row.end_period_ts <= through).map((row) => {
+      const price = row.price.close == null ? null : new Decimal(row.price.close)
+      return { timestamp: new Date(row.end_period_ts * 1000).toISOString(),
+        price: !price || price.isNegative() || price.gt(1) ? null : (side === 'yes' ? price : new Decimal(1).minus(price)).toFixed() }
+    })
+    return { provider: 'kalshi', marketTicker, outcome: side, asset: 'USD', evidence: side === 'yes' ? 'archived_yes_close' : 'archived_yes_close_complement',
+      continuousCoverage: 'unverified', items }
+  }
   async resolve(link: string, signal: AbortSignal) {
     const reference = parseKalshiLink(link)
     if (reference.kind === 'event') return this.list(reference.ticker, undefined, signal)

@@ -1,7 +1,7 @@
 import { generateKeyPairSync, verify } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import { KalshiClient, kalshiSigner } from '../src/providers/kalshi/client.js'
-import { parseKalshiLink } from '../src/providers/kalshi/market-data.js'
+import { KalshiMarketDataService, parseKalshiLink } from '../src/providers/kalshi/market-data.js'
 import { parseMappedKalshiCsv } from '../src/accounting/kalshi-csv.js'
 
 const signal = new AbortController().signal
@@ -23,6 +23,21 @@ describe('restricted Kalshi contracts', () => {
     await expect(client.verifyReadOnly(signal)).rejects.toThrow('kalshi_read_scope_unverified')
     await expect(client.read('orders' as never, new URLSearchParams(), signal)).rejects.toThrow('kalshi_read_not_allowlisted')
     await expect(client.read('market', new URLSearchParams(), signal, '../orders')).rejects.toThrow('kalshi_invalid_ticker')
+  })
+  it('classifies rate limits for bounded ingestion retry', async () => {
+    const client = new KalshiClient(async () => Response.json({}, { status: 429, headers: { 'Retry-After': '2' } }))
+    await expect(client.read('fills', new URLSearchParams(), signal)).rejects.toMatchObject({
+      code: 'kalshi_http_429', retryable: true, retryAfterMs: 2000,
+    })
+  })
+  it('preserves missing historical closes and labels NO complements', async () => {
+    const service = new KalshiMarketDataService(new KalshiClient(async (url) => {
+      expect(url.pathname).toBe('/trade-api/v2/historical/markets/KX-V1/candlesticks')
+      return Response.json({ ticker: 'KX-V1', candlesticks: [{ end_period_ts: 120, price: { close: '0.41' } },
+        { end_period_ts: 180, price: { close: null } }] })
+    }))
+    const result = await service.historicalPrices({ marketTicker: 'KX-V1', side: 'no', from: 60, through: 180, minutes: 1 }, signal)
+    expect(result).toMatchObject({ evidence: 'archived_yes_close_complement', items: [{ price: '0.59' }, { price: null }] })
   })
   it('requires known public links and explicitly mapped transaction columns', () => {
     expect(parseKalshiLink('https://kalshi.com/events/KX-EXAMPLE')).toEqual({ kind: 'event', ticker: 'KX-EXAMPLE' })

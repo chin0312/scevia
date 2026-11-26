@@ -91,6 +91,7 @@ export async function loadProviderEvidence(db: Pick<Database, 'select' | 'select
   }
   for (const ref of factRows) {
     const row = ref.row
+    if (ref.venue === 'kalshi' && ['HISTORICAL_POSITION', 'CASH_STATUS_OBSERVATION'].includes(row.activityType)) continue
     const knownAt = row.occurredAt ?? ref.firstIngestedAt
     if (knownAt > asOf) continue
     add(ref, { id: null, timestamp: knownAt.toISOString(), type: 'unresolved_activity', asset: row.assetCode ?? 'UNKNOWN',

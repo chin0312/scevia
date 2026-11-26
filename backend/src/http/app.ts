@@ -539,6 +539,18 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       return await kalshiMarketData.list(eventTicker, cursor, request.raw.signal)
     } catch { return reply.code(502).send(errorBody(request.id, 'kalshi_catalog_unavailable', 'Kalshi market evidence is unavailable.')) }
   })
+  app.get<{ Querystring: { marketTicker: string; side: 'yes' | 'no'; from: number; through: number; minutes: number } }>('/v1/market-catalog/kalshi/history', {
+    schema: { tags: ['public market data'], querystring: { type: 'object', required: ['marketTicker', 'side', 'from', 'through', 'minutes'],
+      additionalProperties: false, properties: { marketTicker: { type: 'string', pattern: '^[A-Z0-9][A-Z0-9_-]{0,127}$' },
+        side: { enum: ['yes', 'no'] }, from: { type: 'integer' }, through: { type: 'integer' }, minutes: { type: 'integer', enum: [1, 60, 1440] } } } },
+  }, async (request, reply) => {
+    if (!kalshiMarketData) return reply.code(503).send(errorBody(request.id, 'kalshi_live_disabled', 'Kalshi live access is disabled.'))
+    try { return await kalshiMarketData.historicalPrices(request.query, request.raw.signal) }
+    catch (error) {
+      if (error instanceof ProviderAdapterError && error.code === 'kalshi_history_range_invalid') return reply.code(422).send(errorBody(request.id, error.code, 'Invalid archival range.'))
+      return reply.code(502).send(errorBody(request.id, 'kalshi_history_unavailable', 'Kalshi archive evidence is unavailable.'))
+    }
+  })
   app.post<{ Body: { url: string } }>('/v1/market-catalog/kalshi/resolve', {
     schema: { tags: ['public market data'], body: { type: 'object', required: ['url'], additionalProperties: false,
       properties: { url: { type: 'string', minLength: 1, maxLength: 2048 } } } },
@@ -566,7 +578,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       try {
         if (type === 'kalshi_outcome') {
           if (!kalshiMarketData) throw new ScenarioError('kalshi_live_disabled')
-          return await kalshiMarketData.resolve(url, new AbortController().signal)
+          return await kalshiMarketData.resolve(url, AbortSignal.timeout(8000))
         }
         if (!liveAllowed && !options.marketData) throw new ScenarioError('provider_live_disabled')
         return await marketData.resolve(url)

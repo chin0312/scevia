@@ -4,10 +4,11 @@ import { ProviderAdapterError } from '../adapter.js'
 export const kalshiPaths = {
   keys: '/api_keys', fills: '/portfolio/fills', historicalFills: '/historical/fills',
   positions: '/portfolio/positions', balance: '/portfolio/balance', cutoff: '/historical/cutoff',
-  settlements: '/portfolio/settlements', historicalPositions: '/historical/positions',
+  settlements: '/portfolio/settlements', deposits: '/portfolio/deposits', withdrawals: '/portfolio/withdrawals',
+  credits: '/portfolio/credit_history', historicalPositions: '/historical/positions',
   markets: '/markets', events: '/events',
 } as const
-export type KalshiRead = keyof typeof kalshiPaths | 'market' | 'historicalMarket' | 'event'
+export type KalshiRead = keyof typeof kalshiPaths | 'market' | 'historicalMarket' | 'historicalCandles' | 'event'
 export type KalshiTransport = (url: URL, init: RequestInit) => Promise<Response>
 
 export function kalshiSigner(pem: string) {
@@ -28,9 +29,9 @@ export class KalshiClient {
 
   async read(operation: KalshiRead, query: URLSearchParams, signal: AbortSignal, ticker?: string): Promise<unknown> {
     let path: string
-    if (operation === 'market' || operation === 'historicalMarket' || operation === 'event') {
+    if (operation === 'market' || operation === 'historicalMarket' || operation === 'historicalCandles' || operation === 'event') {
       if (!ticker || !/^[A-Z0-9][A-Z0-9_-]{0,127}$/.test(ticker)) throw new ProviderAdapterError('kalshi_invalid_ticker', false)
-      path = '/' + (operation === 'historicalMarket' ? 'historical/markets' : operation === 'market' ? 'markets' : 'events') + '/' + ticker
+      path = '/' + (operation === 'historicalMarket' || operation === 'historicalCandles' ? 'historical/markets' : operation === 'market' ? 'markets' : 'events') + '/' + ticker + (operation === 'historicalCandles' ? '/candlesticks' : '')
     } else {
       if (!Object.hasOwn(kalshiPaths, operation)) throw new ProviderAdapterError('kalshi_read_not_allowlisted', false)
       path = kalshiPaths[operation]
